@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 运行时配置（含明文密码，禁止提交）
+config/
+
+# 环境变量
+.env
+.env.local
+
+# Claude Code 本地状态
+.claude/
+*.local.json
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 日志
+*.log

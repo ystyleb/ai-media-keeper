@@ -1,0 +1,1241 @@
+// NAS 文件管理器 - 前端逻辑
+
+const API_BASE = "";
+let nasBasePath = "";        // 启动时从 /api/config/app 拉
+let currentPath = "";
+let currentFiles = [];
+let selectedFiles = new Set();
+let deleteModal = null;
+let apiToken = localStorage.getItem("nas_token") || "";
+
+// 初始化
+document.addEventListener("DOMContentLoaded", async () => {
+    deleteModal = new bootstrap.Modal(document.getElementById("deleteModal"));
+
+    // 检查 token
+    if (!apiToken) {
+        apiToken = prompt("请输入 API Token:");
+        if (apiToken) {
+            localStorage.setItem("nas_token", apiToken);
+        } else {
+            alert("需要 API Token 才能使用");
+            return;
+        }
+    }
+
+    // 先拿后端配置（NAS_BASE_PATH），再加载文件列表
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/app`);
+        const cfg = await res.json();
+        nasBasePath = cfg.nas_base_path;
+        currentPath = nasBasePath;
+    } catch (err) {
+        showError(`加载配置失败: ${err.message}`);
+        return;
+    }
+
+    refreshDisk();
+    loadFiles(currentPath);
+});
+
+// API 请求封装
+async function apiFetch(url, options = {}) {
+    const headers = {
+        ...options.headers,
+        "Authorization": `Bearer ${apiToken}`
+    };
+
+    const res = await fetch(url, { ...options, headers });
+
+    if (res.status === 401) {
+        localStorage.removeItem("nas_token");
+        alert("Token 无效或已过期，请刷新页面重新输入");
+        throw new Error("Unauthorized");
+    }
+
+    return res;
+}
+
+// HTML 转义
+function escapeHtml(str) {
+    if (!str) return "";
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+// 安全创建元素
+function createElement(tag, attrs = {}, children = []) {
+    const el = document.createElement(tag);
+    Object.entries(attrs).forEach(([key, value]) => {
+        if (key === "className") {
+            el.className = value;
+        } else if (key === "textContent") {
+            el.textContent = value;
+        } else if (key === "innerHTML") {
+            el.innerHTML = value;
+        } else if (key.startsWith("on")) {
+            el.addEventListener(key.slice(2).toLowerCase(), value);
+        } else {
+            el.setAttribute(key, value);
+        }
+    });
+    children.forEach(child => {
+        if (typeof child === "string") {
+            el.appendChild(document.createTextNode(child));
+        } else if (child) {
+            el.appendChild(child);
+        }
+    });
+    return el;
+}
+
+// ==================== 磁盘信息 ====================
+
+async function refreshDisk() {
+    try {
+        const res = await apiFetch(`${API_BASE}/api/disk`);
+        const data = await res.json();
+        renderDiskCards(data.disks);
+    } catch (err) {
+        console.error("Failed to load disk info:", err);
+    }
+}
+
+function renderDiskCards(disks) {
+    const container = document.getElementById("disk-cards");
+    container.innerHTML = "";
+
+    disks.forEach(disk => {
+        const percent = parseInt(disk.use_percent);
+        const color = percent > 90 ? "danger" : percent > 70 ? "warning" : "success";
+
+        const card = createElement("div", { className: "col-md-6 mb-2" }, [
+            createElement("div", { className: "card disk-card" }, [
+                createElement("div", { className: "card-body py-2" }, [
+                    createElement("div", { className: "d-flex justify-content-between align-items-center mb-1" }, [
+                        createElement("small", { className: "text-secondary", textContent: disk.mount }),
+                        createElement("small", { className: `text-${color}`, textContent: disk.use_percent })
+                    ]),
+                    createElement("div", { className: "progress mb-1" }, [
+                        createElement("div", {
+                            className: `progress-bar bg-${color}`,
+                            style: `width: ${percent}%`
+                        })
+                    ]),
+                    createElement("div", { className: "d-flex justify-content-between" }, [
+                        createElement("small", { className: "text-secondary", textContent: `已用 ${disk.used}` }),
+                        createElement("small", { className: "text-secondary", textContent: `可用 ${disk.available}` }),
+                        createElement("small", { className: "text-secondary", textContent: `总计 ${disk.size}` })
+                    ])
+                ])
+            ])
+        ]);
+
+        container.appendChild(card);
+    });
+}
+
+// ==================== 文件列表 ====================
+
+async function loadFiles(path) {
+    currentPath = path;
+    selectedFiles.clear();
+    updateSelectionUI();
+
+    const loading = document.getElementById("loading");
+    const fileList = document.getElementById("file-list");
+    const emptyState = document.getElementById("empty-state");
+
+    loading.style.display = "block";
+    fileList.innerHTML = "";
+    emptyState.style.display = "none";
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/files?path=${encodeURIComponent(path)}`);
+        const data = await res.json();
+
+        if (data.error) {
+            showError(data.error);
+            return;
+        }
+
+        currentFiles = data.files;
+        updateBreadcrumb(path);
+        renderFiles(data.files);
+    } catch (err) {
+        showError("加载失败: " + err.message);
+    } finally {
+        loading.style.display = "none";
+    }
+}
+
+function renderFiles(files) {
+    const tbody = document.getElementById("file-list");
+    const emptyState = document.getElementById("empty-state");
+    const fileCount = document.getElementById("file-count");
+
+    tbody.innerHTML = "";
+
+    // 添加"返回上级"行（如果不是根目录）
+    if (currentPath !== nasBasePath) {
+        const parentPath = currentPath.substring(0, currentPath.lastIndexOf("/")) || nasBasePath;
+
+        const tr = createElement("tr", { className: "table-active" });
+        const td1 = createElement("td", { className: "checkbox-cell" });
+        tr.appendChild(td1);
+
+        const td2 = createElement("td", { colspan: "4" });
+        const icon = createElement("i", { className: "bi bi-arrow-left-circle file-icon dir" });
+        td2.appendChild(icon);
+        const link = createElement("a", {
+            className: "file-name dir",
+            textContent: ".. 返回上级"
+        });
+        link.addEventListener("click", () => loadFiles(parentPath));
+        td2.appendChild(link);
+        tr.appendChild(td2);
+
+        const td3 = createElement("td");
+        tr.appendChild(td3);
+
+        tbody.appendChild(tr);
+    }
+
+    if (files.length === 0) {
+        emptyState.style.display = "block";
+        fileCount.textContent = "0 个项目";
+        return;
+    }
+
+    emptyState.style.display = "none";
+    fileCount.textContent = `${files.length} 个项目`;
+
+    files.forEach(file => {
+        const icon = getFileIcon(file);
+        const isHardlink = file.hardlinks > 1;
+
+        const tr = createElement("tr", {
+            className: selectedFiles.has(file.path) ? "table-active" : "",
+            dataset: { path: file.path, isDir: file.is_dir.toString() }
+        });
+
+        // 复选框
+        const td1 = createElement("td", { className: "checkbox-cell" });
+        const checkbox = createElement("input", {
+            type: "checkbox",
+            className: "form-check-input file-checkbox"
+        });
+        checkbox.checked = selectedFiles.has(file.path);
+        checkbox.addEventListener("change", () => toggleSelect(file.path, file.size));
+        td1.appendChild(checkbox);
+        tr.appendChild(td1);
+
+        // 文件名
+        const td2 = createElement("td");
+        const iconEl = createElement("i", { className: `bi ${icon.class} file-icon ${icon.type}` });
+        td2.appendChild(iconEl);
+
+        const nameLink = createElement("a", {
+            className: `file-name ${file.is_dir ? "dir" : ""}`,
+            textContent: file.name
+        });
+        nameLink.addEventListener("click", () => {
+            if (file.is_dir) {
+                loadFiles(file.path);
+            } else {
+                showDetail(file.path);
+            }
+        });
+        td2.appendChild(nameLink);
+
+        if (isHardlink) {
+            const badge = createElement("span", {
+                className: "badge bg-info hardlink-badge",
+                textContent: file.hardlinks.toString(),
+                title: `硬链接: ${file.hardlinks} 个`
+            });
+            td2.appendChild(badge);
+        }
+        tr.appendChild(td2);
+
+        // 大小
+        const td3 = createElement("td", {
+            className: "text-end",
+            textContent: file.size_human
+        });
+        tr.appendChild(td3);
+
+        // 链接数
+        const td4 = createElement("td", {
+            className: "text-center",
+            textContent: file.hardlinks.toString()
+        });
+        tr.appendChild(td4);
+
+        // 修改时间
+        const td5 = createElement("td", {
+            className: "text-secondary",
+            textContent: file.modified
+        });
+        tr.appendChild(td5);
+
+        // 操作
+        const td6 = createElement("td");
+        const btnGroup = createElement("div", { className: "btn-group btn-group-sm" });
+
+        if (file.is_dir) {
+            const openBtn = createElement("button", {
+                className: "btn btn-outline-warning",
+                title: "进入目录"
+            });
+            openBtn.innerHTML = '<i class="bi bi-folder2-open"></i>';
+            openBtn.addEventListener("click", () => loadFiles(file.path));
+            btnGroup.appendChild(openBtn);
+        } else {
+            const infoBtn = createElement("button", {
+                className: "btn btn-outline-info",
+                title: "详情"
+            });
+            infoBtn.innerHTML = '<i class="bi bi-info-circle"></i>';
+            infoBtn.addEventListener("click", () => showDetail(file.path));
+            btnGroup.appendChild(infoBtn);
+        }
+
+        const deleteBtn = createElement("button", {
+            className: "btn btn-outline-danger",
+            title: "删除"
+        });
+        deleteBtn.innerHTML = '<i class="bi bi-trash"></i>';
+        deleteBtn.addEventListener("click", () => deleteSingle(file.path));
+        btnGroup.appendChild(deleteBtn);
+
+        td6.appendChild(btnGroup);
+        tr.appendChild(td6);
+
+        tbody.appendChild(tr);
+    });
+}
+
+function getFileIcon(file) {
+    if (file.is_dir) return { class: "bi-folder-fill", type: "dir" };
+
+    const ext = file.name.split(".").pop().toLowerCase();
+    const videoExts = ["mkv", "mp4", "avi", "ts", "m4v", "wmv", "flv", "mov"];
+    const subExts = ["srt", "ass", "ssa", "sub", "idx", "sup"];
+
+    if (videoExts.includes(ext)) return { class: "bi-film", type: "video" };
+    if (subExts.includes(ext)) return { class: "bi-file-earmark-text", type: "subtitle" };
+    if (file.name.endsWith(".nfo")) return { class: "bi-file-earmark-code", type: "other" };
+    if (file.name.match(/\.(jpg|jpeg|png|gif|bmp)$/i)) return { class: "bi-image", type: "other" };
+
+    return { class: "bi-file-earmark", type: "other" };
+}
+
+// ==================== 面包屑导航 ====================
+
+function updateBreadcrumb(path) {
+    const parts = path.split("/").filter(p => p);
+    const baseParts = nasBasePath.split("/").filter(p => p);
+    const relativeParts = parts.slice(baseParts.length);
+
+    const breadcrumb = document.getElementById("breadcrumb-list");
+    breadcrumb.innerHTML = "";
+
+    // 根目录
+    const rootLi = createElement("li", { className: "breadcrumb-item" });
+    const rootLink = createElement("a", { textContent: "NAS" });
+    rootLink.addEventListener("click", () => loadFiles(nasBasePath));
+    rootLi.appendChild(rootLink);
+    breadcrumb.appendChild(rootLi);
+
+    // 子目录
+    let currentPath = nasBasePath;
+    relativeParts.forEach((part, index) => {
+        currentPath += "/" + part;
+        const isLast = index === relativeParts.length - 1;
+        const li = createElement("li", {
+            className: `breadcrumb-item ${isLast ? "active" : ""}`
+        });
+
+        if (isLast) {
+            li.textContent = part;
+        } else {
+            const link = createElement("a", { textContent: part });
+            const pathCopy = currentPath;
+            link.addEventListener("click", () => loadFiles(pathCopy));
+            li.appendChild(link);
+        }
+
+        breadcrumb.appendChild(li);
+    });
+
+    document.getElementById("current-path").textContent = path;
+}
+
+// ==================== 文件筛选和排序 ====================
+
+function filterFiles() {
+    const search = document.getElementById("search-input").value.toLowerCase();
+    const type = document.getElementById("filter-type").value;
+
+    let filtered = currentFiles.filter(f => {
+        if (search && !f.name.toLowerCase().includes(search)) return false;
+        if (type === "dir" && !f.is_dir) return false;
+        if (type === "video" && !f.name.match(/\.(mkv|mp4|avi|ts|m4v)$/i)) return false;
+        if (type === "hardlink" && f.hardlinks <= 1) return false;
+        return true;
+    });
+
+    renderFiles(filtered);
+}
+
+function sortFiles() {
+    const sortBy = document.getElementById("sort-by").value;
+
+    const sorted = [...currentFiles].sort((a, b) => {
+        if (sortBy === "name") return a.name.localeCompare(b.name);
+        if (sortBy === "size") return b.size - a.size;
+        if (sortBy === "modified") return b.modified.localeCompare(a.modified);
+        if (sortBy === "hardlinks") return b.hardlinks - a.hardlinks;
+        return 0;
+    });
+
+    renderFiles(sorted);
+}
+
+// ==================== 文件选择 ====================
+
+function toggleSelectAll() {
+    const checked = document.getElementById("select-all").checked;
+    const checkboxes = document.querySelectorAll(".file-checkbox");
+
+    checkboxes.forEach(cb => {
+        const row = cb.closest("tr");
+        const path = row.dataset.path;
+        const file = currentFiles.find(f => f.path === path);
+
+        if (checked) {
+            selectedFiles.add(path);
+        } else {
+            selectedFiles.delete(path);
+        }
+        cb.checked = checked;
+        row.classList.toggle("table-active", checked);
+    });
+
+    updateSelectionUI();
+}
+
+function toggleSelect(path, size) {
+    if (selectedFiles.has(path)) {
+        selectedFiles.delete(path);
+    } else {
+        selectedFiles.add(path);
+    }
+
+    const row = document.querySelector(`tr[data-path="${CSS.escape(path)}"]`);
+    if (row) {
+        row.classList.toggle("table-active", selectedFiles.has(path));
+    }
+
+    updateSelectionUI();
+}
+
+function clearSelection() {
+    selectedFiles.clear();
+    document.querySelectorAll(".file-checkbox").forEach(cb => cb.checked = false);
+    document.querySelectorAll("tr").forEach(row => row.classList.remove("table-active"));
+    document.getElementById("select-all").checked = false;
+    updateSelectionUI();
+}
+
+function updateSelectionUI() {
+    const count = selectedFiles.size;
+    document.getElementById("selected-count").textContent = count;
+
+    let totalSize = 0;
+    selectedFiles.forEach(path => {
+        const file = currentFiles.find(f => f.path === path);
+        if (file) totalSize += file.size;
+    });
+    document.getElementById("selected-size").textContent = humanSize(totalSize);
+
+    document.getElementById("btn-delete").disabled = count === 0;
+}
+
+function humanSize(bytes) {
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let i = 0;
+    while (bytes >= 1024 && i < units.length - 1) {
+        bytes /= 1024;
+        i++;
+    }
+    return `${bytes.toFixed(1)} ${units[i]}`;
+}
+
+// ==================== 文件详情 ====================
+
+function renderNfoCard(p) {
+    // 把 _parse_emby_nfo 返回的对象渲染成 Bootstrap 卡片
+    const card = createElement("div", { className: "card border-info mb-2" });
+    const body = createElement("div", { className: "card-body p-2" });
+
+    const typeLabel = { episodedetails: "剧集", tvshow: "剧", movie: "电影" }[p.type] || p.type;
+
+    // 主标题：剧名（episodedetails 用 show_title，否则用 title）+ 季集编号
+    const primaryBits = [];
+    const showName = p.show_title || (p.type !== "episodedetails" ? p.title : null);
+    if (showName) primaryBits.push(showName);
+    const showOrig = p.show_original_title || (p.type !== "episodedetails" ? p.original_title : null);
+    if (showOrig && showOrig !== showName) primaryBits.push(`(${showOrig})`);
+    if (p.season && p.episode) {
+        primaryBits.push(`S${String(p.season).padStart(2, "0")}E${String(p.episode).padStart(2, "0")}`);
+    }
+    const header = createElement("h6", {
+        className: "card-title mb-1",
+        textContent: primaryBits.join(" ")
+    });
+    const typeBadge = createElement("span", {
+        className: "badge bg-info me-2",
+        textContent: typeLabel
+    });
+    header.insertBefore(typeBadge, header.firstChild);
+    body.appendChild(header);
+
+    // 副标题：本集标题（episodedetails 才显示）。如果 title 跟自动编号一致就省略
+    if (p.type === "episodedetails" && p.title) {
+        const generic = `第 ${p.episode} 集`;
+        if (p.title !== generic) {
+            const sub = createElement("div", {
+                className: "text-secondary small mb-2",
+                textContent: p.episode ? `${generic} · ${p.title}` : p.title
+            });
+            body.appendChild(sub);
+        }
+    }
+
+    if (p.plot) {
+        body.appendChild(createElement("p", {
+            className: "mb-2 small",
+            textContent: p.plot
+        }));
+    }
+
+    // 元数据：年份/播出/时长/评分/imdb 等
+    const metaPairs = [];
+    if (p.year) metaPairs.push(["年份", p.year]);
+    if (p.aired) metaPairs.push(["播出", p.aired]);
+    if (p.premiered && p.premiered !== p.aired) metaPairs.push(["首播", p.premiered]);
+    if (p.runtime) metaPairs.push(["时长", `${p.runtime} 分钟`]);
+    if (p.rating) metaPairs.push(["评分", p.rating]);
+    if (p.genres && p.genres.length) metaPairs.push(["类型", p.genres.join(" / ")]);
+    if (p.studios && p.studios.length) metaPairs.push(["出品", p.studios.join(" / ")]);
+    if (p.directors && p.directors.length) metaPairs.push(["导演", p.directors.join(" / ")]);
+    if (p.imdb_id) metaPairs.push(["IMDb", p.imdb_id]);
+    if (p.tmdb_id) metaPairs.push(["TMDB", p.tmdb_id]);
+    if (p.added) metaPairs.push(["入库时间", p.added]);
+
+    if (metaPairs.length > 0) {
+        const dl = createElement("dl", {
+            className: "row mb-2 small"
+        });
+        dl.style.gap = "0.1rem 0";
+        metaPairs.forEach(([k, v]) => {
+            const dt = createElement("dt", {
+                className: "col-4 col-md-3 text-secondary fw-normal mb-0",
+                textContent: k
+            });
+            const dd = createElement("dd", {
+                className: "col-8 col-md-9 mb-0",
+                textContent: v
+            });
+            dl.appendChild(dt);
+            dl.appendChild(dd);
+        });
+        body.appendChild(dl);
+    }
+
+    if (p.actors && p.actors.length > 0) {
+        const actorH = createElement("div", {
+            className: "small text-secondary mb-1",
+            textContent: "演员"
+        });
+        body.appendChild(actorH);
+        const actorList = createElement("div", { className: "small" });
+        p.actors.forEach(a => {
+            const item = createElement("div");
+            item.textContent = a.role ? `${a.name} 饰 ${a.role}` : a.name;
+            actorList.appendChild(item);
+        });
+        body.appendChild(actorList);
+    }
+
+    card.appendChild(body);
+    return card;
+}
+
+
+async function showDetail(path) {
+    const file = currentFiles.find(f => f.path === path);
+    if (!file) return;
+
+    const panel = document.getElementById("file-detail");
+    const content = document.getElementById("file-detail-content");
+    content.innerHTML = "";
+
+    // 文件信息表格
+    const h6 = createElement("h6", { textContent: file.name });
+    content.appendChild(h6);
+
+    const table = createElement("table", { className: "table table-sm table-dark mb-2" });
+    const rows = [
+        ["路径", file.path],
+        ["大小", file.size_human],
+        ["修改时间", file.modified],
+        ["权限", file.permissions],
+        ["所有者", `${file.owner}:${file.group}`],
+        ["硬链接数", file.hardlinks.toString()]
+    ];
+
+    rows.forEach(([label, value]) => {
+        const tr = createElement("tr");
+        tr.appendChild(createElement("td", { textContent: label }));
+        const valueTd = createElement("td");
+        if (label === "权限") {
+            valueTd.appendChild(createElement("code", { textContent: value }));
+        } else {
+            valueTd.textContent = value;
+        }
+        tr.appendChild(valueTd);
+        table.appendChild(tr);
+    });
+    content.appendChild(table);
+
+    // 文本文件预览（.nfo / .srt / .log / .ass 等）
+    const TEXT_EXTS = new Set([
+        "nfo", "txt", "log", "md", "readme",
+        "srt", "ass", "ssa", "sub", "idx", "vtt",
+        "json", "yml", "yaml", "ini", "conf", "cfg",
+        "sh", "py", "js", "html", "xml", "csv"
+    ]);
+    const ext = (file.name.split(".").pop() || "").toLowerCase();
+    if (!file.is_dir && TEXT_EXTS.has(ext)) {
+        const previewH6 = createElement("h6", {
+            className: "mt-3", textContent: "内容预览"
+        });
+        content.appendChild(previewH6);
+
+        const previewMeta = createElement("small", {
+            className: "text-secondary d-block mb-1",
+            textContent: "加载中..."
+        });
+        content.appendChild(previewMeta);
+
+        const previewPre = createElement("pre", {
+            className: "border rounded p-2 mb-2"
+        });
+        Object.assign(previewPre.style, {
+            background: "#1e1e1e",
+            color: "#e0e0e0",
+            maxHeight: "400px",
+            overflow: "auto",
+            fontSize: "0.78rem",
+            lineHeight: "1.3",
+            whiteSpace: "pre"
+        });
+        content.appendChild(previewPre);
+
+        // 异步加载（不阻塞 panel 显示和硬链接查询）
+        apiFetch(`${API_BASE}/api/file-content?path=${encodeURIComponent(path)}`)
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    previewMeta.textContent = `预览失败: ${data.error}`;
+                    previewMeta.className = "text-danger d-block mb-1";
+                    previewPre.remove();
+                    return;
+                }
+                const truncMsg = data.truncated ? " · 已截断（仅前 256 KB）" : "";
+                previewMeta.textContent = `编码: ${data.encoding} · ${humanSize(data.size)}${truncMsg}`;
+
+                // 如果是 Emby/Jellyfin .nfo 且解析成功 → 结构化卡片 + 折叠 raw
+                if (data.parsed) {
+                    const card = renderNfoCard(data.parsed);
+                    previewPre.parentNode.insertBefore(card, previewPre);
+
+                    // raw text 放折叠区
+                    const details = createElement("details", { className: "mb-2" });
+                    const summary = createElement("summary", {
+                        className: "text-secondary small",
+                        textContent: "查看原始 XML"
+                    });
+                    summary.style.cursor = "pointer";
+                    details.appendChild(summary);
+                    previewPre.parentNode.insertBefore(details, previewPre);
+                    details.appendChild(previewPre);
+                }
+                previewPre.textContent = data.text;
+            })
+            .catch(err => {
+                previewMeta.textContent = `预览失败: ${err.message}`;
+                previewMeta.className = "text-danger d-block mb-1";
+                previewPre.remove();
+            });
+    }
+
+    // 如果是硬链接，显示关联文件
+    if (file.hardlinks > 1 && file.inode > 0) {
+        const h6Links = createElement("h6", { className: "mt-3", textContent: "硬链接关联" });
+        content.appendChild(h6Links);
+
+        const loadingDiv = createElement("div", {
+            className: "hardlink-target",
+            textContent: "正在查找关联文件..."
+        });
+        content.appendChild(loadingDiv);
+
+        panel.style.display = "block";
+
+        try {
+            const res = await apiFetch(`${API_BASE}/api/inode/${file.inode}`);
+            const data = await res.json();
+
+            if (data.paths && data.paths.length > 1) {
+                loadingDiv.remove();
+                data.paths
+                    .filter(p => p !== path)
+                    .forEach(p => {
+                        const linkDiv = createElement("div", {
+                            className: "hardlink-target mb-1"
+                        });
+                        const small = createElement("small", { textContent: p });
+                        linkDiv.appendChild(small);
+                        content.appendChild(linkDiv);
+                    });
+            } else {
+                loadingDiv.textContent = "无其他链接";
+            }
+        } catch (err) {
+            loadingDiv.textContent = "获取失败";
+        }
+    } else {
+        panel.style.display = "block";
+    }
+}
+
+// ==================== 硬链接检测 ====================
+
+async function showHardlinks() {
+    const panel = document.getElementById("hardlink-panel");
+    const content = document.getElementById("hardlink-content");
+
+    panel.style.display = "block";
+    content.innerHTML = "";
+
+    const loadingDiv = createElement("div", { className: "text-center py-3" });
+    const spinner = createElement("div", {
+        className: "spinner-border spinner-border-sm text-primary",
+        role: "status"
+    });
+    loadingDiv.appendChild(spinner);
+    loadingDiv.appendChild(createElement("span", {
+        className: "ms-2",
+        textContent: "正在扫描硬链接..."
+    }));
+    content.appendChild(loadingDiv);
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/hardlinks?path=${encodeURIComponent(currentPath)}`);
+        const data = await res.json();
+
+        if (data.error) {
+            content.innerHTML = "";
+            content.appendChild(createElement("p", {
+                className: "text-danger",
+                textContent: data.error
+            }));
+            return;
+        }
+
+        content.innerHTML = "";
+
+        if (data.hardlinks.length === 0) {
+            const emptyDiv = createElement("div", { className: "text-center text-secondary py-3" });
+            emptyDiv.innerHTML = '<i class="bi bi-check-circle" style="font-size: 2rem;"></i>';
+            emptyDiv.appendChild(createElement("p", {
+                className: "mt-2",
+                textContent: "当前目录没有硬链接文件"
+            }));
+            content.appendChild(emptyDiv);
+            return;
+        }
+
+        data.hardlinks.forEach(hl => {
+            const card = createElement("div", { className: "card bg-dark mb-2" });
+            const body = createElement("div", { className: "card-body py-2 px-3" });
+
+            const header = createElement("div", {
+                className: "d-flex justify-content-between align-items-start"
+            });
+
+            const infoDiv = createElement("div", { className: "text-truncate me-2" });
+            infoDiv.appendChild(createElement("small", {
+                className: "text-primary",
+                textContent: hl.path.split("/").pop()
+            }));
+            infoDiv.appendChild(createElement("br"));
+            infoDiv.appendChild(createElement("small", {
+                className: "text-secondary",
+                textContent: `${hl.size_human} · ${hl.hardlinks} 个链接`
+            }));
+
+            const deleteBtn = createElement("button", {
+                className: "btn btn-sm btn-outline-danger"
+            });
+            deleteBtn.innerHTML = '<i class="bi bi-trash"></i>';
+            deleteBtn.addEventListener("click", () => deleteSingle(hl.path));
+
+            header.appendChild(infoDiv);
+            header.appendChild(deleteBtn);
+            body.appendChild(header);
+
+            if (hl.targets.length > 0) {
+                const targetsDiv = createElement("div", { className: "mt-2" });
+                targetsDiv.appendChild(createElement("small", {
+                    className: "text-secondary",
+                    textContent: "链接到："
+                }));
+
+                hl.targets.forEach(t => {
+                    const targetDiv = createElement("div", {
+                        className: "hardlink-target mt-1"
+                    });
+                    targetDiv.appendChild(createElement("small", { textContent: t }));
+                    targetsDiv.appendChild(targetDiv);
+                });
+
+                body.appendChild(targetsDiv);
+            }
+
+            card.appendChild(body);
+            content.appendChild(card);
+        });
+
+    } catch (err) {
+        content.innerHTML = "";
+        content.appendChild(createElement("p", {
+            className: "text-danger",
+            textContent: `加载失败: ${err.message}`
+        }));
+    }
+}
+
+function hideHardlinks() {
+    document.getElementById("hardlink-panel").style.display = "none";
+}
+
+// ==================== 删除操作 ====================
+
+let deletePreviewData = null;
+
+function deleteSingle(path) {
+    selectedFiles.clear();
+    selectedFiles.add(path);
+    showDeleteConfirm();
+}
+
+function deleteSelected() {
+    if (selectedFiles.size === 0) return;
+    showDeleteConfirm();
+}
+
+async function showDeleteConfirm() {
+    const loading = document.getElementById("delete-loading");
+    const previewContent = document.getElementById("delete-preview-content");
+    const confirmBtn = document.getElementById("btn-confirm-delete");
+
+    // 显示弹窗 + loading
+    loading.style.display = "block";
+    previewContent.style.display = "none";
+    confirmBtn.disabled = true;
+    deleteModal.show();
+
+    try {
+        // 调用预览 API
+        const res = await apiFetch(`${API_BASE}/api/delete-preview`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ files: Array.from(selectedFiles) })
+        });
+        deletePreviewData = await res.json();
+
+        if (deletePreviewData.error) {
+            loading.style.display = "none";
+            previewContent.style.display = "block";
+            document.getElementById("delete-file-list").innerHTML = "";
+            document.getElementById("delete-file-list").appendChild(
+                createElement("p", { className: "text-danger", textContent: deletePreviewData.error })
+            );
+            return;
+        }
+
+        renderDeletePreview(deletePreviewData);
+    } catch (err) {
+        loading.style.display = "none";
+        previewContent.style.display = "block";
+        document.getElementById("delete-file-list").innerHTML = "";
+        document.getElementById("delete-file-list").appendChild(
+            createElement("p", { className: "text-danger", textContent: `预览失败: ${err.message}` })
+        );
+    }
+}
+
+function renderDeletePreview(data) {
+    const loading = document.getElementById("delete-loading");
+    const previewContent = document.getElementById("delete-preview-content");
+    const confirmBtn = document.getElementById("btn-confirm-delete");
+
+    loading.style.display = "none";
+    previewContent.style.display = "block";
+    confirmBtn.disabled = false;
+
+    // 选中的文件（用真实占用大小，目录递归算的）
+    const fileList = document.getElementById("delete-file-list");
+    fileList.innerHTML = "";
+    data.files.forEach(file => {
+        const row = createElement("div", {
+            className: "d-flex justify-content-between align-items-center py-1"
+        });
+        const nameSpan = createElement("span", { className: "text-truncate me-2" });
+        nameSpan.appendChild(createElement("i", {
+            className: file.is_dir ? "bi bi-folder-fill text-warning me-1" : "bi bi-file-earmark me-1"
+        }));
+        nameSpan.appendChild(document.createTextNode(file.path.split("/").pop()));
+        row.appendChild(nameSpan);
+        row.appendChild(createElement("span", {
+            className: "text-secondary text-nowrap",
+            textContent: file.size_human
+        }));
+        fileList.appendChild(row);
+    });
+
+    // 总大小（顶部标题旁）
+    const totalSizeEl = document.getElementById("delete-total-size");
+    if (totalSizeEl) {
+        totalSizeEl.textContent = data.total_size_human
+            ? ` · 总计 ${data.total_size_human}`
+            : "";
+    }
+
+    // 硬链接
+    const hlSection = document.getElementById("hardlink-section");
+    const hlList = document.getElementById("hardlink-list");
+    hlList.innerHTML = "";
+
+    const allHardlinks = data.files.flatMap(f => f.hardlink_paths);
+    if (allHardlinks.length > 0) {
+        hlSection.style.display = "block";
+        allHardlinks.forEach(p => {
+            const row = createElement("div", { className: "py-1" });
+            row.appendChild(createElement("small", {
+                className: "text-secondary",
+                textContent: p
+            }));
+            hlList.appendChild(row);
+        });
+    } else {
+        hlSection.style.display = "none";
+    }
+
+    // PT 种子
+    const torrentSection = document.getElementById("torrent-section");
+    const torrentList = document.getElementById("torrent-list");
+    torrentList.innerHTML = "";
+
+    if (data.torrents && data.torrents.length > 0) {
+        torrentSection.style.display = "block";
+        data.torrents.forEach(t => {
+            const row = createElement("div", {
+                className: "d-flex justify-content-between align-items-center py-1"
+            });
+            const nameSpan = createElement("span", { className: "text-truncate me-2" });
+            nameSpan.appendChild(createElement("i", { className: "bi bi-cloud-arrow-down me-1" }));
+            nameSpan.appendChild(document.createTextNode(t.name));
+            row.appendChild(nameSpan);
+
+            const infoSpan = createElement("span", { className: "text-secondary text-nowrap" });
+            const progress = Math.round(t.progress * 100);
+            infoSpan.textContent = `${t.size_human} · ${progress}%`;
+            row.appendChild(infoSpan);
+
+            torrentList.appendChild(row);
+        });
+    } else {
+        torrentSection.style.display = "none";
+    }
+
+    // 将执行的 SSH 命令清单
+    const cmdSection = document.getElementById("commands-section");
+    const cmdList = document.getElementById("commands-list");
+    if (data.commands && data.commands.length > 0) {
+        cmdSection.style.display = "block";
+        cmdList.textContent = data.commands.join("\n");
+    } else {
+        cmdSection.style.display = "none";
+        cmdList.textContent = "";
+    }
+}
+
+async function confirmDelete() {
+    const btn = document.getElementById("btn-confirm-delete");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 删除中...';
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/delete-complete`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                files: Array.from(selectedFiles),
+                delete_torrents: true
+            })
+        });
+
+        const data = await res.json();
+
+        if (data.error) {
+            addLog(`删除失败: ${data.error}`, "danger");
+            return;
+        }
+
+        // 记录文件删除日志
+        if (data.total_files_deleted > 0) {
+            addLog(`已删除 ${data.total_files_deleted} 个文件`, "success");
+        }
+
+        // 记录种子删除日志
+        if (data.torrent_results) {
+            data.torrent_results.forEach(t => {
+                if (t.status === "deleted") {
+                    addLog(`已删除种子: ${t.name}`, "success");
+                } else if (t.status === "error") {
+                    addLog(`种子删除失败: ${t.message}`, "danger");
+                }
+            });
+        }
+
+        // 空间释放
+        if (data.space_freed > 0) {
+            addLog(`释放空间: ${data.space_freed_human}`, "info");
+        }
+
+        // 刷新文件列表和磁盘
+        await loadFiles(currentPath);
+        refreshDisk();
+
+    } catch (err) {
+        addLog(`删除操作失败: ${err.message}`, "danger");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-trash"></i> 确认删除';
+        deleteModal.hide();
+        deletePreviewData = null;
+    }
+}
+
+// ==================== 操作日志 ====================
+
+function addLog(message, type = "info") {
+    const log = document.getElementById("action-log");
+    const time = new Date().toLocaleTimeString();
+
+    // 移除"暂无操作记录"
+    const empty = log.querySelector(".text-center");
+    if (empty) empty.remove();
+
+    const icons = {
+        success: "bi-check-circle text-success",
+        danger: "bi-x-circle text-danger",
+        warning: "bi-exclamation-triangle text-warning",
+        info: "bi-info-circle text-info"
+    };
+
+    const item = createElement("div", {
+        className: "list-group-item bg-transparent border-secondary py-2"
+    });
+
+    const wrapper = createElement("div", { className: "d-flex align-items-start" });
+    wrapper.appendChild(createElement("i", {
+        className: `bi ${icons[type]} me-2 mt-1`
+    }));
+
+    const contentDiv = createElement("div", { className: "flex-grow-1" });
+    contentDiv.appendChild(createElement("small", {
+        className: "text-secondary",
+        textContent: time
+    }));
+    contentDiv.appendChild(createElement("div", { textContent: message }));
+
+    wrapper.appendChild(contentDiv);
+    item.appendChild(wrapper);
+
+    log.insertBefore(item, log.firstChild);
+
+    // 只保留最近 50 条
+    while (log.children.length > 50) {
+        log.removeChild(log.lastChild);
+    }
+}
+
+// ==================== 工具函数 ====================
+
+function showError(message) {
+    const tbody = document.getElementById("file-list");
+    tbody.innerHTML = "";
+
+    const tr = createElement("tr");
+    const td = createElement("td", {
+        colspan: "6",
+        className: "text-center text-danger py-4"
+    });
+
+    td.innerHTML = '<i class="bi bi-exclamation-triangle" style="font-size: 2rem;"></i>';
+    td.appendChild(createElement("p", { className: "mt-2", textContent: message }));
+
+    const retryBtn = createElement("button", {
+        className: "btn btn-sm btn-outline-primary",
+        textContent: "重试"
+    });
+    retryBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> 重试';
+    retryBtn.addEventListener("click", () => loadFiles(currentPath));
+    td.appendChild(retryBtn);
+
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+}
+
+function refresh() {
+    loadFiles(currentPath);
+}
+
+// ==================== qBittorrent 配置 ====================
+
+let qbitConfigModal = null;
+
+function showQBitConfig() {
+    // 初始化模态框
+    if (!qbitConfigModal) {
+        qbitConfigModal = new bootstrap.Modal(document.getElementById("qbitConfigModal"));
+    }
+
+    // 加载当前配置
+    loadQBitConfig();
+    qbitConfigModal.show();
+}
+
+async function loadQBitConfig() {
+    const statusEl = document.getElementById("qbit-connection-status");
+    statusEl.innerHTML = '<span class="text-secondary">检查中...</span>';
+    statusEl.className = "";
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/qbit`);
+        const config = await res.json();
+
+        document.getElementById("qbit-url").value = config.url || "";
+        document.getElementById("qbit-user").value = config.user || "";
+        document.getElementById("qbit-password").value = "";
+
+        // 测试连接状态
+        testQBitConnection();
+    } catch (err) {
+        statusEl.innerHTML = "";
+        statusEl.appendChild(createElement("span", {
+            className: "text-danger",
+            textContent: `加载失败: ${err.message}`
+        }));
+    }
+}
+
+async function saveQBitConfig() {
+    const url = document.getElementById("qbit-url").value.trim();
+    const user = document.getElementById("qbit-user").value.trim();
+    const password = document.getElementById("qbit-password").value;
+
+    if (!url) {
+        alert("请填写 qBittorrent 地址");
+        return;
+    }
+
+    const btn = document.getElementById("btn-save-qbit");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 保存中...';
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/qbit`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url, user, password })
+        });
+
+        const data = await res.json();
+        if (data.error) {
+            alert(`保存失败: ${data.error}`);
+            return;
+        }
+
+        addLog("qBit 配置已保存", "success");
+        testQBitConnection();
+    } catch (err) {
+        alert(`保存失败: ${err.message}`);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-save"></i> 保存配置';
+    }
+}
+
+async function testQBitConnection() {
+    const statusEl = document.getElementById("qbit-connection-status");
+    statusEl.innerHTML = '<div class="spinner-border spinner-border-sm text-primary"></div> 测试中...';
+    statusEl.className = "mt-2";
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/qbit/test`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" }
+        });
+
+        const data = await res.json();
+
+        statusEl.innerHTML = "";
+        if (data.status === "ok") {
+            const ok = createElement("span", { className: "text-success" });
+            ok.appendChild(createElement("i", { className: "bi bi-check-circle me-1" }));
+            ok.appendChild(document.createTextNode("连接成功"));
+            statusEl.appendChild(ok);
+            statusEl.appendChild(createElement("br"));
+            statusEl.appendChild(createElement("small", {
+                className: "text-secondary",
+                textContent: `种子数量: ${data.torrent_count}`
+            }));
+        } else {
+            renderConnectError(statusEl, data.message || "未知错误");
+        }
+    } catch (err) {
+        statusEl.innerHTML = "";
+        renderConnectError(statusEl, err.message);
+    }
+}
+
+function renderConnectError(statusEl, message) {
+    const wrap = createElement("span", { className: "text-danger" });
+    wrap.appendChild(createElement("i", { className: "bi bi-x-circle me-1" }));
+    wrap.appendChild(document.createTextNode("连接失败"));
+    statusEl.appendChild(wrap);
+    statusEl.appendChild(createElement("br"));
+    statusEl.appendChild(createElement("small", {
+        className: "text-danger",
+        textContent: message
+    }));
+}
