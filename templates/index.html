@@ -1,491 +1,1094 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-bs-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NAS 文件管理器</title>
+    <title>NAS Vault</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
+
     <style>
+        /* ─── DESIGN TOKENS ─────────────────────────────────────── */
         :root {
-            --bg-main: #f8f9fa;
-            --bg-card: #ffffff;
-            --bg-hover: #e9ecef;
-            --text-primary: #212529;
-            --text-secondary: #6c757d;
-            --accent: #0d6efd;
-            --success: #198754;
-            --danger: #dc3545;
-            --warning: #ffc107;
+            /* Backgrounds */
+            --bg:         #0d1117;
+            --surface:    #161b22;
+            --surface-2:  #21262d;
+            --surface-3:  #30363d;
+
+            /* Borders */
+            --border:     #30363d;
+            --border-med: #484f58;
+
+            /* Text — all WCAG AA compliant against --bg */
+            --text-1:     #e6edf3;   /* 12.6:1  — names, values, headings */
+            --text-2:     #adbac7;   /*  7.8:1  — secondary labels, metadata */
+            --text-3:     #768390;   /*  4.6:1  — muted info, timestamps */
+
+            /* Accent: blue */
+            --blue:       #58a6ff;
+            --blue-dim:   rgba(88,166,255,0.10);
+            --blue-bd:    rgba(88,166,255,0.30);
+
+            /* Danger: red */
+            --red:        #ff7b72;
+            --red-dim:    rgba(255,123,114,0.10);
+            --red-bd:     rgba(255,123,114,0.30);
+
+            /* Info: teal */
+            --teal:       #39c5cf;
+            --teal-dim:   rgba(57,197,207,0.10);
+            --teal-bd:    rgba(57,197,207,0.28);
+
+            /* Misc */
+            --green:      #3fb950;
+            --amber:      #e3b341;
+
+            /* Layout */
+            --topbar-h:   52px;
+            --sidebar-w:  272px;
+            --r:          6px;
+            --r-lg:       10px;
+
+            /* Typography */
+            --font-ui:    'Inter', system-ui, -apple-system, sans-serif;
+            --font-mono:  'JetBrains Mono', 'Cascadia Code', monospace;
         }
 
-        body {
-            background-color: var(--bg-main);
-            color: var(--text-primary);
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        /* ─── BOOTSTRAP OVERRIDES ────────────────────────────────── */
+        [data-bs-theme="dark"] {
+            --bs-body-bg:                   var(--bg);
+            --bs-body-color:                var(--text-1);
+            --bs-body-font-family:          var(--font-ui);
+            --bs-secondary-color:           var(--text-2);
+            --bs-emphasis-color:            #ffffff;
+
+            --bs-border-color:              var(--border);
+            --bs-border-color-translucent:  var(--border);
+
+            --bs-card-bg:                   var(--surface-2);
+            --bs-card-border-color:         var(--border);
+            --bs-card-cap-bg:               var(--surface-3);
+
+            --bs-modal-bg:                  var(--surface);
+            --bs-modal-header-border-color: var(--border);
+            --bs-modal-footer-border-color: var(--border);
+
+            --bs-list-group-bg:             transparent;
+            --bs-list-group-border-color:   var(--border);
+            --bs-list-group-color:          var(--text-1);
+
+            --bs-table-color:               var(--text-1);
+            --bs-table-bg:                  transparent;
+            --bs-table-border-color:        rgba(255,255,255,0.05);
+            --bs-table-hover-bg:            var(--surface-2);
+            --bs-table-active-bg:           var(--blue-dim);
+            --bs-table-active-color:        var(--text-1);
+
+            --bs-primary:                   var(--blue);
+            --bs-primary-rgb:               88, 166, 255;
+            --bs-info:                      var(--teal);
+            --bs-info-rgb:                  57, 197, 207;
+            --bs-danger:                    var(--red);
+            --bs-danger-rgb:                255, 123, 114;
+            --bs-success:                   var(--green);
+            --bs-success-rgb:               63, 185, 80;
+            --bs-warning:                   var(--amber);
+            --bs-warning-rgb:               227, 179, 65;
+
+            --bs-progress-bg:               var(--surface-3);
+            --bs-form-select-bg-img:        url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23768390' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
         }
 
-        .navbar {
-            background-color: var(--bg-card) !important;
-            border-bottom: 1px solid #dee2e6;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        /* ─── RESET ──────────────────────────────────────────────── */
+        *, *::before, *::after { box-sizing: border-box; }
+
+        html, body {
+            height: 100%;
+            margin: 0;
+            background: var(--bg);
+            color: var(--text-1);
+            font-family: var(--font-ui);
+            font-size: 14px;
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+            overflow: hidden;
         }
 
-        .navbar-brand,
-        .navbar .text-secondary,
-        .navbar .btn-outline-secondary {
-            color: var(--text-primary) !important;
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--border-med); }
+
+        /* ─── TOPBAR ─────────────────────────────────────────────── */
+        .topbar {
+            position: fixed;
+            top: 0; left: 0; right: 0;
+            height: var(--topbar-h);
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            gap: 12px;
+            z-index: 1000;
+            overflow: hidden;
         }
 
-        .navbar .btn-outline-secondary {
-            border-color: var(--text-secondary) !important;
+        .brand {
+            display: flex; align-items: center; gap: 8px;
+            text-decoration: none; flex-shrink: 0;
+        }
+        .brand-icon {
+            width: 26px; height: 26px;
+            background: var(--blue);
+            border-radius: 6px;
+            display: flex; align-items: center; justify-content: center;
+            color: var(--bg); font-size: 13px;
+        }
+        .brand-name {
+            font-size: 15px; font-weight: 700;
+            color: var(--text-1); letter-spacing: -0.3px;
+        }
+        .brand-name span { color: var(--blue); }
+
+        /* Disk strip */
+        .topbar-disks {
+            flex: 1;
+            overflow-x: auto; overflow-y: hidden;
+            scrollbar-width: none; min-width: 0;
+            height: 100%;
+            display: flex; align-items: center;
+        }
+        .topbar-disks::-webkit-scrollbar { display: none; }
+
+        #disk-cards {
+            display: flex !important;
+            flex-wrap: nowrap !important;
+            gap: 8px; align-items: center;
+            width: max-content;
+        }
+        #disk-cards .col-md-6 {
+            width: auto !important; flex: 0 0 auto !important;
+            padding: 0 !important; margin: 0 !important;
+        }
+        #disk-cards .card.disk-card {
+            border-radius: var(--r) !important;
+            border-color: var(--border) !important;
+            background: var(--surface-2) !important;
+            min-width: 158px; max-width: 200px;
+            height: 38px;
+            transition: border-color 0.15s !important;
+        }
+        #disk-cards .card.disk-card:hover {
+            border-color: var(--border-med) !important;
+            transform: none !important;
+        }
+        #disk-cards .card-body {
+            padding: 5px 10px !important;
+            display: flex; flex-direction: column; justify-content: center;
+            gap: 3px;
+        }
+        #disk-cards .progress {
+            height: 3px !important;
+            border-radius: 2px !important;
+            background: var(--surface-3) !important;
+            margin: 0 !important;
+        }
+        #disk-cards small {
+            font-size: 11px !important;
+            line-height: 1.2 !important;
+            font-family: var(--font-mono) !important;
+            color: var(--text-3) !important;
+        }
+        #disk-cards .fw-bold {
+            font-size: 11px !important;
+            line-height: 1.2 !important;
+            color: var(--text-1) !important;
+            font-weight: 600 !important;
+            font-family: var(--font-ui) !important;
+            letter-spacing: 0.2px;
+        }
+        #disk-cards .text-success { color: var(--green) !important; }
+        #disk-cards .text-warning { color: var(--amber) !important; }
+        #disk-cards .text-danger  { color: var(--red) !important; }
+
+        /* Topbar actions */
+        .topbar-actions {
+            display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+        }
+        .tb-btn {
+            display: inline-flex; align-items: center; gap: 5px;
+            padding: 5px 11px;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--r);
+            color: var(--text-2);
+            font-size: 13px; font-weight: 500;
+            cursor: pointer; transition: all 0.15s;
+            white-space: nowrap; font-family: var(--font-ui);
+        }
+        .tb-btn:hover {
+            color: var(--text-1);
+            border-color: var(--border-med);
+            background: var(--surface-3);
+        }
+        .tb-btn-icon {
+            width: 32px; height: 32px; padding: 0;
+            display: inline-flex; align-items: center; justify-content: center;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--r);
+            color: var(--text-2); font-size: 15px;
+            cursor: pointer; transition: all 0.15s;
+        }
+        .tb-btn-icon:hover { color: var(--text-1); border-color: var(--border-med); }
+
+        /* ─── APP LAYOUT ─────────────────────────────────────────── */
+        .app-body {
+            display: flex;
+            height: 100vh;
+            padding-top: var(--topbar-h);
+            overflow: hidden;
         }
 
-        .navbar .btn-outline-secondary:hover {
-            background-color: var(--bg-hover) !important;
-            color: var(--text-primary) !important;
+        .main-panel {
+            flex: 1; display: flex; flex-direction: column;
+            overflow: hidden; border-right: 1px solid var(--border);
+            min-width: 0;
         }
 
-        .card {
-            background-color: var(--bg-card);
-            border: 1px solid #dee2e6;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        /* ─── BREADCRUMB ─────────────────────────────────────────── */
+        .bc-bar {
+            display: flex; align-items: center;
+            height: 42px; padding: 0 16px;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface);
+            flex-shrink: 0; gap: 8px;
+            overflow: hidden;
+        }
+        .bc-icon { color: var(--text-3); font-size: 12px; flex-shrink: 0; }
+
+        .breadcrumb { margin: 0; padding: 0; flex-wrap: nowrap; overflow: hidden; }
+        .breadcrumb-item {
+            display: flex; align-items: center;
+            white-space: nowrap; font-size: 13px;
+        }
+        .breadcrumb-item + .breadcrumb-item::before {
+            content: "/"; color: var(--text-3); padding: 0 5px;
+        }
+        .breadcrumb-item a {
+            color: var(--text-2); text-decoration: none;
+            padding: 2px 6px; border-radius: 4px;
+            transition: color 0.12s, background 0.12s;
+            font-weight: 500;
+        }
+        .breadcrumb-item a:hover { color: var(--text-1); background: var(--surface-2); }
+        .breadcrumb-item.active {
+            color: var(--text-1); font-weight: 600; padding: 2px 6px;
         }
 
-        .disk-card {
-            transition: transform 0.2s;
+        /* ─── FILTER BAR ─────────────────────────────────────────── */
+        .filter-bar {
+            display: flex; align-items: center; gap: 8px;
+            padding: 8px 16px;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface);
+            flex-shrink: 0;
         }
-        .disk-card:hover {
-            transform: translateY(-2px);
+        .search-wrap { position: relative; flex: 1; max-width: 260px; }
+        .search-wrap .bi-search {
+            position: absolute; left: 9px; top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-3); font-size: 12px; pointer-events: none;
+        }
+        #search-input {
+            width: 100%;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--r);
+            color: var(--text-1);
+            font-family: var(--font-ui); font-size: 13px;
+            padding: 6px 10px 6px 28px;
+            outline: none; transition: border-color 0.15s;
+        }
+        #search-input::placeholder { color: var(--text-3); }
+        #search-input:focus { border-color: var(--blue); }
+
+        .v-select {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--r);
+            color: var(--text-1);
+            font-family: var(--font-ui); font-size: 13px;
+            padding: 6px 24px 6px 10px;
+            outline: none; cursor: pointer; appearance: none;
+            background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23768390' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
+            background-repeat: no-repeat;
+            background-position: right 7px center;
+            background-size: 10px;
+            transition: border-color 0.15s;
+        }
+        .v-select:focus { border-color: var(--blue); outline: none; }
+
+        #file-count {
+            font-family: var(--font-mono); font-size: 12px;
+            color: var(--text-3); margin-left: auto; white-space: nowrap;
+        }
+
+        /* ─── FILE TABLE ─────────────────────────────────────────── */
+        #file-container {
+            flex: 1; overflow-y: auto;
+            background: var(--bg);
         }
 
         .file-table {
-            font-size: 0.9rem;
-        }
-        .file-table th {
-            background-color: #f1f3f5;
-            position: sticky;
-            top: 0;
-            z-index: 10;
-        }
-        .file-table tr:hover {
-            background-color: var(--bg-hover);
-        }
-        .file-table td {
-            vertical-align: middle;
+            font-size: 13px; border-collapse: collapse; width: 100%;
         }
 
-        .file-icon {
-            font-size: 1.2rem;
-            margin-right: 0.5rem;
+        .file-table thead th {
+            background: var(--surface) !important;
+            position: sticky; top: 0; z-index: 10;
+            border-bottom: 1px solid var(--border) !important;
+            border-top: none !important;
+            font-size: 11px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: 0.5px;
+            color: var(--text-3) !important;
+            padding: 9px 14px !important;
+            white-space: nowrap;
         }
-        .file-icon.dir { color: #e67700; }
-        .file-icon.video { color: #0c87c4; }
-        .file-icon.subtitle { color: #6c757d; }
-        .file-icon.other { color: #868e96; }
 
-        .file-name {
+        .file-table tbody tr {
+            border-bottom: 1px solid rgba(255,255,255,0.04) !important;
+            transition: background 0.1s;
+        }
+        .file-table tbody tr:hover { background: var(--surface) !important; }
+
+        /* Selected row */
+        .file-table tbody tr.table-active {
+            background: var(--blue-dim) !important;
+        }
+        .file-table tbody tr.table-active td:first-child {
+            border-left: 2px solid var(--blue);
+        }
+        .file-table tbody td {
+            padding: 8px 14px !important;
+            vertical-align: middle !important;
+            border-top: none !important;
+            color: var(--text-1);
+        }
+        .file-table tbody td:first-child { border-left: 2px solid transparent; }
+
+        /* Checkbox */
+        .form-check-input {
+            background-color: var(--surface-3) !important;
+            border-color: var(--border-med) !important;
+            width: 14px !important; height: 14px !important;
             cursor: pointer;
-            color: var(--text-primary);
-            text-decoration: none;
         }
-        .file-name:hover {
-            color: var(--accent);
-            text-decoration: underline;
+        .form-check-input:checked {
+            background-color: var(--blue) !important;
+            border-color: var(--blue) !important;
         }
-        .file-name.dir { color: #e67700; }
-        .file-name.dir:hover { color: #c56500; }
+        .checkbox-cell { width: 42px; }
 
-        .hardlink-badge {
-            font-size: 0.75rem;
-            padding: 0.2em 0.5em;
-        }
+        /* Icons */
+        .file-icon { font-size: 15px !important; margin-right: 8px !important; }
+        .file-icon.dir     { color: var(--amber) !important; }
+        .file-icon.video   { color: var(--teal) !important; }
+        .file-icon.subtitle { color: #a5a0f7 !important; }
+        .file-icon.other   { color: var(--text-3) !important; }
 
-        .btn-action {
-            min-width: 80px;
+        /* File name */
+        .file-name {
+            font-size: 13px; font-weight: 500;
+            color: var(--text-1) !important;
+            text-decoration: none !important;
         }
+        .file-name:hover { color: var(--blue) !important; }
+        .file-name.dir { color: var(--amber) !important; }
+        .file-name.dir:hover { color: #f0c85c !important; }
 
-        .breadcrumb-item a {
-            color: var(--accent);
-            text-decoration: none;
-        }
-        .breadcrumb-item a:hover {
-            text-decoration: underline;
-        }
-
-        .progress {
-            height: 20px;
-            background-color: #e9ecef;
-        }
-
-        .modal-content {
-            background-color: var(--bg-card);
-            border: 1px solid #dee2e6;
-        }
-
-        .loading-spinner {
-            display: none;
-            text-align: center;
-            padding: 2rem;
+        /* Hardlink badge */
+        .badge.bg-info {
+            background: var(--teal-dim) !important;
+            color: var(--teal) !important;
+            border: 1px solid var(--teal-bd) !important;
+            font-family: var(--font-mono);
+            font-size: 10px !important;
+            padding: 2px 7px !important;
+            border-radius: 100px !important;
+            vertical-align: middle; margin-left: 6px;
         }
 
-        .empty-state {
-            text-align: center;
-            padding: 3rem;
-            color: var(--text-secondary);
+        /* Size / links / time columns */
+        .file-table td.text-end,
+        .file-table td.text-center,
+        .file-table td.text-secondary {
+            font-family: var(--font-mono) !important;
+            font-size: 12px !important;
+            color: var(--text-2) !important;
         }
 
-        .checkbox-cell {
-            width: 40px;
+        /* Row action buttons */
+        .btn-group-sm .btn {
+            padding: 3px 9px !important;
+            font-size: 12px !important;
+            border-radius: 4px !important;
         }
-
-        .toolbar {
-            background-color: var(--bg-card);
-            border: 1px solid #dee2e6;
-            border-radius: 0.5rem;
-            padding: 1rem;
-            margin-bottom: 1rem;
+        .btn-outline-info {
+            color: var(--teal) !important;
+            border-color: var(--teal-bd) !important;
+            background: transparent !important;
         }
+        .btn-outline-info:hover {
+            background: var(--teal-dim) !important;
+            border-color: var(--teal) !important;
+        }
+        .btn-outline-danger {
+            color: var(--red) !important;
+            border-color: var(--red-bd) !important;
+            background: transparent !important;
+        }
+        .btn-outline-danger:hover {
+            background: var(--red-dim) !important;
+            border-color: var(--red) !important;
+        }
+        .btn-outline-warning {
+            color: var(--amber) !important;
+            border-color: rgba(227,179,65,0.30) !important;
+            background: transparent !important;
+        }
+        .btn-outline-warning:hover { background: rgba(227,179,65,0.10) !important; }
 
-        #file-container {
-            max-height: calc(100vh - 400px);
+        /* Loading / empty */
+        #loading { background: var(--bg); }
+        .spinner-border {
+            color: var(--blue) !important;
+            width: 24px !important; height: 24px !important;
+            border-width: 2px !important;
+        }
+        #loading .mt-2 { color: var(--text-3) !important; font-size: 13px !important; }
+        #empty-state { padding: 80px 0 !important; color: var(--text-2) !important; }
+        #empty-state .bi { color: var(--text-3) !important; }
+
+        /* ─── SIDEBAR ────────────────────────────────────────────── */
+        .sidebar {
+            width: var(--sidebar-w); flex-shrink: 0;
+            display: flex; flex-direction: column;
             overflow-y: auto;
+            background: var(--surface);
         }
 
-        .hardlink-target {
-            font-size: 0.8rem;
-            color: var(--text-secondary);
-            padding-left: 2rem;
-            border-left: 2px solid var(--accent);
-            margin-left: 0.5rem;
+        .sb-section {
+            padding: 14px 16px;
+            border-bottom: 1px solid var(--border);
+        }
+        .sb-section:last-child { flex: 1; }
+
+        .sb-label {
+            font-size: 11px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.7px;
+            color: var(--text-3);
+            margin-bottom: 10px;
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .sb-label-close {
+            all: unset; cursor: pointer; color: var(--text-3);
+            font-size: 12px; transition: color 0.12s;
+        }
+        .sb-label-close:hover { color: var(--text-2); }
+
+        /* Selection */
+        .sel-stat {
+            display: flex; align-items: baseline;
+            gap: 8px; margin-bottom: 12px;
+        }
+        #selected-count {
+            font-size: 32px; font-weight: 700;
+            color: var(--text-1); line-height: 1;
+            font-variant-numeric: tabular-nums;
+        }
+        #selected-size {
+            font-family: var(--font-mono); font-size: 12px;
+            color: var(--text-2);
+        }
+        .sel-actions { display: flex; gap: 6px; }
+
+        /* Sidebar buttons */
+        .sb-btn {
+            display: inline-flex; align-items: center; gap: 5px;
+            padding: 6px 12px; border-radius: var(--r);
+            font-size: 13px; font-weight: 500;
+            cursor: pointer; border: 1px solid var(--border);
+            background: var(--surface-2); color: var(--text-2);
+            transition: all 0.15s; font-family: var(--font-ui);
+        }
+        .sb-btn:hover { color: var(--text-1); background: var(--surface-3); }
+        .sb-btn:disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+
+        .sb-btn-danger {
+            background: var(--red-dim);
+            border-color: var(--red-bd);
+            color: var(--red);
+        }
+        .sb-btn-danger:hover { background: rgba(255,123,114,0.18); }
+
+        /* Hardlink items */
+        #hardlink-content .card {
+            border-radius: var(--r) !important; margin-bottom: 8px !important;
+        }
+        #hardlink-content .card-body { padding: 10px !important; }
+        #hardlink-content .card-body small {
+            font-family: var(--font-mono) !important;
+            font-size: 11px !important;
+            color: var(--text-2) !important;
         }
 
-        /* 浅色主题下的表格样式覆盖 */
-        .table-dark {
-            --bs-table-bg: #f8f9fa;
-            --bs-table-color: #212529;
-            --bs-table-border-color: #dee2e6;
+        /* File detail */
+        #file-detail-content { font-size: 13px; }
+        #file-detail-content h6 {
+            font-size: 13px; font-weight: 600;
+            color: var(--text-1); margin-bottom: 10px;
+            word-break: break-all;
+        }
+        #file-detail-content .table { font-size: 12px !important; }
+        #file-detail-content .table td { padding: 5px 6px !important; }
+        #file-detail-content .table td:first-child {
+            color: var(--text-3); min-width: 72px;
+        }
+        #file-detail-content .table-dark {
+            --bs-table-bg: var(--surface-2) !important;
+            --bs-table-color: var(--text-1) !important;
+            --bs-table-border-color: var(--border) !important;
+        }
+        #file-detail-content pre {
+            font-family: var(--font-mono) !important;
+            font-size: 11px !important; color: var(--text-1);
+            white-space: pre-wrap;
+        }
+        #file-detail-content code {
+            font-family: var(--font-mono) !important;
+            color: var(--teal) !important;
+        }
+
+        /* Log */
+        #action-log { max-height: 260px; overflow-y: auto; }
+        #action-log .list-group-item {
+            background: transparent !important;
+            border: none !important;
+            border-bottom: 1px solid rgba(255,255,255,0.04) !important;
+            padding: 7px 4px !important;
+            font-size: 12px !important;
+            color: var(--text-2) !important;
+        }
+        #action-log .bi { font-size: 12px; }
+        #action-log small {
+            font-family: var(--font-mono);
+            color: var(--text-3) !important;
+            font-size: 11px !important;
+        }
+
+        /* ─── MODALS ──────────────────────────────────────────────── */
+        .modal-content {
+            background: var(--surface) !important;
+            border: 1px solid var(--border-med) !important;
+            border-radius: var(--r-lg) !important;
+        }
+        .modal-header { padding: 16px 20px !important; }
+        .modal-title {
+            font-size: 15px !important; font-weight: 700 !important;
+            color: var(--text-1) !important;
+        }
+        .modal-body { padding: 16px 20px !important; }
+        .modal-footer { padding: 12px 20px !important; }
+        .btn-close { filter: brightness(0.5) invert(1) !important; }
+
+        /* Delete preview */
+        #delete-preview-content > p {
+            font-size: 13px; color: var(--text-2); margin-bottom: 16px;
+        }
+        #delete-preview-content h6 {
+            font-size: 12px !important; font-weight: 600 !important;
+            color: var(--text-2) !important; margin-bottom: 8px !important;
+        }
+        #delete-file-list,
+        #hardlink-list,
+        #torrent-list {
+            background: var(--surface-2) !important;
+            border-color: var(--border) !important;
+            border-radius: var(--r) !important;
+            font-size: 12px !important;
+            color: var(--text-1) !important;
+            max-height: 140px !important;
+        }
+        #commands-list {
+            background: var(--bg) !important;
+            border-color: var(--border) !important;
+            border-radius: var(--r) !important;
+            color: var(--teal) !important;
+            font-family: var(--font-mono) !important;
+            font-size: 12px !important;
+            max-height: 140px !important;
+        }
+
+        /* Modal buttons */
+        .modal-footer .btn {
+            font-family: var(--font-ui) !important;
+            font-size: 13px !important; font-weight: 500 !important;
+            padding: 7px 16px !important; border-radius: var(--r) !important;
+        }
+        .btn-secondary {
+            background: var(--surface-2) !important;
+            border-color: var(--border) !important;
+            color: var(--text-2) !important;
+        }
+        .btn-secondary:hover {
+            background: var(--surface-3) !important;
+            color: var(--text-1) !important;
+        }
+        .btn-danger {
+            background: var(--red-dim) !important;
+            border-color: var(--red-bd) !important;
+            color: var(--red) !important;
+        }
+        .btn-danger:hover { background: rgba(255,123,114,0.20) !important; }
+        .btn-danger:disabled { opacity: 0.4 !important; }
+        .btn-primary {
+            background: var(--blue) !important;
+            border-color: var(--blue) !important;
+            color: var(--bg) !important;
+            font-weight: 600 !important;
+        }
+        .btn-primary:hover { background: #79b8ff !important; }
+
+        /* Alert */
+        .alert-danger {
+            background: var(--red-dim) !important;
+            border-color: var(--red-bd) !important;
+            color: var(--text-1) !important;
+            font-size: 13px !important;
+        }
+
+        /* Form controls */
+        .form-control {
+            background: var(--surface-2) !important;
+            border-color: var(--border) !important;
+            color: var(--text-1) !important;
+            font-family: var(--font-ui) !important;
+            font-size: 13px !important;
+            border-radius: var(--r) !important;
+        }
+        .form-control:focus {
+            background: var(--surface-2) !important;
+            border-color: var(--blue) !important;
+            box-shadow: 0 0 0 3px rgba(88,166,255,0.12) !important;
+            color: var(--text-1) !important;
+        }
+        .form-control::placeholder { color: var(--text-3) !important; }
+        .form-label {
+            font-size: 13px !important; font-weight: 500 !important;
+            color: var(--text-2) !important; margin-bottom: 5px !important;
+        }
+        .form-text { color: var(--text-3) !important; font-size: 12px !important; }
+
+        /* Cards (hardlinks, NFO detail) */
+        .card { background: var(--surface-2) !important; border-color: var(--border) !important; }
+        .card-header { background: var(--surface-3) !important; border-color: var(--border) !important; }
+        .card.border-info { border-color: var(--teal-bd) !important; }
+
+        /* Misc */
+        .spinner-border-sm {
+            width: 12px !important; height: 12px !important;
+            border-width: 2px !important; color: inherit !important;
+        }
+        code { font-family: var(--font-mono) !important; color: var(--teal) !important; }
+        pre { font-family: var(--font-mono) !important; font-size: 12px !important; color: var(--text-1); }
+        details summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
+
+        /* ─── RESPONSIVE ─────────────────────────────────────────── */
+        @media (max-width: 800px) {
+            .sidebar { display: none; }
+            .main-panel { border-right: none; }
+        }
+
+        /* ─── PROGRESS BAR COLORS ────────────────────────────────── */
+        .progress-bar.bg-success { background-color: var(--green) !important; }
+        .progress-bar.bg-warning { background-color: var(--amber) !important; }
+        .progress-bar.bg-danger  { background-color: var(--red) !important; }
+
+        /* ─── QBIT TEST BTN ──────────────────────────────────────── */
+        .btn-outline-info.modal-footer {
+            color: var(--teal) !important;
+            border-color: var(--teal-bd) !important;
+        }
+        /* Override for modal footer test btn */
+        .modal-footer .btn-outline-info {
+            color: var(--teal) !important;
+            border-color: var(--teal-bd) !important;
+            background: transparent !important;
+            font-weight: 500 !important;
+        }
+        .modal-footer .btn-outline-info:hover {
+            background: var(--teal-dim) !important;
         }
     </style>
 </head>
+
 <body>
-    <!-- 导航栏 -->
-    <nav class="navbar navbar-expand-lg navbar-light">
-        <div class="container-fluid">
-            <a class="navbar-brand" href="#">
-                <i class="bi bi-hdd-network"></i> NAS 文件管理器
-            </a>
-            <div class="d-flex align-items-center">
-                <span class="text-secondary me-3" id="nas-status">
-                    <i class="bi bi-circle-fill text-success"></i> 已连接
-                </span>
-                <button class="btn btn-outline-secondary btn-sm me-2" onclick="refreshDisk()" title="刷新磁盘">
-                    <i class="bi bi-arrow-clockwise"></i>
-                </button>
-                <button class="btn btn-primary btn-sm" onclick="showQBitConfig()">
-                    <i class="bi bi-gear-fill"></i> qBittorrent 设置
-                </button>
-            </div>
+
+<!-- ── TOPBAR ──────────────────────────────────────────────────── -->
+<header class="topbar">
+    <a class="brand" href="#">
+        <div class="brand-icon">
+            <i class="bi bi-hdd-network-fill"></i>
         </div>
-    </nav>
+        <span class="brand-name">NAS<span>Vault</span></span>
+    </a>
 
-    <div class="container-fluid mt-3">
-        <!-- 磁盘使用情况 -->
-        <div class="row mb-3" id="disk-cards">
-            <!-- 动态生成 -->
-        </div>
-
-        <!-- 主内容区 -->
-        <div class="row">
-            <!-- 左侧：文件浏览 -->
-            <div class="col-lg-8">
-                <div class="card">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <div>
-                            <i class="bi bi-folder2-open"></i>
-                            <span id="current-path"></span>
-                        </div>
-                        <div>
-                            <button class="btn btn-sm btn-outline-info" onclick="showHardlinks()">
-                                <i class="bi bi-link-45deg"></i> 硬链接检测
-                            </button>
-                        </div>
-                    </div>
-                    <div class="card-body p-0">
-                        <!-- 面包屑导航 -->
-                        <div class="px-3 pt-2 pb-2 border-bottom" id="breadcrumb">
-                            <nav aria-label="breadcrumb">
-                                <ol class="breadcrumb mb-0" id="breadcrumb-list">
-                                    <!-- 动态生成 -->
-                                </ol>
-                            </nav>
-                        </div>
-
-                        <!-- 工具栏 -->
-                        <div class="toolbar mx-3 mt-2">
-                            <div class="row align-items-center">
-                                <div class="col-md-4">
-                                    <div class="input-group input-group-sm">
-                                        <span class="input-group-text"><i class="bi bi-search"></i></span>
-                                        <input type="text" class="form-control" id="search-input"
-                                               placeholder="搜索文件名..." onkeyup="filterFiles()">
-                                    </div>
-                                </div>
-                                <div class="col-md-3">
-                                    <select class="form-select form-select-sm" id="filter-type" onchange="filterFiles()">
-                                        <option value="all">所有文件</option>
-                                        <option value="dir">仅目录</option>
-                                        <option value="video">仅视频</option>
-                                        <option value="hardlink">仅硬链接</option>
-                                    </select>
-                                </div>
-                                <div class="col-md-3">
-                                    <select class="form-select form-select-sm" id="sort-by" onchange="sortFiles()">
-                                        <option value="name">按名称</option>
-                                        <option value="size">按大小</option>
-                                        <option value="modified">按时间</option>
-                                        <option value="hardlinks">按链接数</option>
-                                    </select>
-                                </div>
-                                <div class="col-md-2 text-end">
-                                    <span class="text-secondary" id="file-count">0 个项目</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- 文件列表 -->
-                        <div class="table-responsive" id="file-container">
-                            <table class="table file-table mb-0">
-                                <thead>
-                                    <tr>
-                                        <th class="checkbox-cell">
-                                            <input type="checkbox" class="form-check-input" id="select-all"
-                                                   onchange="toggleSelectAll()">
-                                        </th>
-                                        <th>文件名</th>
-                                        <th style="width: 100px">大小</th>
-                                        <th style="width: 60px">链接</th>
-                                        <th style="width: 150px">修改时间</th>
-                                        <th style="width: 100px">操作</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="file-list">
-                                    <!-- 动态生成 -->
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <!-- 加载中 -->
-                        <div class="loading-spinner" id="loading">
-                            <div class="spinner-border text-primary" role="status">
-                                <span class="visually-hidden">加载中...</span>
-                            </div>
-                            <p class="mt-2">正在加载文件列表...</p>
-                        </div>
-
-                        <!-- 空状态 -->
-                        <div class="empty-state" id="empty-state" style="display: none;">
-                            <i class="bi bi-folder2" style="font-size: 3rem;"></i>
-                            <p>此目录为空</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 右侧：操作面板 -->
-            <div class="col-lg-4">
-                <!-- 选中文件操作 -->
-                <div class="card mb-3">
-                    <div class="card-header">
-                        <i class="bi bi-check2-square"></i> 批量操作
-                    </div>
-                    <div class="card-body">
-                        <p class="text-secondary mb-2">
-                            已选中 <span id="selected-count" class="text-primary fw-bold">0</span> 个文件
-                        </p>
-                        <p class="text-secondary mb-3">
-                            总大小：<span id="selected-size" class="text-info">0 B</span>
-                        </p>
-                        <div class="d-grid gap-2">
-                            <button class="btn btn-danger" id="btn-delete" disabled onclick="deleteSelected()">
-                                <i class="bi bi-trash"></i> 删除选中文件
-                            </button>
-                            <button class="btn btn-outline-secondary" onclick="clearSelection()">
-                                <i class="bi bi-x-circle"></i> 清除选择
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- qBit 设置入口 -->
-                <div class="card mb-3">
-                    <div class="card-header">
-                        <i class="bi bi-cloud-arrow-down"></i> PT 种子管理
-                    </div>
-                    <div class="card-body">
-                        <p class="text-secondary mb-2">
-                            <small>删除文件时自动清理关联的 PT 种子</small>
-                        </p>
-                        <div class="d-grid">
-                            <button class="btn btn-outline-primary btn-sm" onclick="showQBitConfig()">
-                                <i class="bi bi-gear"></i> qBittorrent 设置
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 硬链接信息面板 -->
-                <div class="card mb-3" id="hardlink-panel" style="display: none;">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <span><i class="bi bi-link-45deg"></i> 硬链接检测</span>
-                        <button class="btn btn-sm btn-outline-secondary" onclick="hideHardlinks()">
-                            <i class="bi bi-x"></i>
-                        </button>
-                    </div>
-                    <div class="card-body" id="hardlink-content">
-                        <!-- 动态生成 -->
-                    </div>
-                </div>
-
-                <!-- 文件详情 -->
-                <div class="card mb-3" id="file-detail" style="display: none;">
-                    <div class="card-header">
-                        <i class="bi bi-info-circle"></i> 文件详情
-                    </div>
-                    <div class="card-body" id="file-detail-content">
-                        <!-- 动态生成 -->
-                    </div>
-                </div>
-
-                <!-- 操作日志 -->
-                <div class="card">
-                    <div class="card-header">
-                        <i class="bi bi-journal-text"></i> 操作日志
-                    </div>
-                    <div class="card-body p-0">
-                        <div class="list-group list-group-flush" id="action-log"
-                             style="max-height: 300px; overflow-y: auto;">
-                            <div class="list-group-item bg-transparent text-secondary text-center py-3">
-                                暂无操作记录
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+    <div class="topbar-disks">
+        <div id="disk-cards">
+            <!-- JS: renderDiskCards() -->
         </div>
     </div>
 
-    <!-- 删除确认对话框 -->
-    <div class="modal fade" id="deleteModal" tabindex="-1">
-        <div class="modal-dialog modal-lg">
-            <div class="modal-content">
-                <div class="modal-header border-secondary">
-                    <h5 class="modal-title">
-                        <i class="bi bi-exclamation-triangle text-warning"></i> 确认删除
-                    </h5>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+    <div class="topbar-actions">
+        <button class="tb-btn-icon" onclick="refreshDisk()" title="刷新磁盘">
+            <i class="bi bi-arrow-clockwise"></i>
+        </button>
+        <button class="tb-btn" onclick="showHardlinks()">
+            <i class="bi bi-link-45deg"></i>
+            硬链接
+        </button>
+        <button class="tb-btn" onclick="showNASConfig()">
+            <i class="bi bi-hdd-network"></i>
+            NAS
+        </button>
+        <button class="tb-btn" onclick="showQBitConfig()">
+            <i class="bi bi-gear"></i>
+            qBit
+        </button>
+    </div>
+</header>
+
+
+<!-- ── APP BODY ────────────────────────────────────────────────── -->
+<div class="app-body">
+
+    <!-- LEFT: FILE PANEL ──────────────────────────────────────── -->
+    <div class="main-panel">
+
+        <!-- Breadcrumb -->
+        <div class="bc-bar">
+            <i class="bi bi-hdd-fill bc-icon"></i>
+            <nav aria-label="breadcrumb" style="flex:1;overflow:hidden;">
+                <ol class="breadcrumb" id="breadcrumb-list">
+                    <!-- JS: updateBreadcrumb() -->
+                </ol>
+            </nav>
+            <span id="current-path" style="display:none;"></span>
+        </div>
+
+        <!-- Filter bar -->
+        <div class="filter-bar">
+            <div class="search-wrap">
+                <i class="bi bi-search"></i>
+                <input type="text" id="search-input"
+                       placeholder="搜索文件名…" onkeyup="filterFiles()">
+            </div>
+
+            <select class="v-select" id="filter-type" onchange="filterFiles()">
+                <option value="all">所有文件</option>
+                <option value="dir">仅目录</option>
+                <option value="video">仅视频</option>
+                <option value="hardlink">仅硬链接</option>
+            </select>
+
+            <select class="v-select" id="sort-by" onchange="sortFiles()">
+                <option value="name">按名称</option>
+                <option value="size">按大小</option>
+                <option value="modified">按时间</option>
+                <option value="hardlinks">按链接数</option>
+            </select>
+
+            <span id="file-count"></span>
+        </div>
+
+        <!-- File table -->
+        <div id="file-container">
+            <table class="table file-table mb-0">
+                <thead>
+                    <tr>
+                        <th class="checkbox-cell">
+                            <input type="checkbox" class="form-check-input" id="select-all"
+                                   onchange="toggleSelectAll()">
+                        </th>
+                        <th>名称</th>
+                        <th style="width:92px;">大小</th>
+                        <th style="width:54px;">链接</th>
+                        <th style="width:140px;">修改时间</th>
+                        <th style="width:90px;"></th>
+                    </tr>
+                </thead>
+                <tbody id="file-list">
+                    <!-- JS: renderFiles() -->
+                </tbody>
+            </table>
+
+            <div id="loading" class="text-center py-5" style="display:none;">
+                <div class="spinner-border" role="status">
+                    <span class="visually-hidden">加载中...</span>
                 </div>
-                <div class="modal-body">
-                    <!-- 加载中 -->
-                    <div id="delete-loading" style="display: none;" class="text-center py-4">
-                        <div class="spinner-border text-primary"></div>
-                        <p class="mt-2">正在分析关联文件和种子...</p>
-                    </div>
+                <div class="mt-2">正在加载文件列表…</div>
+            </div>
 
-                    <!-- 预览内容 -->
-                    <div id="delete-preview-content">
-                        <p>确定要删除以下文件吗？此操作不可撤销。</p>
+            <div id="empty-state" class="empty-state text-center" style="display:none;">
+                <i class="bi bi-folder2" style="font-size:2.4rem;display:block;margin-bottom:12px;"></i>
+                <div>此目录为空</div>
+            </div>
+        </div>
 
-                        <!-- 选中的文件 -->
-                        <h6>
-                            <i class="bi bi-file-earmark"></i> 选中的文件
-                            <span class="text-secondary fw-normal" id="delete-total-size"></span>
-                        </h6>
-                        <div class="bg-light border rounded p-3 mb-3" id="delete-file-list" style="max-height: 200px; overflow-y: auto;">
-                        </div>
+    </div><!-- /.main-panel -->
 
-                        <!-- 硬链接 -->
-                        <div id="hardlink-section" style="display: none;">
-                            <h6><i class="bi bi-link-45deg text-info"></i> 关联硬链接（将一并删除）</h6>
-                            <div class="bg-light border rounded p-3 mb-3" id="hardlink-list" style="max-height: 200px; overflow-y: auto;">
-                            </div>
-                        </div>
 
-                        <!-- PT 种子 -->
-                        <div id="torrent-section" style="display: none;">
-                            <h6><i class="bi bi-cloud-arrow-down text-primary"></i> 关联 PT 种子（将删除种子+下载文件）</h6>
-                            <div class="bg-light border rounded p-3 mb-3" id="torrent-list" style="max-height: 200px; overflow-y: auto;">
-                            </div>
-                        </div>
+    <!-- RIGHT: SIDEBAR ────────────────────────────────────────── -->
+    <aside class="sidebar">
 
-                        <!-- 将执行的 SSH 命令 -->
-                        <div id="commands-section" style="display: none;">
-                            <h6><i class="bi bi-terminal text-secondary"></i> 将在 NAS 上执行的命令</h6>
-                            <pre class="border rounded p-3 mb-3" id="commands-list" style="max-height: 200px; overflow-y: auto; font-size: 0.8rem; background-color: #1e1e1e; color: #e0e0e0;"></pre>
-                        </div>
+        <!-- 已选择 -->
+        <div class="sb-section">
+            <div class="sb-label">已选择</div>
+            <div class="sel-stat">
+                <span id="selected-count">0</span>
+                <span id="selected-size">—</span>
+            </div>
+            <div class="sel-actions">
+                <button class="sb-btn sb-btn-danger" id="btn-delete" disabled onclick="deleteSelected()">
+                    <i class="bi bi-trash3"></i> 删除
+                </button>
+                <button class="sb-btn" onclick="clearSelection()">
+                    <i class="bi bi-x"></i> 清除
+                </button>
+            </div>
+        </div>
 
-                        <div class="alert alert-danger mt-3 mb-0">
-                            <i class="bi bi-exclamation-triangle-fill"></i>
-                            <strong>警告：</strong>将删除所有硬链接和关联种子（含下载文件），磁盘空间将被释放。
-                        </div>
-                    </div>
-                </div>
-                <div class="modal-footer border-secondary">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                    <button type="button" class="btn btn-danger" id="btn-confirm-delete" onclick="confirmDelete()">
-                        <i class="bi bi-trash"></i> 确认删除
-                    </button>
+        <!-- 硬链接检测 -->
+        <div class="sb-section" id="hardlink-panel" style="display:none;">
+            <div class="sb-label">
+                <span>硬链接检测</span>
+                <button class="sb-label-close" onclick="hideHardlinks()" title="关闭">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </div>
+            <div id="hardlink-content">
+                <!-- JS: showHardlinks() populates this -->
+            </div>
+        </div>
+
+        <!-- 文件详情 -->
+        <div class="sb-section" id="file-detail" style="display:none;">
+            <div class="sb-label">文件详情</div>
+            <div id="file-detail-content">
+                <!-- JS: showDetail() populates this -->
+            </div>
+        </div>
+
+        <!-- 操作日志 -->
+        <div class="sb-section" style="flex:1;min-height:0;">
+            <div class="sb-label">操作日志</div>
+            <div class="list-group" id="action-log">
+                <div class="list-group-item text-center"
+                     style="color:var(--text-3);font-size:12px;padding:14px 0 !important;">
+                    暂无操作记录
                 </div>
             </div>
         </div>
-    </div>
 
-    <!-- qBittorrent 配置对话框 -->
-    <div class="modal fade" id="qbitConfigModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header border-secondary">
-                    <h5 class="modal-title">
-                        <i class="bi bi-gear"></i> qBittorrent 设置
-                    </h5>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+    </aside>
+
+</div><!-- /.app-body -->
+
+
+<!-- ── DELETE MODAL ────────────────────────────────────────────── -->
+<div class="modal fade" id="deleteModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-exclamation-triangle text-warning me-2"></i>确认删除
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+
+                <div id="delete-loading" class="text-center py-4" style="display:none;">
+                    <div class="spinner-border text-primary"></div>
+                    <p class="mt-2" style="font-size:13px;color:var(--text-2);">正在分析关联文件和种子…</p>
                 </div>
-                <div class="modal-body">
-                    <form id="qbit-config-form">
-                        <div class="mb-3">
-                            <label for="qbit-url" class="form-label">WebUI 地址</label>
-                            <input type="url" class="form-control" id="qbit-url"
-                                   placeholder="http://192.168.1.100:8080" required>
-                            <div class="form-text">qBittorrent WebUI 的完整 URL</div>
-                        </div>
-                        <div class="mb-3">
-                            <label for="qbit-user" class="form-label">用户名</label>
-                            <input type="text" class="form-control" id="qbit-user"
+
+                <div id="delete-preview-content">
+                    <p>确定要删除以下文件吗？此操作不可撤销。</p>
+
+                    <h6>
+                        <i class="bi bi-file-earmark me-1"></i>选中的文件
+                        <span class="fw-normal" style="color:var(--text-3);" id="delete-total-size"></span>
+                    </h6>
+                    <div class="border rounded p-3 mb-3" id="delete-file-list"
+                         style="max-height:140px;overflow-y:auto;"></div>
+
+                    <div id="hardlink-section" style="display:none;">
+                        <h6><i class="bi bi-link-45deg me-1" style="color:var(--teal);"></i>关联硬链接（将一并删除）</h6>
+                        <div class="border rounded p-3 mb-3" id="hardlink-list"
+                             style="max-height:140px;overflow-y:auto;"></div>
+                    </div>
+
+                    <div id="torrent-section" style="display:none;">
+                        <h6><i class="bi bi-cloud-arrow-down me-1" style="color:var(--blue);"></i>关联 PT 种子（含下载文件）</h6>
+                        <div class="border rounded p-3 mb-3" id="torrent-list"
+                             style="max-height:140px;overflow-y:auto;"></div>
+                    </div>
+
+                    <div id="commands-section" style="display:none;">
+                        <h6><i class="bi bi-terminal me-1" style="color:var(--text-2);"></i>将在 NAS 上执行的命令</h6>
+                        <pre class="border rounded p-3 mb-3" id="commands-list"
+                             style="max-height:140px;overflow-y:auto;"></pre>
+                    </div>
+
+                    <div class="alert alert-danger mt-3 mb-0">
+                        <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                        <strong>警告：</strong>将删除所有硬链接和关联种子（含下载文件），磁盘空间将被释放。
+                    </div>
+                </div>
+
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-danger" id="btn-confirm-delete"
+                        onclick="confirmDelete()" disabled>
+                    <i class="bi bi-trash me-1"></i>确认删除
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+<!-- ── NAS CONFIG MODAL ────────────────────────────────────────── -->
+<div class="modal fade" id="nasConfigModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-hdd-network me-2" style="color:var(--blue);"></i>NAS 连接设置
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="nas-config-form">
+                    <div class="mb-3">
+                        <label for="nas-host" class="form-label">主机地址</label>
+                        <input type="text" class="form-control" id="nas-host"
+                               placeholder="192.168.1.50 或 nas.local">
+                        <div class="form-text">NAS 的 IP 或主机名</div>
+                    </div>
+                    <div class="row">
+                        <div class="col-7 mb-3">
+                            <label for="nas-user" class="form-label">SSH 用户名</label>
+                            <input type="text" class="form-control" id="nas-user"
                                    placeholder="admin">
                         </div>
-                        <div class="mb-3">
-                            <label for="qbit-password" class="form-label">密码</label>
-                            <input type="password" class="form-control" id="qbit-password"
-                                   placeholder="留空则不修改">
-                            <div class="form-text">留空表示不修改密码</div>
+                        <div class="col-5 mb-3">
+                            <label for="nas-port" class="form-label">端口</label>
+                            <input type="number" class="form-control" id="nas-port"
+                                   placeholder="22" min="1" max="65535">
                         </div>
-                    </form>
-                    <div id="qbit-connection-status" class="mt-2"></div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="nas-base-path" class="form-label">文件根路径</label>
+                        <input type="text" class="form-control" id="nas-base-path"
+                               placeholder="/share/CACHEDEV1_DATA 或 /volume1">
+                        <div class="form-text">浏览的起点路径，必须以 / 开头</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="nas-disk-pattern" class="form-label">
+                            磁盘 df 模式 <span style="color:var(--text-3);font-weight:400;">(可选)</span>
+                        </label>
+                        <input type="text" class="form-control" id="nas-disk-pattern"
+                               placeholder="留空则用根路径；多池可填 /share/CACHEDEV*_DATA">
+                        <div class="form-text">用于 df 命令显示磁盘容量，支持 glob 通配符</div>
+                    </div>
+                </form>
+                <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;font-size:12px;color:var(--text-2);margin-top:10px;">
+                    <i class="bi bi-info-circle me-1" style="color:var(--teal);"></i>
+                    需要预先在 NAS 上配置 <strong>SSH 公钥免密登录</strong>，本工具不传输密码。
                 </div>
-                <div class="modal-footer border-secondary">
-                    <button type="button" class="btn btn-outline-info" onclick="testQBitConnection()">
-                        <i class="bi bi-lightning"></i> 测试连接
-                    </button>
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                    <button type="button" class="btn btn-primary" id="btn-save-qbit" onclick="saveQBitConfig()">
-                        <i class="bi bi-save"></i> 保存配置
-                    </button>
-                </div>
+                <div id="nas-connection-status" class="mt-2"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-info" onclick="testNASConnection()">
+                    <i class="bi bi-lightning me-1"></i>测试连接
+                </button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="btn-save-nas" onclick="saveNASConfig()">
+                    <i class="bi bi-check2 me-1"></i>保存并应用
+                </button>
             </div>
         </div>
     </div>
+</div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="/static/app.js"></script>
+
+<!-- ── QBITTORRENT MODAL ────────────────────────────────────────── -->
+<div class="modal fade" id="qbitConfigModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-gear me-2" style="color:var(--teal);"></i>qBittorrent 设置
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="qbit-config-form">
+                    <div class="mb-3">
+                        <label for="qbit-url" class="form-label">WebUI 地址</label>
+                        <input type="url" class="form-control" id="qbit-url"
+                               placeholder="http://192.168.1.100:8080">
+                        <div class="form-text">qBittorrent WebUI 的完整 URL</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="qbit-user" class="form-label">用户名</label>
+                        <input type="text" class="form-control" id="qbit-user"
+                               placeholder="admin">
+                    </div>
+                    <div class="mb-3">
+                        <label for="qbit-password" class="form-label">密码</label>
+                        <input type="password" class="form-control" id="qbit-password"
+                               placeholder="留空则不修改">
+                        <div class="form-text">留空表示不修改密码</div>
+                    </div>
+                </form>
+                <div id="qbit-connection-status" class="mt-2"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-info" onclick="testQBitConnection()">
+                    <i class="bi bi-lightning me-1"></i>测试连接
+                </button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="btn-save-qbit" onclick="saveQBitConfig()">
+                    <i class="bi bi-check2 me-1"></i>保存配置
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/app.js"></script>
 </body>
 </html>

@@ -25,12 +25,59 @@ app = Flask(__name__)
 CONFIG_DIR = Path(__file__).parent / "config"
 CONFIG_DIR.mkdir(exist_ok=True)
 QBIT_CONFIG_FILE = CONFIG_DIR / "qbit.json"
+NAS_CONFIG_FILE = CONFIG_DIR / "nas.json"
 
-# NAS 配置（从环境变量读取）
+# NAS 配置（env 提供初始默认；可被 nas.json 运行时覆盖）
 NAS_HOST = os.environ.get("NAS_HOST", "192.168.1.100")
 NAS_PORT = int(os.environ.get("NAS_PORT", "22"))
 NAS_USER = os.environ.get("NAS_USER", "admin")
 NAS_BASE_PATH = os.environ.get("NAS_BASE_PATH", "/share/CACHEDEV1_DATA")
+NAS_DISK_PATTERN = os.environ.get("NAS_DISK_PATTERN", "").strip()
+
+
+def _validate_glob_pattern(p: str) -> str:
+    """允许 / * ? [ ] 等通配符，但禁止 shell metachars 防注入"""
+    if not p:
+        return ""
+    if any(c in p for c in ";|&`$()<>\"'\\\n\r\t"):
+        raise ValueError("Invalid characters in pattern")
+    return p
+
+
+def load_nas_config():
+    """如配置文件存在则覆盖 env 默认值"""
+    global NAS_HOST, NAS_PORT, NAS_USER, NAS_BASE_PATH, NAS_DISK_PATTERN
+    if not NAS_CONFIG_FILE.exists():
+        return
+    try:
+        cfg = json.loads(NAS_CONFIG_FILE.read_text(encoding="utf-8"))
+        NAS_HOST = (cfg.get("host") or NAS_HOST).strip()
+        NAS_PORT = int(cfg.get("port") or NAS_PORT)
+        NAS_USER = (cfg.get("user") or NAS_USER).strip()
+        bp = (cfg.get("base_path") or NAS_BASE_PATH).strip().rstrip("/") or NAS_BASE_PATH
+        NAS_BASE_PATH = bp
+        NAS_DISK_PATTERN = _validate_glob_pattern((cfg.get("disk_pattern") or "").strip())
+        logger.info(f"NAS config loaded: {NAS_USER}@{NAS_HOST}:{NAS_PORT} base={NAS_BASE_PATH}")
+    except Exception as e:
+        logger.error(f"Failed to load NAS config: {e}")
+
+
+def save_nas_config(host: str, port: int, user: str, base_path: str, disk_pattern: str = ""):
+    """保存到 nas.json 并热加载"""
+    cfg = {
+        "host": host.strip(),
+        "port": int(port),
+        "user": user.strip(),
+        "base_path": base_path.strip().rstrip("/"),
+        "disk_pattern": _validate_glob_pattern(disk_pattern.strip()),
+    }
+    NAS_CONFIG_FILE.write_text(
+        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    load_nas_config()
+
+
+load_nas_config()
 
 # 简单的 API Token 认证（强制通过 NAS_API_TOKEN 环境变量配置）
 API_TOKEN = os.environ.get("NAS_API_TOKEN", "").strip()
@@ -164,14 +211,49 @@ class QBitClient:
         self._logged_in = True
 
     def test_connection(self) -> dict:
-        """测试连接，返回状态"""
+        """用已保存的配置测试连接"""
         try:
             self._ensure_login()
-            # 获取种子数量验证连接正常
             torrents = self.get_torrents()
             return {"status": "ok", "torrent_count": len(torrents)}
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    @staticmethod
+    def test_connection_with(url: str, user: str, password: str) -> dict:
+        """用临时凭据测试，不修改任何已保存状态。
+        没有传 password 时退回到 client 的当前内存密码（用于"测试我已经保存的"）。
+        """
+        url = (url or "").strip().rstrip("/")
+        if not url:
+            return {"status": "error", "message": "URL is required"}
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return {"status": "error", "message": "URL must use http or https"}
+        if parsed.username or parsed.password:
+            return {"status": "error", "message": "URL must not contain userinfo"}
+        if not password:
+            return {"status": "error", "message": "Password is required"}
+
+        session = requests.Session()
+        try:
+            r = session.post(
+                f"{url}/api/v2/auth/login",
+                data={"username": user, "password": password},
+                headers={"Referer": url},
+                timeout=10,
+            )
+            if r.status_code != 200 or r.text.strip() != "Ok.":
+                return {"status": "error", "message": f"登录失败: HTTP {r.status_code}"}
+            t = session.get(f"{url}/api/v2/torrents/info", timeout=20)
+            t.raise_for_status()
+            return {"status": "ok", "torrent_count": len(t.json())}
+        except requests.RequestException as e:
+            return {"status": "error", "message": str(e)}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+        finally:
+            session.close()
 
     def get_torrents(self) -> list[dict]:
         self._ensure_login()
@@ -368,17 +450,128 @@ def update_qbit_config():
 @app.route("/api/config/qbit/test", methods=["POST"])
 @require_token
 def test_qbit_connection():
-    """测试 qBittorrent 连接"""
-    result = qbit.test_connection()
-    return jsonify(result)
+    """测试 qBittorrent 连接。
+    body 含 url/user/password 时用提交值临时测试（不写盘）；
+    body 为空时用已保存的配置（密码取内存里的值）。
+    """
+    data = request.json or {}
+    url = (data.get("url") or "").strip()
+    user = (data.get("user") or "").strip()
+    password = data.get("password") or ""
+
+    # 没传任何字段 → 测已保存配置
+    if not url and not user and not password:
+        return jsonify(qbit.test_connection())
+
+    # 传了字段 → 用提交值测试，缺失项回落到当前配置
+    cur = qbit.get_config()
+    final_url = url or cur.get("url", "")
+    final_user = user or cur.get("user", "")
+    # password 是 secret：前端可能留空表示"用现存密码"
+    final_password = password or qbit._config.get("password", "")
+    return jsonify(QBitClient.test_connection_with(final_url, final_user, final_password))
+
+
+@app.route("/api/config/nas")
+@require_token
+def get_nas_config():
+    """获取 NAS 连接配置（不含敏感信息）"""
+    return jsonify({
+        "host": NAS_HOST,
+        "port": NAS_PORT,
+        "user": NAS_USER,
+        "base_path": NAS_BASE_PATH,
+        "disk_pattern": NAS_DISK_PATTERN,
+        "configured": NAS_CONFIG_FILE.exists(),
+    })
+
+
+@app.route("/api/config/nas", methods=["POST"])
+@require_token
+def update_nas_config():
+    """更新 NAS 连接配置"""
+    data = request.json or {}
+    host = (data.get("host") or "").strip()
+    user = (data.get("user") or "").strip()
+    base_path = (data.get("base_path") or "").strip()
+    port_raw = data.get("port", 22)
+    disk_pattern = (data.get("disk_pattern") or "").strip()
+
+    if not host:
+        return jsonify({"error": "Host is required"}), 400
+    if not user:
+        return jsonify({"error": "User is required"}), 400
+    if not base_path or not base_path.startswith("/"):
+        return jsonify({"error": "Base path must be an absolute path"}), 400
+
+    try:
+        port = int(port_raw)
+        if port < 1 or port > 65535:
+            raise ValueError("port out of range")
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid port"}), 400
+
+    try:
+        save_nas_config(host, port, user, base_path, disk_pattern)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"save_nas_config failed: {e}")
+        return jsonify({"error": "Failed to save"}), 500
+
+    return jsonify({"status": "saved"})
+
+
+@app.route("/api/config/nas/test", methods=["POST"])
+@require_token
+def test_nas_connection():
+    """用提交的（或当前的）配置做一次轻量 SSH 探活"""
+    data = request.json or {}
+    host = (data.get("host") or NAS_HOST).strip()
+    user = (data.get("user") or NAS_USER).strip()
+    try:
+        port = int(data.get("port") or NAS_PORT)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid port"})
+    base_path = (data.get("base_path") or NAS_BASE_PATH).strip()
+
+    cmd = [
+        "ssh",
+        "-p", str(port),
+        "-o", "ConnectTimeout=5",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "BatchMode=yes",
+        f"{user}@{host}",
+        f"test -d {shlex.quote(base_path)} && echo nasvault-ok || echo missing-path",
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        out = (r.stdout or "").strip()
+        if r.returncode == 0 and "nasvault-ok" in out:
+            return jsonify({"status": "ok", "message": f"已连接 {user}@{host}:{port}，根路径可读"})
+        if "missing-path" in out:
+            return jsonify({"status": "error", "message": f"已连接，但根路径 {base_path} 不存在"})
+        err = (r.stderr or "").strip().splitlines()[-1][:200] if r.stderr else "未知错误"
+        return jsonify({"status": "error", "message": err})
+    except subprocess.TimeoutExpired:
+        return jsonify({"status": "error", "message": "连接超时（5s 内未响应）"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
 
 
 @app.route("/api/disk")
 @require_token
 def disk_usage():
     """获取磁盘使用情况"""
-    # QNAP 通常有 1-2 个存储池（CACHEDEV*_DATA），用 glob 兼容；其他 NAS 自行调整
-    cmd = "df -h /share/CACHEDEV*_DATA 2>/dev/null"
+    # 优先用用户配置的 disk_pattern（支持 glob，如 /share/CACHEDEV*_DATA）
+    # 缺省回落到 NAS_BASE_PATH 单挂载点
+    pattern = NAS_DISK_PATTERN if NAS_DISK_PATTERN else NAS_BASE_PATH
+    try:
+        _validate_glob_pattern(pattern)
+    except ValueError:
+        return jsonify({"error": "Invalid disk pattern in config"}), 500
+    # -P (POSIX) 强制单行输出。busybox df 默认会把长 filesystem 名换行，导致解析全失败。
+    cmd = f"df -hP {pattern} 2>/dev/null"
     code, stdout, stderr = ssh_exec(cmd)
     if code != 0:
         return jsonify({"error": "Failed to get disk info"}), 500
@@ -934,6 +1127,23 @@ def _resolve_real_paths(paths: list[str]) -> dict[str, str]:
     return result
 
 
+def _enumerate_dir_files(dir_paths: list[str], max_files: int = 500) -> list[str]:
+    """递归列出目录内的文件路径（用于硬链接 / 种子匹配）。
+
+    为什么需要：用户删除一个目录时，目录内的文件才是 qBit 下载的硬链接。
+    `stat <dir>` 只返回目录自己的 inode，不会展开内容，导致硬链接 → 种子关系链断掉。
+    """
+    if not dir_paths:
+        return []
+    quoted = " ".join(shlex.quote(d) for d in dir_paths)
+    # head 限流防止超大目录拖死 SSH；500 个文件足够命中绝大多数 PT 种子
+    cmd = f"find {quoted} -type f 2>/dev/null | head -n {max_files}"
+    code, stdout, _ = ssh_exec(cmd, timeout=60)
+    if code != 0:
+        return []
+    return [line.strip() for line in stdout.strip().split("\n") if line.strip()]
+
+
 def _reject_base_path(paths: list[str]):
     """删除前的额外护栏：拒绝把 NAS_BASE_PATH 本身作为删除目标"""
     for p in paths:
@@ -1026,8 +1236,47 @@ def delete_preview():
     for f in validated_files:
         all_paths.add(f)
 
+    # 用户选了目录时，递归到内部文件，把它们的硬链接也加入匹配集
+    # 否则 stat <dir> 只能拿到目录自己的 inode，丢失"目录内文件 ↔ qBit 下载"的硬链接关系
+    dir_paths = [p for p, t in types.items() if t == "directory"]
+    inner_info: dict = {}
+    inner_files: list[str] = []
+    if dir_paths:
+        inner_files = _enumerate_dir_files(dir_paths)
+        if inner_files:
+            all_paths.update(inner_files)
+            inner_info = _resolve_all_hardlink_paths(inner_files)
+            for info in inner_info.values():
+                all_paths.update(info.get("all_paths", []))
+            logger.info(
+                f"[delete-preview] expanded {len(dir_paths)} dir(s) to "
+                f"{len(inner_files)} inner file(s) for torrent matching"
+            )
+
+    # 硬链接汇总（用于前端解释为什么没匹配到种子）
+    # 顶层选中的文件 + 目录内枚举出的内部文件，统计 inode 引用 > 1 的数量
+    checked_count = 0
+    multi_link_count = 0
+    for filepath, info in {**path_info, **inner_info}.items():
+        # 只看真实文件（types/inner 都包含 file）；目录的 all_paths 长度=1 也是 1，不算误差
+        all_p = info.get("all_paths", [])
+        if not all_p:
+            continue
+        # 跳过被识别为目录的顶层条目（目录不会有真硬链接）
+        if filepath in types and types[filepath] == "directory":
+            continue
+        checked_count += 1
+        if len(all_p) > 1:
+            multi_link_count += 1
+    hardlink_summary = {
+        "checked_files": checked_count,
+        "with_hardlinks": multi_link_count,
+        "all_independent": checked_count > 0 and multi_link_count == 0,
+    }
+
     # 匹配 qBittorrent 种子
     torrents = []
+    qbit_status = {"ok": True, "message": ""}
     try:
         matched = qbit.find_torrents_by_paths(list(all_paths))
         for t in matched:
@@ -1043,6 +1292,7 @@ def delete_preview():
             })
     except Exception as e:
         logger.error(f"qBit lookup failed: {e}")
+        qbit_status = {"ok": False, "message": str(e)}
 
     # 收集所有要删除的路径（用户选 + 硬链接），构建命令清单
     all_to_delete = set(validated_files)
@@ -1079,6 +1329,8 @@ def delete_preview():
     return jsonify({
         "files": preview_files,
         "torrents": torrents,
+        "qbit_status": qbit_status,
+        "hardlink_summary": hardlink_summary,
         "total_hardlinks": sum(len(f["hardlink_paths"]) for f in preview_files),
         "commands": commands,
         "total_size": total_real_size,
@@ -1118,12 +1370,25 @@ def delete_complete():
     for info in path_info.values():
         all_paths_to_delete.update(info["all_paths"])
 
+    # 同 delete-preview：扩展目录内部文件用于种子匹配
+    # 注意只扩展用于"匹配"的集合，不加进 `all_paths_to_delete`（rm -rf 父目录已涵盖内部文件）
+    types_for_dirs = _stat_path_types(validated_files)
+    dir_paths_for_match = [p for p, t in types_for_dirs.items() if t == "directory"]
+    match_paths = set(all_paths_to_delete)
+    if dir_paths_for_match:
+        inner_files = _enumerate_dir_files(dir_paths_for_match)
+        if inner_files:
+            match_paths.update(inner_files)
+            inner_info = _resolve_all_hardlink_paths(inner_files)
+            for info in inner_info.values():
+                match_paths.update(info.get("all_paths", []))
+
     # 1) 删除 PT 种子（先删种子，因为 deleteFiles=true 会删源文件）
     torrent_results = []
     qbit_deleted_paths = set()
     if delete_torrents:
         try:
-            all_paths_list = list(all_paths_to_delete)
+            all_paths_list = list(match_paths)
             matched = qbit.find_torrents_by_paths(all_paths_list)
             if matched:
                 hashes = [t["hash"] for t in matched]

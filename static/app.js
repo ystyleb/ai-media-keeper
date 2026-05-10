@@ -34,6 +34,19 @@ document.addEventListener("DOMContentLoaded", async () => {
         return;
     }
 
+    // 未配置 NAS 时自动打开配置框
+    try {
+        const nasRes = await apiFetch(`${API_BASE}/api/config/nas`);
+        const nasCfg = await nasRes.json();
+        if (!nasCfg.configured) {
+            addLog("尚未配置 NAS 连接，请填写后保存", "info");
+            showNASConfig();
+            return;
+        }
+    } catch (err) {
+        // 忽略，按正常流程继续
+    }
+
     refreshDisk();
     loadFiles(currentPath);
 });
@@ -109,24 +122,27 @@ function renderDiskCards(disks) {
     disks.forEach(disk => {
         const percent = parseInt(disk.use_percent);
         const color = percent > 90 ? "danger" : percent > 70 ? "warning" : "success";
+        // 用挂载点最后一段作为简短标签
+        const label = (disk.mount || "").split("/").pop() || disk.mount;
 
-        const card = createElement("div", { className: "col-md-6 mb-2" }, [
-            createElement("div", { className: "card disk-card" }, [
-                createElement("div", { className: "card-body py-2" }, [
-                    createElement("div", { className: "d-flex justify-content-between align-items-center mb-1" }, [
-                        createElement("small", { className: "text-secondary", textContent: disk.mount }),
-                        createElement("small", { className: `text-${color}`, textContent: disk.use_percent })
+        const card = createElement("div", { className: "col-md-6" }, [
+            createElement("div", {
+                className: "card disk-card",
+                title: `${disk.mount}\n已用 ${disk.used} / 可用 ${disk.available} / 总计 ${disk.size} (${disk.use_percent})`
+            }, [
+                createElement("div", { className: "card-body" }, [
+                    createElement("div", { className: "d-flex justify-content-between align-items-center" }, [
+                        createElement("small", { className: "fw-bold", textContent: label }),
+                        createElement("small", {
+                            className: `text-${color}`,
+                            textContent: `${disk.used}/${disk.size}`
+                        })
                     ]),
-                    createElement("div", { className: "progress mb-1" }, [
+                    createElement("div", { className: "progress" }, [
                         createElement("div", {
                             className: `progress-bar bg-${color}`,
                             style: `width: ${percent}%`
                         })
-                    ]),
-                    createElement("div", { className: "d-flex justify-content-between" }, [
-                        createElement("small", { className: "text-secondary", textContent: `已用 ${disk.used}` }),
-                        createElement("small", { className: "text-secondary", textContent: `可用 ${disk.available}` }),
-                        createElement("small", { className: "text-secondary", textContent: `总计 ${disk.size}` })
                     ])
                 ])
             ])
@@ -955,6 +971,10 @@ function renderDeletePreview(data) {
 
     if (data.torrents && data.torrents.length > 0) {
         torrentSection.style.display = "block";
+        const heading = torrentSection.querySelector("h6");
+        if (heading) {
+            heading.innerHTML = '<i class="bi bi-cloud-arrow-down me-1" style="color:var(--blue);"></i>关联 PT 种子（含下载文件）';
+        }
         data.torrents.forEach(t => {
             const row = createElement("div", {
                 className: "d-flex justify-content-between align-items-center py-1"
@@ -972,7 +992,38 @@ function renderDeletePreview(data) {
             torrentList.appendChild(row);
         });
     } else {
-        torrentSection.style.display = "none";
+        // 即使没匹配到种子，也展示原因（qBit 未连 / 文件无硬链接 / 单纯没匹配上）
+        torrentSection.style.display = "block";
+        const heading = torrentSection.querySelector("h6");
+        const qbitStatus = data.qbit_status || { ok: true };
+        const hl = data.hardlink_summary || {};
+
+        let iconHtml, title, hint;
+        if (!qbitStatus.ok) {
+            iconHtml = '<i class="bi bi-plug me-1" style="color:var(--amber);"></i>';
+            title = "未连接到 qBittorrent";
+            hint = `${qbitStatus.message || "请在 qBit 设置里填写密码并测试连接"} — 无法检测关联种子。`;
+        } else if (hl.all_independent) {
+            iconHtml = '<i class="bi bi-info-circle me-1" style="color:var(--text-3);"></i>';
+            title = "未找到关联 PT 种子";
+            hint = `已检查 ${hl.checked_files} 个文件，全部为独立拷贝（无硬链接）；qBit 中也没有路径相关的种子。`;
+        } else if (hl.with_hardlinks > 0) {
+            iconHtml = '<i class="bi bi-info-circle me-1" style="color:var(--text-3);"></i>';
+            title = "未找到关联 PT 种子";
+            hint = `检测到 ${hl.with_hardlinks}/${hl.checked_files} 个文件存在跨目录硬链接，但 qBit 里没有指向这些路径的种子。`;
+        } else {
+            iconHtml = '<i class="bi bi-info-circle me-1" style="color:var(--text-3);"></i>';
+            title = "未找到关联 PT 种子";
+            hint = "qBit 中没有路径相关的种子。";
+        }
+        if (heading) heading.innerHTML = iconHtml + title;
+        torrentList.innerHTML = "";
+        const msgRow = createElement("div", { className: "py-1" });
+        msgRow.appendChild(createElement("small", {
+            className: "text-secondary",
+            textContent: hint,
+        }));
+        torrentList.appendChild(msgRow);
     }
 
     // 将执行的 SSH 命令清单
@@ -1200,10 +1251,16 @@ async function testQBitConnection() {
     statusEl.innerHTML = '<div class="spinner-border spinner-border-sm text-primary"></div> 测试中...';
     statusEl.className = "mt-2";
 
+    // 用当前表单里的值测试（无需先保存）；password 留空表示沿用已保存的
+    const url = (document.getElementById("qbit-url").value || "").trim();
+    const user = (document.getElementById("qbit-user").value || "").trim();
+    const password = document.getElementById("qbit-password").value || "";
+
     try {
         const res = await apiFetch(`${API_BASE}/api/config/qbit/test`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" }
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url, user, password })
         });
 
         const data = await res.json();
@@ -1238,4 +1295,127 @@ function renderConnectError(statusEl, message) {
         className: "text-danger",
         textContent: message
     }));
+}
+
+// ==================== NAS 配置 ====================
+
+let nasConfigModal = null;
+
+function showNASConfig() {
+    if (!nasConfigModal) {
+        nasConfigModal = new bootstrap.Modal(document.getElementById("nasConfigModal"));
+    }
+    loadNASConfig();
+    nasConfigModal.show();
+}
+
+async function loadNASConfig() {
+    const statusEl = document.getElementById("nas-connection-status");
+    statusEl.innerHTML = "";
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/nas`);
+        const cfg = await res.json();
+        document.getElementById("nas-host").value = cfg.host || "";
+        document.getElementById("nas-port").value = cfg.port || 22;
+        document.getElementById("nas-user").value = cfg.user || "";
+        document.getElementById("nas-base-path").value = cfg.base_path || "";
+        document.getElementById("nas-disk-pattern").value = cfg.disk_pattern || "";
+
+        if (cfg.configured) {
+            // 已保存过，自动测一次
+            testNASConnection();
+        } else {
+            const hint = createElement("span", { className: "text-secondary" });
+            hint.appendChild(createElement("i", { className: "bi bi-info-circle me-1" }));
+            hint.appendChild(document.createTextNode("尚未配置过，请填写后点击测试连接"));
+            statusEl.appendChild(hint);
+        }
+    } catch (err) {
+        renderConnectError(statusEl, `加载失败: ${err.message}`);
+    }
+}
+
+function _readNASForm() {
+    return {
+        host: document.getElementById("nas-host").value.trim(),
+        port: parseInt(document.getElementById("nas-port").value, 10) || 22,
+        user: document.getElementById("nas-user").value.trim(),
+        base_path: document.getElementById("nas-base-path").value.trim(),
+        disk_pattern: document.getElementById("nas-disk-pattern").value.trim(),
+    };
+}
+
+async function saveNASConfig() {
+    const data = _readNASForm();
+    if (!data.host) { alert("请填写主机地址"); return; }
+    if (!data.user) { alert("请填写 SSH 用户名"); return; }
+    if (!data.base_path || !data.base_path.startsWith("/")) {
+        alert("文件根路径必须以 / 开头");
+        return;
+    }
+
+    const btn = document.getElementById("btn-save-nas");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 保存中...';
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/nas`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(data),
+        });
+        const json = await res.json();
+        if (json.error) {
+            alert(`保存失败: ${json.error}`);
+            return;
+        }
+        addLog("NAS 配置已保存", "success");
+
+        // 重新拉取配置（base_path 可能变了）并刷新 UI
+        const cfgRes = await apiFetch(`${API_BASE}/api/config/app`);
+        const cfg = await cfgRes.json();
+        nasBasePath = cfg.nas_base_path;
+        currentPath = nasBasePath;
+
+        refreshDisk();
+        loadFiles(currentPath);
+        testNASConnection();
+    } catch (err) {
+        alert(`保存失败: ${err.message}`);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-check2 me-1"></i>保存并应用';
+    }
+}
+
+async function testNASConnection() {
+    const statusEl = document.getElementById("nas-connection-status");
+    statusEl.innerHTML = '<div class="spinner-border spinner-border-sm text-primary"></div> 测试中...';
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/nas/test`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(_readNASForm()),
+        });
+        const data = await res.json();
+        statusEl.innerHTML = "";
+        if (data.status === "ok") {
+            const ok = createElement("span", { className: "text-success" });
+            ok.appendChild(createElement("i", { className: "bi bi-check-circle me-1" }));
+            ok.appendChild(document.createTextNode("连接成功"));
+            statusEl.appendChild(ok);
+            statusEl.appendChild(createElement("br"));
+            statusEl.appendChild(createElement("small", {
+                className: "text-secondary",
+                textContent: data.message || "",
+            }));
+        } else {
+            renderConnectError(statusEl, data.message || "未知错误");
+        }
+    } catch (err) {
+        statusEl.innerHTML = "";
+        renderConnectError(statusEl, err.message);
+    }
 }
