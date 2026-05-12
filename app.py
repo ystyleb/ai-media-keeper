@@ -165,12 +165,14 @@ def _close_db(exception=None):
         db.close()
 
 
-# qBittorrent 配置（默认值，可被运行时配置覆盖；密码不落盘）
+# qBittorrent 配置（默认值；密码现在落盘到 config/.qbit_pass，chmod 600）
 DEFAULT_QBIT_CONFIG = {
     "url": os.environ.get("QBIT_URL", "http://192.168.1.100:8080"),
     "user": os.environ.get("QBIT_USER", "admin"),
     "password": os.environ.get("QBIT_PASS", ""),
 }
+
+QBIT_PASS_FILE = CONFIG_DIR / ".qbit_pass"
 
 
 class QBitClient:
@@ -183,10 +185,14 @@ class QBitClient:
         self.load_config()
 
     def load_config(self):
-        """加载配置：url / user 从文件读，password 只在内存（env var 或 UI 输入）。
+        """加载配置：url / user 从 qbit.json，密码从 config/.qbit_pass（plain text）。
 
-        密码来源优先级：UI 主动设置（运行时） > 文件遗留的老明文（自动迁移） > QBIT_PASS env。
-        密码永远不写盘——只能通过 QBIT_PASS env var 跨重启持久化。
+        密码来源优先级：UI 运行时设置 > config/.qbit_pass > QBIT_PASS env > 老 qbit.json
+        明文（自动迁移到 .qbit_pass 并擦除旧字段）。
+
+        落盘是 plain text + chmod 600。原本"密码永不落盘"的设计在 config/.api_token
+        和 config/.signing_key 已落盘后失去相对意义——攻击者拿到 config 目录就拥有
+        所有凭据，再藏密码无收益。
         """
         self._config = {
             "url": DEFAULT_QBIT_CONFIG["url"],
@@ -201,7 +207,7 @@ class QBitClient:
                     saved = json.load(f)
                 self._config["url"] = saved.get("url", self._config["url"])
                 self._config["user"] = saved.get("user", self._config["user"])
-                # 老格式：明文 password 字段。加载到内存，下面立刻擦除文件里的它
+                # 老格式残留：旧 qbit.json 可能含明文 password。迁移到 .qbit_pass + 擦除
                 if saved.get("password"):
                     self._config["password"] = saved["password"]
                     legacy_plaintext_found = True
@@ -210,18 +216,27 @@ class QBitClient:
         else:
             self.save_config()
 
+        # 从独立密码文件读（优先级低于 env，高于老 qbit.json 残留逻辑：
+        # env 已经填进 self._config["password"]，若仍为空再读 .qbit_pass）
+        if not self._config["password"] and QBIT_PASS_FILE.exists():
+            try:
+                pwd = QBIT_PASS_FILE.read_text(encoding="utf-8").strip()
+                if pwd:
+                    self._config["password"] = pwd
+            except OSError as e:
+                logger.error(f"Failed to read {QBIT_PASS_FILE}: {e}")
+
         self._logged_in = False
         self.session.cookies.clear()
 
         if legacy_plaintext_found:
             logger.warning(
-                "qBit config: migrated plaintext password from disk to memory only. "
-                "Set QBIT_PASS env var to persist across restarts."
+                f"qBit config: migrated plaintext password from qbit.json → {QBIT_PASS_FILE}"
             )
-            self.save_config()  # 立刻擦除文件里的 password 字段
+            self.save_config()  # 擦除 qbit.json 里的 password + 写新 .qbit_pass
 
     def save_config(self):
-        """保存配置到文件——只写 url / user，password 永不落盘"""
+        """url / user → qbit.json；password → config/.qbit_pass（chmod 600）"""
         on_disk = {
             "url": self._config.get("url", ""),
             "user": self._config.get("user", ""),
@@ -230,6 +245,19 @@ class QBitClient:
             json.dumps(on_disk, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        password = self._config.get("password") or ""
+        if password:
+            QBIT_PASS_FILE.write_text(password, encoding="utf-8")
+            try:
+                os.chmod(QBIT_PASS_FILE, 0o600)
+            except OSError as e:
+                logger.warning(f"could not chmod 600 {QBIT_PASS_FILE}: {e}")
+        elif QBIT_PASS_FILE.exists():
+            # 显式清空密码（UI "清除" 等场景）→ 删文件
+            try:
+                QBIT_PASS_FILE.unlink()
+            except OSError as e:
+                logger.warning(f"could not unlink {QBIT_PASS_FILE}: {e}")
 
     @property
     def url(self) -> str:
