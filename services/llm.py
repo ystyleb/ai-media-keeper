@@ -123,7 +123,7 @@ def extract_title_from_filename(
     api_key: str,
     model: str = DEFAULT_MODEL,
     base_url: str = DEFAULT_BASE_URL,
-    timeout: float = 30.0,
+    timeout: float = 90.0,  # reasoning 模式比 chat 慢，30s 经常不够
 ) -> tuple[FilenameExtraction | None, str]:
     """LLM 解析文件名 → title/year/season/episode/media_type。
 
@@ -231,7 +231,7 @@ def select_candidate(
     api_key: str,
     model: str = DEFAULT_MODEL,
     base_url: str = DEFAULT_BASE_URL,
-    timeout: float = 30.0,
+    timeout: float = 90.0,  # reasoning 模式 + 多候选时 30s 不够，APITimeoutError 频发
 ) -> LLMSelection:
     """grounded selection。永远不让 LLM 编 id；output schema enforce 后失败 → needs_review。
 

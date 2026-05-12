@@ -279,7 +279,21 @@ def identify(
                     reasoning=f"llm: {sel.reasoning}",
                     pick_source="llm",
                 )
-        # LLM 也没选出 → needs_review，把 LLM 的 reasoning 透传给 UI 让用户判断
+
+        # LLM 没选出或失败（timeout / API error / no_candidates）→
+        # fallback 到 heuristic top_pick 给用户一个 best-guess（不是 needs_review 死局）
+        # 仅当 heuristic 有 ≥ 0.5 把握时 fallback；更低就 needs_review
+        is_llm_error = sel.reasoning.startswith("llm_error") or "timeout" in sel.reasoning.lower()
+        if heur_top is not None and heur_score >= 0.5:
+            label = "heuristic_fallback_after_llm_error" if is_llm_error else "heuristic_fallback"
+            return IdentifyResult(
+                parse=parse, candidates=candidates, top_pick=heur_top,
+                confidence=heur_score,
+                reasoning=f"{label}: llm said '{sel.reasoning}'; heuristic best-guess: {heur_reason}",
+                pick_source="heuristic",
+            )
+
+        # 真没把握 → needs_review，但仍透传 LLM 失败原因 + heuristic top（让用户在 UI 看到候选 #1）
         return IdentifyResult(
             parse=parse, candidates=candidates, top_pick=None,
             confidence=sel.confidence,
