@@ -107,12 +107,18 @@ def _now() -> int:
     return int(time.time())
 
 
-def load_server_secret(*, worker_count: int = 1) -> bytes:
-    """加载持久 server_secret，处理 dev fallback。
+def load_server_secret(
+    *,
+    worker_count: int = 1,
+    config_path: Path | str | None = None,
+) -> bytes:
+    """加载持久 server_secret。
 
-    生产唯一支持模式：env NAS_ACTION_SIGNING_KEY。
-    Dev fallback：未设 env 且 worker_count == 1 时随机生成 + 大声 warning；
-                  worker_count > 1 时强制 raise（多 worker 必须共享 secret）。
+    优先级：
+    1. env NAS_ACTION_SIGNING_KEY（≥32 字符）
+    2. config_path 指向的文件（first start 自动生成 + chmod 600）
+    3. 未提供 config_path 且 worker_count == 1 时，进程内 ephemeral 临时 secret + warning
+       （多 worker 时强制 raise——必须共享持久 secret）
     """
     env_key = os.environ.get("NAS_ACTION_SIGNING_KEY", "").strip()
     if env_key:
@@ -123,18 +129,41 @@ def load_server_secret(*, worker_count: int = 1) -> bytes:
             )
         return env_key.encode("utf-8")
 
+    if config_path is not None:
+        p = Path(config_path)
+        if p.exists():
+            content = p.read_text(encoding="utf-8").strip()
+            if len(content) < 32:
+                raise ServerSecretMisconfigured(
+                    f"signing key file {p} contains a key shorter than 32 chars; "
+                    "delete it to regenerate, or set NAS_ACTION_SIGNING_KEY env"
+                )
+            return content.encode("utf-8")
+        # 首次启动：自动生成 + 写文件 + chmod 600
+        new_key = secrets.token_hex(32)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(new_key, encoding="utf-8")
+        try:
+            os.chmod(p, 0o600)
+        except OSError as e:
+            logger.warning(f"[destructive_action] could not chmod 600 {p}: {e}")
+        logger.info(
+            f"[destructive_action] generated new server_secret → {p} "
+            "(persists across restarts; delete to rotate)"
+        )
+        return new_key.encode("utf-8")
+
+    # 既没 env 也没 config_path → 纯内存 ephemeral
     if worker_count > 1:
         raise ServerSecretMisconfigured(
-            "NAS_ACTION_SIGNING_KEY is required when running with multiple workers. "
-            "Set it in env (≥32 chars). Dev single-worker mode generates an ephemeral "
-            "secret but is not safe for production."
+            "Multi-worker requires persistent signing key (NAS_ACTION_SIGNING_KEY env "
+            "or config_path)."
         )
 
     dev_secret = secrets.token_hex(32)
     logger.warning(
-        "[destructive_action] NAS_ACTION_SIGNING_KEY not set — generated ephemeral "
-        "DEV-ONLY secret. In-flight tokens will NOT survive restart. "
-        "Set NAS_ACTION_SIGNING_KEY for any non-trivial use."
+        "[destructive_action] no persistent signing key configured — using ephemeral "
+        "in-memory secret. In-flight tokens will NOT survive restart."
     )
     return dev_secret.encode("utf-8")
 

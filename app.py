@@ -82,26 +82,61 @@ def save_nas_config(host: str, port: int, user: str, base_path: str, disk_patter
 
 load_nas_config()
 
-# 简单的 API Token 认证（强制通过 NAS_API_TOKEN 环境变量配置）
-API_TOKEN = os.environ.get("NAS_API_TOKEN", "").strip()
-if not API_TOKEN:
+# API Token 加载策略：env > config 文件 > 首次启动自动生成 + 落盘
+#
+# 设计目标：零 env 启动可行，但保留 env 作为 override（CI / 多机部署）。
+# 文件路径走 config/ 目录（已 .gitignore，跟 qBit config 同级），首次写入 chmod 600。
+import secrets as _secrets
+
+API_TOKEN_FILE = CONFIG_DIR / ".api_token"
+
+
+def _load_api_token() -> str:
+    env_token = os.environ.get("NAS_API_TOKEN", "").strip()
+    if env_token:
+        if len(env_token) < 16:
+            sys.stderr.write("ERROR: NAS_API_TOKEN is too short (need ≥ 16 chars).\n")
+            sys.exit(1)
+        return env_token
+    if API_TOKEN_FILE.exists():
+        token = API_TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if len(token) < 16:
+            sys.stderr.write(
+                f"ERROR: {API_TOKEN_FILE} has a token shorter than 16 chars. "
+                "Delete it to regenerate.\n"
+            )
+            sys.exit(1)
+        return token
+    # 首次启动：自动生成并 chmod 600
+    new_token = _secrets.token_hex(32)
+    API_TOKEN_FILE.write_text(new_token, encoding="utf-8")
+    try:
+        os.chmod(API_TOKEN_FILE, 0o600)
+    except OSError:
+        pass
     sys.stderr.write(
-        "ERROR: NAS_API_TOKEN environment variable is required.\n"
-        "Generate one with:\n"
-        '  python3 -c "import secrets; print(secrets.token_hex(32))"\n'
-        "Then export it before starting the server.\n"
+        "\n" + "=" * 60 + "\n"
+        f"  Generated new API token → {API_TOKEN_FILE}\n"
+        f"  Token (copy into UI on first visit):\n\n"
+        f"    {new_token}\n\n"
+        f"  Persists across restarts. Delete the file to rotate.\n"
+        + "=" * 60 + "\n\n"
     )
-    sys.exit(1)
-if len(API_TOKEN) < 16:
-    sys.stderr.write("ERROR: NAS_API_TOKEN is too short (need ≥ 16 chars).\n")
-    sys.exit(1)
+    return new_token
+
+
+API_TOKEN = _load_api_token()
 logger.info(f"API Token loaded ({len(API_TOKEN)} chars).")
 
 # 契约 #1: server_secret 加载 + SQLite schema 初始化
 # WEB_CONCURRENCY 是 gunicorn 约定 env；未设视为单 worker（dev / flask run）
 WORKER_COUNT = int(os.environ.get("WEB_CONCURRENCY", "1"))
+SIGNING_KEY_FILE = CONFIG_DIR / ".signing_key"
 try:
-    SERVER_SECRET = destructive_action.load_server_secret(worker_count=WORKER_COUNT)
+    SERVER_SECRET = destructive_action.load_server_secret(
+        worker_count=WORKER_COUNT,
+        config_path=SIGNING_KEY_FILE,
+    )
 except destructive_action.ServerSecretMisconfigured as e:
     sys.stderr.write(f"ERROR: {e}\n")
     sys.exit(1)

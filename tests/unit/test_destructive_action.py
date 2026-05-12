@@ -333,18 +333,59 @@ def test_load_server_secret_rejects_short_env(monkeypatch):
 
 
 def test_load_server_secret_dev_fallback_single_worker(monkeypatch, caplog):
+    """没 env 没 config_path → 单 worker ephemeral + warning。"""
     monkeypatch.delenv("NAS_ACTION_SIGNING_KEY", raising=False)
     with caplog.at_level("WARNING"):
         s = da.load_server_secret(worker_count=1)
     assert len(s) > 32
-    assert any("DEV-ONLY" in r.message for r in caplog.records)
+    assert any("ephemeral" in r.message for r in caplog.records)
 
 
 def test_load_server_secret_dev_fallback_multi_worker_refused(monkeypatch):
-    """多 worker 没设 env → 必须 raise，不能 fallback。"""
+    """多 worker 没设 env 也没 config_path → 必须 raise。"""
     monkeypatch.delenv("NAS_ACTION_SIGNING_KEY", raising=False)
     with pytest.raises(da.ServerSecretMisconfigured):
         da.load_server_secret(worker_count=2)
+
+
+def test_load_server_secret_config_file_first_time(monkeypatch, tmp_path):
+    """config_path 不存在 → 自动生成 + 写文件 + chmod 600。"""
+    monkeypatch.delenv("NAS_ACTION_SIGNING_KEY", raising=False)
+    keyfile = tmp_path / ".signing_key"
+    s = da.load_server_secret(worker_count=4, config_path=keyfile)
+    assert len(s) >= 64
+    assert keyfile.exists()
+    # chmod 600 验证
+    import stat as st
+    mode = keyfile.stat().st_mode & 0o777
+    assert mode == 0o600, f"expected 0o600, got 0o{mode:o}"
+
+
+def test_load_server_secret_config_file_persistent_across_calls(monkeypatch, tmp_path):
+    """已存在的 config_path → 第二次加载读同一个 secret。"""
+    monkeypatch.delenv("NAS_ACTION_SIGNING_KEY", raising=False)
+    keyfile = tmp_path / ".signing_key"
+    s1 = da.load_server_secret(worker_count=1, config_path=keyfile)
+    s2 = da.load_server_secret(worker_count=1, config_path=keyfile)
+    assert s1 == s2
+
+
+def test_load_server_secret_env_overrides_config_file(monkeypatch, tmp_path):
+    """env 优先级 > config 文件。"""
+    keyfile = tmp_path / ".signing_key"
+    keyfile.write_text("file-key-" + "x" * 32)
+    monkeypatch.setenv("NAS_ACTION_SIGNING_KEY", "env-key-" + "y" * 32)
+    s = da.load_server_secret(worker_count=1, config_path=keyfile)
+    assert s.startswith(b"env-key-")
+
+
+def test_load_server_secret_config_file_rejects_short(monkeypatch, tmp_path):
+    """config 文件里的 secret 太短 → raise。"""
+    monkeypatch.delenv("NAS_ACTION_SIGNING_KEY", raising=False)
+    keyfile = tmp_path / ".signing_key"
+    keyfile.write_text("tooshort")
+    with pytest.raises(da.ServerSecretMisconfigured):
+        da.load_server_secret(worker_count=1, config_path=keyfile)
 
 
 # ---------------- payload canonicalization ---------------- #
