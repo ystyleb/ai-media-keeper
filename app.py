@@ -1254,23 +1254,26 @@ class SnapshotMismatch(Exception):
 def _ssh_stat_paths(paths: list[str]) -> dict[str, dict]:
     """SSH stat 一批 path，返回 {path: {inode, size_bytes, mtime, exists, is_dir}}。
 
-    用 stat -c 通用 Linux 格式；QNAP / Synology / 普通 Linux 都兼容。
+    用 stat -c 通用 Linux 格式（GNU + BusyBox 兼容）。**关键**：把 path 让 stat 自己
+    用 %n 输出，不嵌进 format string——否则 shlex.quote 的引号会变成 stat 输出里
+    的字面量，导致解析 key 跟原 path 不匹配（结果 inode=0 / exists=False，下游
+    `find -inum` 跳过 → 文件没真删却返回 already_gone）。
     """
     if not paths:
         return {}
-    parts = []
-    for p in paths:
-        safe = shlex.quote(p)
-        # %i inode, %s size_bytes, %Y mtime, %F file type
-        # 用一个不太可能出现在路径里的 sep（U+001F unit separator）
-        parts.append(f'stat -c "STAT\x1f{safe}\x1f%i\x1f%s\x1f%Y\x1f%F" {safe} 2>/dev/null || echo "MISS\x1f{safe}"')
-    cmd = " ; ".join(parts)
+    SEP = "\x1f"  # ASCII Unit Separator — 几乎不会出现在 path 里
+    quoted = " ".join(shlex.quote(p) for p in paths)
+    fmt = f"STAT{SEP}%n{SEP}%i{SEP}%s{SEP}%Y{SEP}%F"
+    cmd = f"stat -c {shlex.quote(fmt)} {quoted} 2>/dev/null"
     _, out, _ = ssh_exec(cmd, timeout=60)
+
     result: dict[str, dict] = {}
     for line in out.splitlines():
-        line = line.strip()
-        if line.startswith("STAT\x1f"):
-            _, p, inode, size, mtime, ftype = line.split("\x1f", 5)
+        line = line.rstrip("\r\n")
+        if not line.startswith(f"STAT{SEP}"):
+            continue
+        try:
+            _, p, inode, size, mtime, ftype = line.split(SEP, 5)
             result[p] = {
                 "exists": True,
                 "inode": int(inode),
@@ -1278,9 +1281,9 @@ def _ssh_stat_paths(paths: list[str]) -> dict[str, dict]:
                 "mtime": int(mtime),
                 "is_dir": "directory" in ftype,
             }
-        elif line.startswith("MISS\x1f"):
-            _, p = line.split("\x1f", 1)
-            result[p] = {"exists": False}
+        except (ValueError, IndexError):
+            continue
+
     # 兜底：命令返回里没出现的 path 标为缺失
     for p in paths:
         result.setdefault(p, {"exists": False})
@@ -1497,8 +1500,13 @@ def _delete_executor(payload: dict) -> dict:
     return {
         "file_results": file_results,
         "torrent_results": torrent_results,
+        # 'deleted' / 'deleted_by_qbit' 都是真消失了；
+        # 'already_gone' 单独算（preview 后被外部删除 / 我们 find 没匹配）
         "total_files_deleted": sum(
-            1 for r in file_results if r["status"] in ("deleted", "deleted_by_qbit", "already_gone")
+            1 for r in file_results if r["status"] in ("deleted", "deleted_by_qbit")
+        ),
+        "total_files_already_gone": sum(
+            1 for r in file_results if r["status"] == "already_gone"
         ),
         "total_torrents_deleted": sum(1 for r in torrent_results if r.get("status") == "deleted"),
         "space_freed": total_freed,

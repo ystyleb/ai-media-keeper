@@ -1086,6 +1086,11 @@ async function confirmDelete() {
         if (result.total_files_deleted > 0) {
             addLog(`已删除 ${result.total_files_deleted} 个文件`, "success");
         }
+        if (result.total_files_already_gone > 0) {
+            // already_gone = preview 后文件已不在；要么 qBit 顺手删了，要么有其他进程动过。
+            // 区分显示让用户知道"我们没真去删它，但它现在没了"
+            addLog(`${result.total_files_already_gone} 个文件已不存在（已被其他途径处理）`, "warning");
+        }
 
         if (Array.isArray(result.torrent_results)) {
             result.torrent_results.forEach(t => {
