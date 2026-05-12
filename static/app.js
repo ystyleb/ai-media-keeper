@@ -702,20 +702,15 @@ function renderMetadataCard(container, data) {
         });
         container.appendChild(banner);
 
-        // 如果 LLM 未配置 + 走到这里 → 引导配置 LLM 帮选
-        if (!data.llm_configured && data.candidates && data.candidates.length > 1) {
-            const llmHint = createElement("div", {
+        // hint：始终展示配置入口（指向顶部 AI 按钮），即使候选 0 也给用户出路
+        if (!data.llm_configured) {
+            const text = (data.candidates && data.candidates.length > 0)
+                ? '🤖 候选有，但 confidence 太低自动跳过。配 DeepSeek 让 AI 帮选 → 顶部 <strong>AI</strong> 按钮'
+                : '⚠️ TMDB 没找到候选。可能文件名无法解析。手动到 <a href="https://www.themoviedb.org/" target="_blank">themoviedb.org</a> 搜索确认，或配 DeepSeek 让 AI 试更模糊的搜索 → 顶部 <strong>AI</strong> 按钮';
+            container.appendChild(createElement("div", {
                 className: "alert alert-info py-2 small mb-2",
-                innerHTML: '🤖 配置 DeepSeek API key 后，AI 会自动从候选里挑（中文剧名 / 模糊命名都搞得定，免费 tier 够用）。<a href="#" id="open-deepseek-config">点这里配置</a>'
-            });
-            llmHint.querySelector("#open-deepseek-config").addEventListener("click", async (e) => {
-                e.preventDefault();
-                const ok = await configureDeepseekKeyPrompt();
-                if (ok) {
-                    llmHint.innerHTML = '<small class="text-success">已保存。再点一次 "AI 识别" 按钮让 AI 帮选。</small>';
-                }
-            });
-            container.appendChild(llmHint);
+                innerHTML: text,
+            }));
         }
         if (!data.candidates || data.candidates.length === 0) {
             container.appendChild(createElement("p", {
@@ -812,20 +807,12 @@ function renderMetadataCard(container, data) {
         }
     }
 
-    // 即使匹配上了，LLM 未配置时给个小提示——用户能主动配 LLM 升级体验
+    // 即使匹配上了，LLM 未配置时给个小提示——指向顶部 AI 按钮
     if (!data.llm_configured && data.pick_source !== "llm") {
-        const llmHint = createElement("small", {
+        container.appendChild(createElement("small", {
             className: "d-block mt-2 text-info",
-            innerHTML: '<i class="bi bi-lightbulb me-1"></i>配置 <a href="#" class="text-info" id="open-deepseek-config-inline">DeepSeek API key</a>（免费 tier 够用），AI 帮选能识别中文 release / 模糊命名 / 多版本。'
-        });
-        llmHint.querySelector("#open-deepseek-config-inline").addEventListener("click", async (e) => {
-            e.preventDefault();
-            const ok = await configureDeepseekKeyPrompt();
-            if (ok) {
-                llmHint.innerHTML = '<small class="text-success">DeepSeek 已配。后续识别会用 AI 选。</small>';
-            }
-        });
-        container.appendChild(llmHint);
+            innerHTML: '<i class="bi bi-lightbulb me-1"></i>配 DeepSeek 让 AI 帮选（中文 / 模糊命名都搞得定）→ 顶部 <strong>AI</strong> 按钮'
+        }));
     }
 }
 
@@ -1462,6 +1449,125 @@ function showError(message) {
 function refresh() {
     loadFiles(currentPath);
 }
+
+// ==================== AI / 元数据配置 ====================
+
+let aiConfigModal = null;
+
+async function showAIConfig() {
+    if (!aiConfigModal) {
+        aiConfigModal = new bootstrap.Modal(document.getElementById("aiConfigModal"));
+    }
+    // 先读现有 key 状态，更新 badge
+    try {
+        const [tmdbRes, dsRes] = await Promise.all([
+            apiFetch(`${API_BASE}/api/config/tmdb`),
+            apiFetch(`${API_BASE}/api/config/deepseek`),
+        ]);
+        const tmdb = await tmdbRes.json();
+        const ds = await dsRes.json();
+        _setKeyBadge("tmdb-key-status", tmdb.has_key);
+        _setKeyBadge("deepseek-key-status", ds.has_key);
+    } catch (err) {
+        console.error("load key status failed", err);
+    }
+    document.getElementById("tmdb-key-input").value = "";
+    document.getElementById("deepseek-key-input").value = "";
+    document.getElementById("tmdb-test-status").innerHTML = "";
+    document.getElementById("deepseek-test-status").innerHTML = "";
+    aiConfigModal.show();
+}
+
+function _setKeyBadge(id, hasKey) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (hasKey) {
+        el.textContent = "已配置";
+        el.className = "badge bg-success ms-1";
+    } else {
+        el.textContent = "未配置";
+        el.className = "badge bg-secondary ms-1";
+    }
+}
+
+async function testTMDBKey() {
+    const input = document.getElementById("tmdb-key-input").value.trim();
+    const status = document.getElementById("tmdb-test-status");
+    status.innerHTML = '<span class="text-secondary">测试中...</span>';
+    try {
+        const body = input ? { api_key: input } : {};
+        const res = await apiFetch(`${API_BASE}/api/config/tmdb/test`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (data.ok) {
+            status.innerHTML = `<span class="text-success">✓ TMDB OK${data.images_base_url ? ' · 图床: '+data.images_base_url : ''}</span>`;
+        } else {
+            status.innerHTML = `<span class="text-danger">✗ ${data.message}</span>`;
+        }
+    } catch (err) {
+        status.innerHTML = `<span class="text-danger">网络错误: ${err.message}</span>`;
+    }
+}
+
+async function testDeepseekKey() {
+    const input = document.getElementById("deepseek-key-input").value.trim();
+    const status = document.getElementById("deepseek-test-status");
+    status.innerHTML = '<span class="text-secondary">测试中（一次小调用 ~1 秒）...</span>';
+    try {
+        const body = input ? { api_key: input } : {};
+        const res = await apiFetch(`${API_BASE}/api/config/deepseek/test`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (data.ok) {
+            status.innerHTML = `<span class="text-success">✓ DeepSeek OK · 模型 ${data.model} · 样本：${data.sample}</span>`;
+        } else {
+            status.innerHTML = `<span class="text-danger">✗ ${data.message}</span>`;
+        }
+    } catch (err) {
+        status.innerHTML = `<span class="text-danger">网络错误: ${err.message}</span>`;
+    }
+}
+
+async function saveAIConfig() {
+    const tmdb = document.getElementById("tmdb-key-input").value.trim();
+    const ds = document.getElementById("deepseek-key-input").value.trim();
+    const ops = [];
+    if (tmdb) {
+        ops.push(apiFetch(`${API_BASE}/api/config/tmdb`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ api_key: tmdb }),
+        }).then(r => r.json()).then(d => ({ kind: "TMDB", ok: d.ok })));
+    }
+    if (ds) {
+        ops.push(apiFetch(`${API_BASE}/api/config/deepseek`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ api_key: ds }),
+        }).then(r => r.json()).then(d => ({ kind: "DeepSeek", ok: d.ok })));
+    }
+    if (ops.length === 0) {
+        alert("没有改动。填一个 key 再保存，或直接关闭。");
+        return;
+    }
+    const results = await Promise.all(ops);
+    const ok = results.every(r => r.ok);
+    if (ok) {
+        addLog("AI 配置已保存：" + results.map(r => r.kind).join(", "), "success");
+        // 重读 badge
+        showAIConfig();
+    } else {
+        const failed = results.filter(r => !r.ok).map(r => r.kind).join(", ");
+        alert("部分保存失败：" + failed);
+    }
+}
+
 
 // ==================== qBittorrent 配置 ====================
 

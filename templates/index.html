@@ -51,7 +51,7 @@
 
             /* Layout */
             --topbar-h:   52px;
-            --sidebar-w:  272px;
+            --sidebar-w:  380px;
             --r:          6px;
             --r-lg:       10px;
 
@@ -773,6 +773,10 @@
             <i class="bi bi-gear"></i>
             qBit
         </button>
+        <button class="tb-btn" onclick="showAIConfig()">
+            <i class="bi bi-stars"></i>
+            AI
+        </button>
     </div>
 </header>
 
@@ -1081,6 +1085,72 @@
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
                 <button type="button" class="btn btn-primary" id="btn-save-qbit" onclick="saveQBitConfig()">
                     <i class="bi bi-check2 me-1"></i>保存配置
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+<!-- AI 配置 modal（TMDB metadata + DeepSeek LLM） -->
+<div class="modal fade" id="aiConfigModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-stars me-2" style="color:var(--teal);"></i>AI 与元数据配置
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-secondary small mb-3">
+                    两个都是 BYOK（自己申请、自己配）。落盘到
+                    <code>config/.tmdb_key</code> / <code>config/.deepseek_key</code>（chmod 600）。
+                </p>
+
+                <!-- TMDB section -->
+                <div class="mb-4">
+                    <label class="form-label">
+                        <strong>TMDB API Key</strong>
+                        <span class="badge bg-secondary ms-1" id="tmdb-key-status">未配置</span>
+                    </label>
+                    <input type="password" class="form-control" id="tmdb-key-input"
+                           placeholder="留空则不修改；已配置时显示 ●●●">
+                    <div class="form-text">
+                        申请：<a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">themoviedb.org/settings/api</a>
+                        （免费，1 分钟）。用于：剧名 / 海报 / 评分 / 剧情 / 演员。
+                    </div>
+                    <div id="tmdb-test-status" class="mt-2 small"></div>
+                </div>
+
+                <hr style="border-color:var(--border);">
+
+                <!-- DeepSeek section -->
+                <div class="mb-2">
+                    <label class="form-label">
+                        <strong>DeepSeek API Key</strong>
+                        <span class="badge bg-secondary ms-1" id="deepseek-key-status">未配置</span>
+                    </label>
+                    <input type="password" class="form-control" id="deepseek-key-input"
+                           placeholder="sk-... 留空则不修改">
+                    <div class="form-text">
+                        申请：<a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener">platform.deepseek.com/api_keys</a>。
+                        用于：中文剧名 / 模糊命名 AI 识别（grounded select）。
+                        Anthropic / OpenAI 太贵，DeepSeek 单文件成本约 $0.0001。
+                    </div>
+                    <div id="deepseek-test-status" class="mt-2 small"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-info btn-sm" onclick="testTMDBKey()">
+                    测试 TMDB
+                </button>
+                <button type="button" class="btn btn-outline-info btn-sm" onclick="testDeepseekKey()">
+                    测试 DeepSeek
+                </button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                <button type="button" class="btn btn-primary" onclick="saveAIConfig()">
+                    <i class="bi bi-check2 me-1"></i>保存
                 </button>
             </div>
         </div>
