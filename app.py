@@ -7,13 +7,16 @@ import os
 import shlex
 import logging
 import sys
+import time
 import xml.etree.ElementTree as ET
 from functools import wraps
 from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
-from flask import Flask, render_template, jsonify, request, abort
+from flask import Flask, render_template, jsonify, request, abort, g
+
+from services import destructive_action
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -93,6 +96,39 @@ if len(API_TOKEN) < 16:
     sys.stderr.write("ERROR: NAS_API_TOKEN is too short (need ≥ 16 chars).\n")
     sys.exit(1)
 logger.info(f"API Token loaded ({len(API_TOKEN)} chars).")
+
+# 契约 #1: server_secret 加载 + SQLite schema 初始化
+# WEB_CONCURRENCY 是 gunicorn 约定 env；未设视为单 worker（dev / flask run）
+WORKER_COUNT = int(os.environ.get("WEB_CONCURRENCY", "1"))
+try:
+    SERVER_SECRET = destructive_action.load_server_secret(worker_count=WORKER_COUNT)
+except destructive_action.ServerSecretMisconfigured as e:
+    sys.stderr.write(f"ERROR: {e}\n")
+    sys.exit(1)
+
+DB_PATH = CONFIG_DIR / "actions.db"
+SCHEMA_PATH = Path(__file__).parent / "db" / "schema.sql"
+_init_conn = destructive_action.open_connection(DB_PATH)
+try:
+    destructive_action.init_schema(_init_conn, SCHEMA_PATH)
+    logger.info(f"Destructive action DB ready at {DB_PATH}")
+finally:
+    _init_conn.close()
+
+
+def get_db():
+    """Flask 请求级 SQLite 连接。每请求开一个，teardown 时关闭。"""
+    if "db" not in g:
+        g.db = destructive_action.open_connection(DB_PATH)
+    return g.db
+
+
+@app.teardown_appcontext
+def _close_db(exception=None):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
 
 # qBittorrent 配置（默认值，可被运行时配置覆盖；密码不落盘）
 DEFAULT_QBIT_CONFIG = {
@@ -962,85 +998,17 @@ def find_by_inode(inode: int):
 @app.route("/api/delete", methods=["POST"])
 @require_token
 def delete_files():
-    """删除文件（支持批量，2 次 SSH 完成）"""
-    data = request.json
-    if not data or not isinstance(data.get("files"), list):
-        return jsonify({"error": "Invalid request: files array required"}), 400
+    """[deprecated] 直删入口被契约 #1 替代。返回 410。
 
-    files = data.get("files", [])
-    if not files:
-        return jsonify({"error": "No files specified"}), 400
-
-    # 安全验证所有路径
-    validated_files = []
-    for f in files:
-        try:
-            validated_files.append(validate_path(f))
-        except Exception as e:
-            return jsonify({"error": f"Invalid path: {f}"}), 400
-
-    _reject_base_path(validated_files)
-    logger.info(f"[delete] request: {len(validated_files)} file(s): {validated_files}")
-
-    # 批量 stat（一次 SSH）
-    quoted_paths = " ".join(shlex.quote(p) for p in validated_files)
-    stat_cmd = f"stat -c '%h %i %s %n' {quoted_paths} 2>/dev/null"
-    code, stdout, _ = ssh_exec(stat_cmd)
-
-    file_info: dict[str, dict] = {}
-    if code == 0:
-        for line in stdout.strip().split("\n"):
-            if not line:
-                continue
-            parts = line.split(None, 3)
-            if len(parts) < 4:
-                continue
-            try:
-                file_info[parts[3]] = {
-                    "links": int(parts[0]),
-                    "inode": int(parts[1]),
-                    "size": int(parts[2]),
-                }
-            except (ValueError, IndexError):
-                continue
-
-    # 批量删除（一次 SSH，shell 循环逐个删并输出结果）
-    rm_parts = []
-    for filepath in validated_files:
-        safe = shlex.quote(filepath)
-        rm_parts.append(f'rm {safe} && echo "OK {safe}" || echo "FAIL {safe}"')
-    rm_cmd = " ; ".join(rm_parts)
-    _, rm_out, _ = ssh_exec(rm_cmd)
-
-    rm_results: dict[str, bool] = {}
-    for line in rm_out.strip().split("\n"):
-        if line.startswith("OK "):
-            rm_results[line[3:].strip("'")] = True
-        elif line.startswith("FAIL "):
-            rm_results[line[5:].strip("'")] = False
-
-    results = []
-    for filepath in validated_files:
-        info = file_info.get(filepath)
-        if not info:
-            results.append({"path": filepath, "status": "error", "message": "File not found"})
-            continue
-
-        if rm_results.get(filepath):
-            remaining = info["links"] - 1
-            results.append({
-                "path": filepath,
-                "status": "deleted",
-                "inode": info["inode"],
-                "remaining_links": remaining,
-                "space_freed": remaining == 0,
-                "size": info["size"]
-            })
-            logger.info(f"Deleted: {filepath} (inode: {info['inode']}, remaining links: {remaining})")
-        else:
-            results.append({"path": filepath, "status": "error", "message": "Delete failed"})
-
-    return jsonify({"results": results})
+    Migrate: 用 POST /api/action/preview (kind='delete') 拿 signed_token，
+             再 POST /api/action/confirm 才能执行删除。
+    """
+    return jsonify({
+        "error": "deprecated",
+        "use_preview": "/api/action/preview",
+        "use_confirm": "/api/action/confirm",
+        "doc": "Destructive operations now require preview→confirm with signed token.",
+    }), 410
 
 
 def _stat_path_types(paths: list[str]) -> dict[str, str]:
@@ -1207,75 +1175,123 @@ def _resolve_all_hardlink_paths(file_paths: list[str]) -> dict:
 @app.route("/api/delete-preview", methods=["POST"])
 @require_token
 def delete_preview():
-    """预览联删：返回硬链接路径 + 关联 PT 种子（不执行删除）"""
-    data = request.json
-    if not data or not isinstance(data.get("files"), list):
-        return jsonify({"error": "Invalid request: files array required"}), 400
+    """[deprecated] alias 到 /api/action/preview (kind='delete')。
 
-    files = data["files"]
-    validated_files = []
-    for f in files:
-        try:
-            validated_files.append(validate_path(f))
-        except Exception:
-            return jsonify({"error": f"Invalid path: {f}"}), 400
+    Spike 阶段保留路由名以减少前端切换冲击；行为完全等同 /api/action/preview。
+    legacy 字段 'files' / 'delete_torrents' 兼容，新代码用 'candidates' / 'options'。
+    """
+    data = request.json or {}
+    # 兼容旧 shape：把 'files' 当成 candidates
+    return _do_action_preview("delete", data)
 
-    _reject_base_path(validated_files)
 
-    # 区分文件/目录 + 真实大小（目录递归计算）
-    types = _stat_path_types(validated_files)
-    real_sizes = _get_real_sizes(validated_files)
+@app.route("/api/delete-complete", methods=["POST"])
+@require_token
+def delete_complete():
+    """[deprecated] Direct execute removed (契约 #1 R2-B1).
 
-    # 查找所有硬链接路径
-    path_info = _resolve_all_hardlink_paths(validated_files)
+    Migrate: POST /api/action/preview (kind='delete') → get signed_token,
+             then POST /api/action/confirm to execute.
+    """
+    return jsonify({
+        "error": "deprecated",
+        "use_preview": "/api/action/preview",
+        "use_confirm": "/api/action/confirm",
+        "doc": "Destructive operations now require preview→confirm with signed token.",
+    }), 410
 
-    # 收集所有路径用于匹配 PT 种子
-    all_paths = set()
-    for info in path_info.values():
-        all_paths.update(info["all_paths"])
-    for f in validated_files:
-        all_paths.add(f)
 
-    # 用户选了目录时，递归到内部文件，把它们的硬链接也加入匹配集
-    # 否则 stat <dir> 只能拿到目录自己的 inode，丢失"目录内文件 ↔ qBit 下载"的硬链接关系
-    dir_paths = [p for p, t in types.items() if t == "directory"]
-    inner_info: dict = {}
+
+
+# ─────────────────────────────────────────────────────────────
+# 契约 #1 + #2：统一 Destructive Action 协议 + Ground Truth Snapshot
+# ─────────────────────────────────────────────────────────────
+
+
+class SnapshotMismatch(Exception):
+    """Confirm 阶段重读 snapshot 发现 ground truth 已变。"""
+
+    def __init__(self, diffs: list[dict]):
+        super().__init__(f"target changed since preview: {len(diffs)} diff(s)")
+        self.diffs = diffs
+
+
+def _ssh_stat_paths(paths: list[str]) -> dict[str, dict]:
+    """SSH stat 一批 path，返回 {path: {inode, size_bytes, mtime, exists, is_dir}}。
+
+    用 stat -c 通用 Linux 格式；QNAP / Synology / 普通 Linux 都兼容。
+    """
+    if not paths:
+        return {}
+    parts = []
+    for p in paths:
+        safe = shlex.quote(p)
+        # %i inode, %s size_bytes, %Y mtime, %F file type
+        # 用一个不太可能出现在路径里的 sep（U+001F unit separator）
+        parts.append(f'stat -c "STAT\x1f{safe}\x1f%i\x1f%s\x1f%Y\x1f%F" {safe} 2>/dev/null || echo "MISS\x1f{safe}"')
+    cmd = " ; ".join(parts)
+    _, out, _ = ssh_exec(cmd, timeout=60)
+    result: dict[str, dict] = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("STAT\x1f"):
+            _, p, inode, size, mtime, ftype = line.split("\x1f", 5)
+            result[p] = {
+                "exists": True,
+                "inode": int(inode),
+                "size_bytes": int(size),
+                "mtime": int(mtime),
+                "is_dir": "directory" in ftype,
+            }
+        elif line.startswith("MISS\x1f"):
+            _, p = line.split("\x1f", 1)
+            result[p] = {"exists": False}
+    # 兜底：命令返回里没出现的 path 标为缺失
+    for p in paths:
+        result.setdefault(p, {"exists": False})
+    return result
+
+
+def _build_delete_snapshot(candidates: list[dict]) -> dict:
+    """SSH 实时拉 ground truth + 硬链接 + qBit 匹配，生成 canonical snapshot。
+
+    candidates: [{"path": ...}, ...]，client 提交的原始候选——其他字段忽略。
+    Server-side authoritative：所有 inode/size/mtime/realpath 都重新算。
+    """
+    paths = [validate_path(c["path"]) for c in candidates]
+    _reject_base_path(paths)
+
+    # 1. SSH stat → 拿 inode / size / mtime / is_dir
+    stat_map = _ssh_stat_paths(paths)
+
+    # 2. realpath 规范化
+    realpath_map = _resolve_real_paths(paths)
+
+    # 3. 硬链接遍历（沿用现有逻辑）
+    hardlink_info = _resolve_all_hardlink_paths(paths)
+
+    # 4. 目录扩展（用于 torrent 匹配）
+    dir_paths = [p for p in paths if stat_map.get(p, {}).get("is_dir")]
     inner_files: list[str] = []
+    inner_hardlinks: dict = {}
     if dir_paths:
         inner_files = _enumerate_dir_files(dir_paths)
         if inner_files:
-            all_paths.update(inner_files)
-            inner_info = _resolve_all_hardlink_paths(inner_files)
-            for info in inner_info.values():
-                all_paths.update(info.get("all_paths", []))
-            logger.info(
-                f"[delete-preview] expanded {len(dir_paths)} dir(s) to "
-                f"{len(inner_files)} inner file(s) for torrent matching"
-            )
+            inner_hardlinks = _resolve_all_hardlink_paths(inner_files)
 
-    # 硬链接汇总（用于前端解释为什么没匹配到种子）
-    # 顶层选中的文件 + 目录内枚举出的内部文件，统计 inode 引用 > 1 的数量
-    checked_count = 0
-    multi_link_count = 0
-    for filepath, info in {**path_info, **inner_info}.items():
-        # 只看真实文件（types/inner 都包含 file）；目录的 all_paths 长度=1 也是 1，不算误差
-        all_p = info.get("all_paths", [])
-        if not all_p:
-            continue
-        # 跳过被识别为目录的顶层条目（目录不会有真硬链接）
-        if filepath in types and types[filepath] == "directory":
-            continue
-        checked_count += 1
-        if len(all_p) > 1:
-            multi_link_count += 1
-    hardlink_summary = {
-        "checked_files": checked_count,
-        "with_hardlinks": multi_link_count,
-        "all_independent": checked_count > 0 and multi_link_count == 0,
-    }
+    # 5. 收集所有候选 path（顶层 + 顶层硬链接 + 目录内文件 + 内文件硬链接）
+    all_paths: set[str] = set(paths)
+    for info in hardlink_info.values():
+        all_paths.update(info.get("all_paths", []))
+    all_paths.update(inner_files)
+    for info in inner_hardlinks.values():
+        all_paths.update(info.get("all_paths", []))
 
-    # 匹配 qBittorrent 种子
-    torrents = []
+    # 6. 真实大小（目录递归）
+    real_sizes = _get_real_sizes(paths)
+
+    # 7. qBit 种子匹配（顶层 + 内层 + 全部硬链接路径）
+    torrents: list[dict] = []
     qbit_status = {"ok": True, "message": ""}
     try:
         matched = qbit.find_torrents_by_paths(list(all_paths))
@@ -1284,216 +1300,363 @@ def delete_preview():
                 "hash": t["hash"],
                 "name": t["name"],
                 "size": t.get("total_size", 0),
-                "size_human": human_size(t.get("total_size", 0)),
-                "save_path": t.get("save_path", ""),
                 "content_path": t.get("content_path", ""),
+                "save_path": t.get("save_path", ""),
                 "state": t.get("state", ""),
-                "progress": t.get("progress", 0),
             })
     except Exception as e:
-        logger.error(f"qBit lookup failed: {e}")
+        logger.error(f"[snapshot] qBit lookup failed: {e}")
         qbit_status = {"ok": False, "message": str(e)}
 
-    # 收集所有要删除的路径（用户选 + 硬链接），构建命令清单
-    all_to_delete = set(validated_files)
-    for info in path_info.values():
-        all_to_delete.update(info["all_paths"])
-
-    # 硬链接路径可能不在 types 里，补一次
-    extra_paths = [p for p in all_to_delete if p not in types]
-    if extra_paths:
-        types.update(_stat_path_types(extra_paths))
-
-    commands = []
-    for p in sorted(all_to_delete):
-        is_dir = types.get(p) == "directory"
-        commands.append(_build_rm_command(p, is_dir))
-
-    # 构建预览结果（用真实大小）
-    preview_files = []
-    for filepath in validated_files:
-        info = path_info.get(filepath, {})
-        other_links = [p for p in info.get("all_paths", []) if p != filepath]
-        is_dir = types.get(filepath) == "directory"
-        real_size = real_sizes.get(filepath, info.get("size", 0))
-        preview_files.append({
-            "path": filepath,
-            "is_dir": is_dir,
-            "inode": info.get("inode", 0),
-            "size": real_size,
-            "size_human": human_size(real_size),
-            "hardlink_paths": other_links,
+    # 8. 构建 items（每个用户提交的 path 一条）
+    items = []
+    for p in paths:
+        stat = stat_map.get(p, {"exists": False})
+        hl_info = hardlink_info.get(p, {})
+        items.append({
+            "path": p,
+            "realpath": realpath_map.get(p, p),
+            "exists": stat.get("exists", False),
+            "inode": stat.get("inode", 0),
+            "size_bytes": stat.get("size_bytes", 0),
+            "mtime": stat.get("mtime", 0),
+            "is_dir": stat.get("is_dir", False),
+            "real_size": real_sizes.get(p, 0),
+            "hardlinks": [hp for hp in hl_info.get("all_paths", []) if hp != p],
         })
 
-    total_real_size = sum(real_sizes.get(p, 0) for p in validated_files)
-    return jsonify({
-        "files": preview_files,
+    return {
+        "captured_at": int(time.time()),
+        "items": items,
+        "all_to_delete": sorted({
+            p for p in paths
+        } | {
+            hp for info in hardlink_info.values() for hp in info.get("all_paths", [])
+        }),
         "torrents": torrents,
         "qbit_status": qbit_status,
-        "hardlink_summary": hardlink_summary,
-        "total_hardlinks": sum(len(f["hardlink_paths"]) for f in preview_files),
-        "commands": commands,
-        "total_size": total_real_size,
-        "total_size_human": human_size(total_real_size),
-    })
+    }
 
 
-@app.route("/api/delete-complete", methods=["POST"])
-@require_token
-def delete_complete():
-    """联删：硬链接 + PT 种子 + 文件，一次全部清理"""
-    data = request.json
-    if not data or not isinstance(data.get("files"), list):
-        return jsonify({"error": "Invalid request: files array required"}), 400
+def _diff_snapshots(expected: dict, current: dict) -> list[dict]:
+    """对比 preview 和 confirm 两次 snapshot 的 items，返回不一致的字段。
 
-    files = data["files"]
-    delete_torrents = data.get("delete_torrents", True)
+    只对比 user-submitted paths（snapshot.items），不对比 hardlinks/torrents——
+    hardlinks 增减是合理的（其他进程加/删硬链接不该阻塞删除），inode 才是 anchor。
+    """
+    diffs = []
+    exp_by_path = {it["path"]: it for it in expected.get("items", [])}
+    cur_by_path = {it["path"]: it for it in current.get("items", [])}
+    for path, exp in exp_by_path.items():
+        cur = cur_by_path.get(path)
+        if cur is None:
+            diffs.append({"path": path, "kind": "missing_in_current"})
+            continue
+        # exists / inode / size / mtime 任一变化都阻塞
+        for key in ("exists", "inode", "size_bytes", "mtime"):
+            if exp.get(key) != cur.get(key):
+                diffs.append({
+                    "path": path,
+                    "kind": f"{key}_changed",
+                    "expected": exp.get(key),
+                    "current": cur.get(key),
+                })
+    return diffs
 
-    validated_files = []
-    for f in files:
-        try:
-            validated_files.append(validate_path(f))
-        except Exception:
-            return jsonify({"error": f"Invalid path: {f}"}), 400
 
-    _reject_base_path(validated_files)
-    logger.info(
-        f"[delete-complete] request: {len(validated_files)} file(s), "
-        f"delete_torrents={delete_torrents}: {validated_files}"
-    )
+def _delete_executor(payload: dict) -> dict:
+    """Confirm 阶段执行删除：重读 snapshot 比对 → 删 qBit 种子 → inode-anchored 删剩余文件。
 
-    # 查找所有硬链接路径
-    path_info = _resolve_all_hardlink_paths(validated_files)
+    raise SnapshotMismatch 视为业务失败（destructive_action.confirm 会捕获并落 status='failed'）。
+    """
+    expected_snapshot = payload["snapshot"]
+    candidates = payload["candidates"]
+    options = payload.get("options", {})
+    delete_torrents = options.get("delete_torrents", True)
 
-    # 收集所有需要删除的文件路径（用户选的 + 硬链接）
-    all_paths_to_delete = set(validated_files)
-    for info in path_info.values():
-        all_paths_to_delete.update(info["all_paths"])
+    # 1. 重新拉 ground truth snapshot
+    current_snapshot = _build_delete_snapshot(candidates)
 
-    # 同 delete-preview：扩展目录内部文件用于种子匹配
-    # 注意只扩展用于"匹配"的集合，不加进 `all_paths_to_delete`（rm -rf 父目录已涵盖内部文件）
-    types_for_dirs = _stat_path_types(validated_files)
-    dir_paths_for_match = [p for p, t in types_for_dirs.items() if t == "directory"]
-    match_paths = set(all_paths_to_delete)
-    if dir_paths_for_match:
-        inner_files = _enumerate_dir_files(dir_paths_for_match)
-        if inner_files:
-            match_paths.update(inner_files)
-            inner_info = _resolve_all_hardlink_paths(inner_files)
-            for info in inner_info.values():
-                match_paths.update(info.get("all_paths", []))
+    # 2. 对比 — 不一致则阻塞
+    diffs = _diff_snapshots(expected_snapshot, current_snapshot)
+    if diffs:
+        raise SnapshotMismatch(diffs)
 
-    # 1) 删除 PT 种子（先删种子，因为 deleteFiles=true 会删源文件）
+    # 3. 删除 qBit 种子（先种子，避免 deleteFiles 之后我们还要删 rm）
     torrent_results = []
-    qbit_deleted_paths = set()
-    if delete_torrents:
+    qbit_deleted_paths: set[str] = set()
+    if delete_torrents and expected_snapshot.get("torrents"):
+        hashes = [t["hash"] for t in expected_snapshot["torrents"]]
         try:
-            all_paths_list = list(match_paths)
-            matched = qbit.find_torrents_by_paths(all_paths_list)
-            if matched:
-                hashes = [t["hash"] for t in matched]
-                qbit.delete_torrents(hashes, delete_files=True)
-                for t in matched:
-                    torrent_results.append({
-                        "hash": t["hash"],
-                        "name": t["name"],
-                        "status": "deleted",
-                    })
-                    # 记录种子管理的路径（qBit 已经删了这些文件）
-                    cp = t.get("content_path", "")
-                    if cp:
-                        qbit_deleted_paths.add(cp)
-                logger.info(f"Deleted {len(matched)} torrents: {[t['name'] for t in matched]}")
-        except Exception as e:
-            logger.error(f"qBit delete failed: {e}")
+            qbit.delete_torrents(hashes, delete_files=True)
+            for t in expected_snapshot["torrents"]:
+                torrent_results.append({
+                    "hash": t["hash"], "name": t["name"], "status": "deleted",
+                })
+                if t.get("content_path"):
+                    qbit_deleted_paths.add(t["content_path"])
+            logger.info(f"[action/delete] removed {len(hashes)} torrents")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[action/delete] qBit delete failed: {e}")
             torrent_results.append({"status": "error", "message": str(e)})
 
-    # 2) 删除剩余的硬链接文件（qBit 可能已删了源文件，这里删剩下的链接）
-    remaining_to_delete = [
-        p for p in all_paths_to_delete
-        if p not in qbit_deleted_paths
-    ]
+    # 4. inode-anchored 删除剩余文件
+    # 文件：用 `find <base> -xdev -inum N -delete` 锚定 inode（处理 confirm 之间被 mv）
+    # 目录：直接 rm -rf <path>（目录没有真硬链接概念）
+    file_results: list[dict] = []
+    base = NAS_BASE_PATH.rstrip("/")
+    safe_base = shlex.quote(base)
+    for item in expected_snapshot["items"]:
+        path = item["path"]
+        if path in qbit_deleted_paths:
+            file_results.append({"path": path, "status": "deleted_by_qbit"})
+            continue
+        if item["is_dir"]:
+            # 目录：直接 rm -rf path（验证存在）
+            safe_path = shlex.quote(path)
+            cmd = f'[ -e {safe_path} ] && rm -rf -- {safe_path} && echo OK || echo GONE'
+            _, out, _ = ssh_exec(cmd, timeout=300)
+            last = out.strip().splitlines()[-1] if out.strip() else "GONE"
+            if last == "OK":
+                file_results.append({"path": path, "status": "deleted"})
+            else:
+                file_results.append({"path": path, "status": "already_gone"})
+        else:
+            # 文件：find -inum 删所有 hardlink；inode=0（不存在）跳过
+            if not item["exists"] or item["inode"] == 0:
+                file_results.append({"path": path, "status": "already_gone"})
+                continue
+            inum = int(item["inode"])
+            # -xdev 限制不跨文件系统；-print 让我们看删了哪些
+            cmd = f'find {safe_base} -xdev -inum {inum} -print -delete 2>/dev/null'
+            _, out, _ = ssh_exec(cmd, timeout=300)
+            removed_paths = [ln for ln in out.strip().splitlines() if ln]
+            if removed_paths:
+                file_results.append({
+                    "path": path, "status": "deleted", "inode_paths": removed_paths,
+                })
+            else:
+                file_results.append({"path": path, "status": "already_gone"})
 
-    file_results = []
-    if remaining_to_delete:
-        # 先检查哪些文件还存在（qBit 可能已经删了一部分）
-        check_parts = []
-        for p in remaining_to_delete:
-            safe = shlex.quote(p)
-            check_parts.append(f'[ -e {safe} ] && echo "EXISTS {safe}" || echo "GONE {safe}"')
-        check_cmd = " ; ".join(check_parts)
-        _, check_out, _ = ssh_exec(check_cmd)
-
-        still_exists = []
-        for line in check_out.strip().split("\n"):
-            if line.startswith("EXISTS "):
-                still_exists.append(line[7:].strip("'"))
-
-        if still_exists:
-            # 区分文件/目录：目录用 rm -rf，文件用 rm
-            existing_types = _stat_path_types(still_exists)
-            rm_parts = []
-            for filepath in still_exists:
-                is_dir = existing_types.get(filepath) == "directory"
-                rm_inner = _build_rm_command(filepath, is_dir)
-                safe = shlex.quote(filepath)
-                rm_parts.append(f'{rm_inner} && echo "OK {safe}" || echo "FAIL {safe}"')
-            rm_cmd = " ; ".join(rm_parts)
-            logger.info(
-                f"[delete-complete] executing: "
-                f"{[_build_rm_command(p, existing_types.get(p) == 'directory') for p in still_exists]}"
-            )
-            # 大目录可能耗时（unlink 大量文件），延长 timeout
-            _, rm_out, _ = ssh_exec(rm_cmd, timeout=300)
-
-            for line in rm_out.strip().split("\n"):
-                if line.startswith("OK "):
-                    path = line[3:].strip("'")
-                    file_results.append({"path": path, "status": "deleted"})
-                    logger.info(f"Deleted hardlink: {path}")
-                elif line.startswith("FAIL "):
-                    path = line[5:].strip("'")
-                    file_results.append({"path": path, "status": "error", "message": "Delete failed"})
-
-        # 已被 qBit 删除的
-        for p in remaining_to_delete:
-            if p not in still_exists:
-                file_results.append({"path": p, "status": "already_gone"})
-
-    # 被 qBit deleteFiles 删除的源文件
-    for p in qbit_deleted_paths:
-        file_results.append({"path": p, "status": "deleted_by_qbit"})
-
-    # 汇总释放空间（用真实大小：目录递归算，文件 stat 大小；同 inode 去重避免硬链接重复算）
-    real_sizes = _get_real_sizes(validated_files)
-    freed_inodes = set()
+    # 5. 汇总释放空间（用 expected snapshot 的 real_size；同 inode 去重）
+    freed_inodes: set[int] = set()
     total_freed = 0
-    for path in validated_files:
-        info = path_info.get(path, {})
-        inode = info.get("inode")
+    for item in expected_snapshot["items"]:
+        inode = item.get("inode") or 0
         if inode and inode in freed_inodes:
             continue
         if inode:
             freed_inodes.add(inode)
-        total_freed += real_sizes.get(path, info.get("size", 0))
+        total_freed += item.get("real_size", 0)
 
     status_counts: dict[str, int] = {}
     for r in file_results:
         status_counts[r["status"]] = status_counts.get(r["status"], 0) + 1
-    torrents_removed = sum(1 for r in torrent_results if r.get("status") == "deleted")
+
     logger.info(
-        f"[delete-complete] done: file_status={status_counts}, "
-        f"torrents_removed={torrents_removed}, space_freed={human_size(total_freed)}"
+        f"[action/delete] done: file_status={status_counts}, "
+        f"torrents_removed={sum(1 for r in torrent_results if r.get('status') == 'deleted')}, "
+        f"space_freed={human_size(total_freed)}"
     )
 
-    return jsonify({
+    return {
         "file_results": file_results,
         "torrent_results": torrent_results,
-        "total_files_deleted": sum(1 for r in file_results if r["status"] in ("deleted", "deleted_by_qbit", "already_gone")),
+        "total_files_deleted": sum(
+            1 for r in file_results if r["status"] in ("deleted", "deleted_by_qbit", "already_gone")
+        ),
         "total_torrents_deleted": sum(1 for r in torrent_results if r.get("status") == "deleted"),
         "space_freed": total_freed,
         "space_freed_human": human_size(total_freed),
+    }
+
+
+def _route_executor_by_kind(payload: dict) -> dict:
+    """Spike 阶段只支持 'delete'。后续 Phase 2/3 加 nfo_write / archive / purge_provider。"""
+    kind = payload.get("kind")
+    if kind == "delete":
+        return _delete_executor(payload)
+    raise ValueError(f"unsupported kind: {kind!r}")
+
+
+# ─────────────────────────────────────────────────────────────
+# 新路由：/api/action/preview + /api/action/confirm
+# ─────────────────────────────────────────────────────────────
+
+
+def _do_action_preview(kind: str, raw_data: dict):
+    """Preview 阶段共用逻辑——/api/action/preview 和 /api/delete-preview alias 都调它。"""
+    if kind == "delete":
+        candidates_in = raw_data.get("candidates") or raw_data.get("files") or []
+        if not isinstance(candidates_in, list) or not candidates_in:
+            return jsonify({"error": "candidates required (or legacy 'files')"}), 400
+        # 兼容：candidates 可以是 [{path}, ...] 也可以是 [path, ...]
+        candidates = []
+        for c in candidates_in:
+            if isinstance(c, str):
+                candidates.append({"path": c})
+            elif isinstance(c, dict) and c.get("path"):
+                candidates.append({"path": c["path"]})
+            else:
+                return jsonify({"error": f"invalid candidate: {c!r}"}), 400
+        options = raw_data.get("options") or {}
+        if "delete_torrents" in raw_data:  # legacy field 兼容
+            options.setdefault("delete_torrents", raw_data["delete_torrents"])
+        snapshot = _build_delete_snapshot(candidates)
+        payload = {
+            "kind": "delete",
+            "candidates": candidates,
+            "snapshot": snapshot,
+            "options": options,
+        }
+        res = destructive_action.create_preview(
+            get_db(),
+            kind="delete",
+            payload=payload,
+            server_secret=SERVER_SECRET,
+            created_by="web_ui",
+        )
+        # 兼容旧 UI：preview 字段保留 delete-preview 原 shape 一部分
+        preview_files = [{
+            "path": it["path"],
+            "is_dir": it["is_dir"],
+            "inode": it["inode"],
+            "size": it["real_size"],
+            "size_human": human_size(it["real_size"]),
+            "hardlink_paths": it["hardlinks"],
+        } for it in snapshot["items"]]
+        return jsonify({
+            "action_id": res.action_id,
+            "signed_token": res.signed_token,
+            "expires_at": res.expires_at,
+            "kind": "delete",
+            "snapshot": snapshot,
+            # legacy-compatible preview shape
+            "files": preview_files,
+            "torrents": [{**t, "size_human": human_size(t["size"])} for t in snapshot["torrents"]],
+            "qbit_status": snapshot["qbit_status"],
+            "total_size": sum(it["real_size"] for it in snapshot["items"]),
+            "total_size_human": human_size(sum(it["real_size"] for it in snapshot["items"])),
+            "total_hardlinks": sum(len(it["hardlinks"]) for it in snapshot["items"]),
+        })
+    return jsonify({"error": f"kind '{kind}' not supported in spike"}), 400
+
+
+@app.route("/api/action/preview", methods=["POST"])
+@require_token
+def action_preview():
+    data = request.json or {}
+    kind = data.get("kind")
+    if not kind:
+        return jsonify({"error": "kind required"}), 400
+    return _do_action_preview(kind, data)
+
+
+@app.route("/api/action/confirm", methods=["POST"])
+@require_token
+def action_confirm():
+    data = request.json or {}
+    action_id = data.get("action_id")
+    signed_token = data.get("signed_token")
+    if not action_id or not signed_token:
+        return jsonify({"error": "action_id and signed_token required"}), 400
+
+    try:
+        out = destructive_action.confirm(
+            get_db(),
+            action_id=action_id,
+            signed_token=signed_token,
+            server_secret=SERVER_SECRET,
+            executor=_route_executor_by_kind,
+        )
+    except destructive_action.ActionNotFound:
+        return jsonify({"error": "action_not_found", "action_id": action_id}), 404
+    except destructive_action.ActionAlreadyConsumed:
+        return jsonify({"error": "action_already_consumed", "action_id": action_id}), 409
+    except destructive_action.ActionExpired:
+        return jsonify({"error": "action_expired", "action_id": action_id}), 410
+    except destructive_action.ActionTokenInvalid:
+        return jsonify({"error": "invalid_signed_token", "action_id": action_id}), 401
+    except destructive_action.ActionError as e:
+        return jsonify({"error": "action_error", "detail": str(e)}), 400
+
+    # SnapshotMismatch 走 destructive_action 的 "failed" 路径：检查 error 字段
+    response: dict = {"action_id": out.action_id, "status": out.status}
+    if out.status == "succeeded":
+        response["result"] = out.result
+    else:
+        response["error"] = out.error
+        # 把 snapshot mismatch 升级为 client 友好 status
+        if out.error and out.error.startswith("SnapshotMismatch:"):
+            response["status"] = "target_already_changed"
+            # 从 DB 读 result_json 拿不到（executor 抛异常没 result）；用 error 字符串解析
+            # spike 阶段简单：UI 提示用户刷新
+            response["hint"] = "Target changed since preview; refresh and retry."
+    return jsonify(response)
+
+
+# ─────────────────────────────────────────────────────────────
+# 手工恢复面板：列出 needs_manual_recovery / running 的 action
+# ─────────────────────────────────────────────────────────────
+
+
+@app.route("/api/action/recovery", methods=["GET"])
+@require_token
+def action_recovery_list():
+    """列出需要人工恢复的 action（spike 阶段简单只读视图）。"""
+    rows = get_db().execute(
+        """
+        SELECT action_id, kind, status, created_at, started_at, completed_at,
+               error, recovery_hint, payload_json
+          FROM destructive_actions
+         WHERE status IN ('needs_manual_recovery', 'running', 'failed')
+         ORDER BY created_at DESC
+         LIMIT 50
+        """
+    ).fetchall()
+    return jsonify({
+        "actions": [dict(r) for r in rows],
     })
+
+
+# ─────────────────────────────────────────────────────────────
+# Cron jobs：crash recovery + expired pending cleanup
+# ─────────────────────────────────────────────────────────────
+# Spike 阶段用 in-process BackgroundScheduler。多 worker 生产部署应该把 cron
+# 拆出独立 worker（Phase 1 正式落地时处理）。
+#
+# 跳过 reaper：测试场景（pytest）或显式 NAS_DISABLE_CRON=1
+_DISABLE_CRON = os.environ.get("NAS_DISABLE_CRON", "").strip().lower() in ("1", "true", "yes")
+
+
+def _cron_reap_stuck():
+    try:
+        conn = destructive_action.open_connection(DB_PATH)
+        try:
+            reaped = destructive_action.reap_stuck_actions(conn)
+            cleaned = destructive_action.cleanup_expired_pending(conn)
+            if reaped or cleaned:
+                logger.info(
+                    f"[cron] reaped {reaped} stuck running, cleaned {cleaned} expired pending"
+                )
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[cron] reap failed: {e}")
+
+
+def _start_scheduler():
+    from apscheduler.schedulers.background import BackgroundScheduler
+    sched = BackgroundScheduler(daemon=True)
+    sched.add_job(_cron_reap_stuck, "interval", minutes=1, id="reap_stuck", max_instances=1)
+    sched.start()
+    logger.info("[cron] BackgroundScheduler started (reap interval=1min)")
+    return sched
+
+
+_scheduler = None
+if not _DISABLE_CRON:
+    _scheduler = _start_scheduler()
 
 
 if __name__ == "__main__":

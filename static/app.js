@@ -1043,31 +1043,46 @@ async function confirmDelete() {
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 删除中...';
 
+    // 契约 #1：必须用 preview 拿到的 action_id + signed_token 才能 confirm。
+    // 没有 token 说明用户绕过了 preview UI（不应该发生）；早早 fail-loud。
+    if (!deletePreviewData || !deletePreviewData.action_id || !deletePreviewData.signed_token) {
+        addLog("删除失败：缺少 preview token，请重新打开删除窗口", "danger");
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-trash"></i> 确认删除';
+        return;
+    }
+
     try {
-        const res = await apiFetch(`${API_BASE}/api/delete-complete`, {
+        const res = await apiFetch(`${API_BASE}/api/action/confirm`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                files: Array.from(selectedFiles),
-                delete_torrents: true
+                action_id: deletePreviewData.action_id,
+                signed_token: deletePreviewData.signed_token,
             })
         });
 
         const data = await res.json();
 
-        if (data.error) {
-            addLog(`删除失败: ${data.error}`, "danger");
+        // 三态：succeeded / target_already_changed / 其他 failure
+        if (data.status === "target_already_changed") {
+            addLog(`目标已变化，请刷新后重试：${data.hint || ""}`, "warning");
             return;
         }
 
-        // 记录文件删除日志
-        if (data.total_files_deleted > 0) {
-            addLog(`已删除 ${data.total_files_deleted} 个文件`, "success");
+        if (data.status !== "succeeded") {
+            addLog(`删除失败: ${data.error || data.detail || "unknown"}`, "danger");
+            return;
         }
 
-        // 记录种子删除日志
-        if (data.torrent_results) {
-            data.torrent_results.forEach(t => {
+        const result = data.result || {};
+
+        if (result.total_files_deleted > 0) {
+            addLog(`已删除 ${result.total_files_deleted} 个文件`, "success");
+        }
+
+        if (Array.isArray(result.torrent_results)) {
+            result.torrent_results.forEach(t => {
                 if (t.status === "deleted") {
                     addLog(`已删除种子: ${t.name}`, "success");
                 } else if (t.status === "error") {
@@ -1076,12 +1091,10 @@ async function confirmDelete() {
             });
         }
 
-        // 空间释放
-        if (data.space_freed > 0) {
-            addLog(`释放空间: ${data.space_freed_human}`, "info");
+        if (result.space_freed > 0) {
+            addLog(`释放空间: ${result.space_freed_human}`, "info");
         }
 
-        // 刷新文件列表和磁盘
         await loadFiles(currentPath);
         refreshDisk();
 
