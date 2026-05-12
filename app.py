@@ -1800,6 +1800,72 @@ def test_tmdb_config():
     return jsonify(result)
 
 
+@app.route("/api/metadata/list-videos", methods=["GET"])
+@require_token
+def metadata_list_videos():
+    """列出目录里所有视频文件（含子目录递归 N 层），供批量识别用。
+
+    Query: ?path=<dir>&max_depth=2&limit=200
+    Returns: {videos: [{path, name, size_bytes, has_nfo}], total, truncated}
+    """
+    path = request.args.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "path required"}), 400
+    try:
+        path = validate_path(path)
+    except Exception:
+        return jsonify({"error": f"invalid path: {path}"}), 400
+    max_depth = max(1, min(5, int(request.args.get("max_depth", "2"))))
+    limit = max(1, min(500, int(request.args.get("limit", "200"))))
+
+    # SSH find video files：常见后缀 + 大小（用 stat 拿；同目录有 .nfo 标记）
+    # 用 find -type f + -iname 过滤
+    safe_path = shlex.quote(path)
+    video_exts = ["mkv", "mp4", "avi", "mov", "ts", "m4v", "mpg", "wmv", "flv", "webm", "m2ts", "rmvb"]
+    iname_clauses = " -o ".join(f"-iname '*.{ext}'" for ext in video_exts)
+    cmd = (
+        f"find {safe_path} -maxdepth {max_depth} -type f \\( {iname_clauses} \\) "
+        f"2>/dev/null | head -n {limit + 1}"
+    )
+    _, out, _ = ssh_exec(cmd, timeout=60)
+    raw_paths = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    truncated = len(raw_paths) > limit
+    raw_paths = raw_paths[:limit]
+    if not raw_paths:
+        return jsonify({"videos": [], "total": 0, "truncated": False})
+
+    # 批量拿大小 + 同目录 .nfo 存在性（一次 SSH 完成）
+    stats = _ssh_stat_paths(raw_paths)
+    # 对每个视频文件，检查同目录同名 .nfo
+    # 例如 /share/a/show.mkv → /share/a/show.nfo
+    nfo_paths = []
+    for p in raw_paths:
+        if p.lower().endswith(tuple(f".{ext}" for ext in video_exts)):
+            # 去最后一个 . 之前的部分加 .nfo
+            base = p.rsplit(".", 1)[0]
+            nfo_paths.append(base + ".nfo")
+    nfo_stats = _ssh_stat_paths(nfo_paths) if nfo_paths else {}
+
+    videos = []
+    for p in raw_paths:
+        st = stats.get(p, {})
+        nfo_path = p.rsplit(".", 1)[0] + ".nfo"
+        has_nfo = nfo_stats.get(nfo_path, {}).get("exists", False)
+        videos.append({
+            "path": p,
+            "name": p.rsplit("/", 1)[-1],
+            "size_bytes": st.get("size_bytes", 0),
+            "size_human": human_size(st.get("size_bytes", 0)),
+            "has_nfo": has_nfo,
+        })
+
+    return jsonify({
+        "videos": videos,
+        "total": len(videos),
+        "truncated": truncated,
+    })
+
+
 @app.route("/api/metadata/identify", methods=["POST"])
 @require_token
 def metadata_identify():

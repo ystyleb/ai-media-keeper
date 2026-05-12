@@ -821,6 +821,11 @@
             </select>
 
             <span id="file-count"></span>
+
+            <button class="tb-btn" style="margin-left:auto;" onclick="openBatchIdentify()" title="批量识别当前目录所有视频文件">
+                <i class="bi bi-stars"></i>
+                批量识别
+            </button>
         </div>
 
         <!-- File table -->
@@ -1086,6 +1091,64 @@
                 <button type="button" class="btn btn-primary" id="btn-save-qbit" onclick="saveQBitConfig()">
                     <i class="bi bi-check2 me-1"></i>保存配置
                 </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+<!-- 批量识别 modal -->
+<div class="modal fade" id="batchIdentifyModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-stars me-2" style="color:var(--teal);"></i>批量 AI 识别
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="batch-summary" class="mb-3 small text-secondary"></div>
+
+                <!-- 进度条 + 控制 -->
+                <div class="d-flex align-items-center gap-3 mb-3">
+                    <div class="progress flex-grow-1" style="height:10px;background:var(--surface-2);">
+                        <div id="batch-progress-bar" class="progress-bar bg-info" role="progressbar" style="width:0%;"></div>
+                    </div>
+                    <span id="batch-progress-text" class="small text-secondary text-nowrap">0 / 0</span>
+                    <button id="batch-start-btn" class="btn btn-sm btn-primary" onclick="startBatchIdentify()" disabled>
+                        <i class="bi bi-play-fill"></i> 开始
+                    </button>
+                    <button id="batch-stop-btn" class="btn btn-sm btn-outline-warning" onclick="stopBatchIdentify()" style="display:none;">
+                        <i class="bi bi-stop-fill"></i> 停止
+                    </button>
+                </div>
+
+                <!-- 选项 -->
+                <div class="form-check small mb-2">
+                    <input class="form-check-input" type="checkbox" id="batch-skip-nfo" checked>
+                    <label class="form-check-label text-secondary" for="batch-skip-nfo">
+                        跳过有 .nfo 的文件（已有元数据）
+                    </label>
+                </div>
+
+                <!-- 结果表 -->
+                <div style="max-height:55vh;overflow-y:auto;">
+                    <table class="table table-sm" id="batch-result-table">
+                        <thead style="position:sticky;top:0;background:var(--surface);">
+                            <tr>
+                                <th style="width:60px;">海报</th>
+                                <th>文件 / 识别结果</th>
+                                <th style="width:90px;">置信</th>
+                                <th style="width:60px;">方式</th>
+                            </tr>
+                        </thead>
+                        <tbody id="batch-result-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
             </div>
         </div>
     </div>

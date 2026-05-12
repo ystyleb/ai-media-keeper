@@ -1450,6 +1450,183 @@ function refresh() {
     loadFiles(currentPath);
 }
 
+// ==================== 批量识别 ====================
+
+let batchIdentifyModal = null;
+let batchAborted = false;
+let batchInProgress = false;
+
+async function openBatchIdentify() {
+    if (!batchIdentifyModal) {
+        batchIdentifyModal = new bootstrap.Modal(document.getElementById("batchIdentifyModal"));
+    }
+    // 重置 UI
+    document.getElementById("batch-summary").innerHTML = '<span class="text-secondary">扫描视频文件中...</span>';
+    document.getElementById("batch-progress-bar").style.width = "0%";
+    document.getElementById("batch-progress-text").textContent = "0 / 0";
+    document.getElementById("batch-result-tbody").innerHTML = "";
+    document.getElementById("batch-start-btn").disabled = true;
+    document.getElementById("batch-stop-btn").style.display = "none";
+    batchIdentifyModal.show();
+
+    // 列视频文件
+    try {
+        const url = `${API_BASE}/api/metadata/list-videos?path=${encodeURIComponent(currentPath)}&max_depth=2&limit=200`;
+        const res = await apiFetch(url);
+        const data = await res.json();
+        const videos = data.videos || [];
+        const truncated = data.truncated;
+
+        if (videos.length === 0) {
+            document.getElementById("batch-summary").innerHTML = '<span class="text-warning">该目录没有视频文件（mkv/mp4/...）。请进入有视频的目录后再试。</span>';
+            return;
+        }
+
+        const skipNfoCount = videos.filter(v => v.has_nfo).length;
+        const totalSize = videos.reduce((s, v) => s + v.size_bytes, 0);
+        let summary = `找到 ${videos.length} 个视频文件 · 总计 ${humanSize(totalSize)}`;
+        if (skipNfoCount > 0) summary += ` · ${skipNfoCount} 个已有 .nfo`;
+        if (truncated) summary += ` · ⚠️ 超过 200 上限被截断（按子目录分批识别）`;
+        document.getElementById("batch-summary").innerHTML = summary;
+
+        // 渲染初始表（每行 status='pending'）
+        const tbody = document.getElementById("batch-result-tbody");
+        tbody.innerHTML = "";
+        videos.forEach((v, idx) => {
+            const tr = createElement("tr", { dataset: { idx: idx.toString() } });
+            const tdPoster = createElement("td");
+            tdPoster.innerHTML = `<div style="width:50px;height:75px;background:#222;border-radius:3px;"></div>`;
+            tr.appendChild(tdPoster);
+
+            const tdName = createElement("td");
+            const nfoBadge = v.has_nfo ? '<span class="badge bg-secondary ms-1" style="font-size:9px;">NFO</span>' : '';
+            tdName.innerHTML = `
+                <div class="text-truncate" style="max-width:520px;">${v.name}${nfoBadge}</div>
+                <small class="text-secondary" id="batch-result-${idx}">等待中…</small>
+            `;
+            tr.appendChild(tdName);
+
+            tr.appendChild(createElement("td", {
+                className: "small text-secondary",
+                innerHTML: `<span id="batch-conf-${idx}">—</span>`
+            }));
+            tr.appendChild(createElement("td", {
+                className: "small",
+                innerHTML: `<span id="batch-source-${idx}" class="text-secondary">—</span>`
+            }));
+
+            tr.dataset.path = v.path;
+            tr.dataset.hasNfo = v.has_nfo ? "1" : "0";
+            tbody.appendChild(tr);
+        });
+
+        document.getElementById("batch-start-btn").disabled = false;
+        document.getElementById("batch-progress-text").textContent = `0 / ${videos.length}`;
+    } catch (err) {
+        document.getElementById("batch-summary").innerHTML = `<span class="text-danger">扫描失败: ${err.message}</span>`;
+    }
+}
+
+
+async function startBatchIdentify() {
+    const tbody = document.getElementById("batch-result-tbody");
+    const rows = Array.from(tbody.querySelectorAll("tr"));
+    const skipNfo = document.getElementById("batch-skip-nfo").checked;
+
+    batchAborted = false;
+    batchInProgress = true;
+    document.getElementById("batch-start-btn").style.display = "none";
+    document.getElementById("batch-stop-btn").style.display = "inline-block";
+
+    const total = rows.length;
+    let done = 0;
+    const updateProgress = () => {
+        const pct = total > 0 ? (done / total * 100) : 0;
+        document.getElementById("batch-progress-bar").style.width = pct + "%";
+        document.getElementById("batch-progress-text").textContent = `${done} / ${total}`;
+    };
+
+    for (let i = 0; i < rows.length; i++) {
+        if (batchAborted) break;
+        const row = rows[i];
+        const path = row.dataset.path;
+        const hasNfo = row.dataset.hasNfo === "1";
+        const idx = i;
+
+        if (skipNfo && hasNfo) {
+            document.getElementById(`batch-result-${idx}`).innerHTML = '<span class="text-secondary">已跳过（有 .nfo）</span>';
+            done++;
+            updateProgress();
+            continue;
+        }
+
+        document.getElementById(`batch-result-${idx}`).innerHTML = '<span class="text-info"><span class="spinner-border spinner-border-sm me-1" style="width:10px;height:10px;border-width:1px;"></span>识别中…</span>';
+
+        try {
+            const res = await apiFetch(`${API_BASE}/api/metadata/identify`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path })
+            });
+            const data = await res.json();
+            renderBatchRow(idx, row, data);
+        } catch (err) {
+            document.getElementById(`batch-result-${idx}`).innerHTML = `<span class="text-danger">错误: ${err.message}</span>`;
+        }
+        done++;
+        updateProgress();
+    }
+
+    batchInProgress = false;
+    document.getElementById("batch-stop-btn").style.display = "none";
+    document.getElementById("batch-start-btn").style.display = "inline-block";
+    document.getElementById("batch-start-btn").innerHTML = '<i class="bi bi-arrow-clockwise"></i> 重新跑';
+
+    addLog(`批量识别完成: ${done} 个文件`, batchAborted ? "warning" : "success");
+}
+
+
+function stopBatchIdentify() {
+    batchAborted = true;
+    document.getElementById("batch-stop-btn").disabled = true;
+    document.getElementById("batch-stop-btn").innerHTML = '<i class="bi bi-stop-fill"></i> 停止中...';
+}
+
+
+function renderBatchRow(idx, row, data) {
+    const top = data.top_pick;
+    const resultEl = document.getElementById(`batch-result-${idx}`);
+    const confEl = document.getElementById(`batch-conf-${idx}`);
+    const sourceEl = document.getElementById(`batch-source-${idx}`);
+
+    const pickLabel = {
+        single_exact: "单候选",
+        heuristic: "启发式",
+        llm: "🤖 AI",
+        needs_review: "待复核"
+    }[data.pick_source] || data.pick_source || "?";
+
+    if (top) {
+        // 更新海报
+        const tdPoster = row.cells[0];
+        if (top.poster_url) {
+            tdPoster.innerHTML = `<img src="${top.poster_url}" style="width:50px;height:auto;border-radius:3px;"/>`;
+        }
+        // 标题 + s/e
+        const epLine = data.parse?.season && data.parse?.episode
+            ? ` <small class="text-secondary">S${String(data.parse.season).padStart(2,"0")}E${String(data.parse.episode).padStart(2,"0")}</small>` : "";
+        resultEl.innerHTML = `<span class="text-success">✓ ${top.title}</span>${top.original_title && top.original_title !== top.title ? ` <small class="text-secondary">(${top.original_title})</small>` : ""}${epLine} <small class="text-secondary">${top.year || "?"} · ⭐${top.vote_average?.toFixed(1) || "—"}</small>`;
+        confEl.innerHTML = `<span class="text-success">${(data.confidence * 100).toFixed(0)}%</span>`;
+        sourceEl.innerHTML = `<span class="${data.pick_source === 'llm' ? 'text-info' : 'text-secondary'}">${pickLabel}</span>`;
+    } else {
+        const candCount = (data.candidates || []).length;
+        resultEl.innerHTML = `<span class="text-warning">⚠ 待复核（${candCount} 候选）</span> <small class="text-secondary">${data.reasoning?.slice(0, 80) || ""}</small>`;
+        confEl.innerHTML = `<span class="text-secondary">${(data.confidence * 100).toFixed(0)}%</span>`;
+        sourceEl.innerHTML = `<span class="text-warning">复核</span>`;
+    }
+}
+
+
 // ==================== AI / 元数据配置 ====================
 
 let aiConfigModal = null;
