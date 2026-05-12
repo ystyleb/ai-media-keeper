@@ -99,11 +99,12 @@ class TMDBProvider(MetadataProvider):
                 logger.error(f"[tmdb] movie search failed: {e}")
 
         if search_tv:
-            params = {"query": title}
-            if year:
-                params["first_air_date_year"] = year
+            # TV 搜索故意不传 first_air_date_year — multi-season 剧的 first_air_date 是
+            # S01 首播年，但文件名里的 year 多半是 episode air year / release year
+            # (典型: "All Creatures Great and Small S02 2021" 实际剧 first_air_date=2020)。
+            # year 留给下游 _pick_top 做 soft score boost，不在这里 hard filter 误杀。
             try:
-                data = self._get("/search/tv", **params)
+                data = self._get("/search/tv", query=title)
                 for t in (data.get("results") or [])[:5]:
                     candidates.append(self._tv_to_candidate(t))
             except Exception as e:

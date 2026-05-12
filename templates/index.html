@@ -1148,7 +1148,48 @@
                 </div>
             </div>
             <div class="modal-footer">
+                <button id="batch-nfo-write-btn" type="button" class="btn btn-outline-info" style="display:none;" onclick="openBatchNfoWrite()">
+                    <i class="bi bi-file-earmark-text me-1"></i>批量写入 NFO（<span id="batch-nfo-eligible-count">0</span>）
+                </button>
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+<!-- NFO 写入 confirm modal（contract #1 preview → confirm） -->
+<div class="modal fade" id="nfoWriteModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-file-earmark-text me-2" style="color:var(--teal);"></i>写入 NFO 元数据
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="nfo-write-summary" class="mb-2 small"></div>
+                <div id="nfo-write-warning" class="alert alert-warning py-2 small mb-2" style="display:none;"></div>
+                <div style="max-height:50vh;overflow-y:auto;">
+                    <table class="table table-sm">
+                        <thead style="position:sticky;top:0;background:var(--surface);">
+                            <tr>
+                                <th>目标 .nfo</th>
+                                <th style="width:90px;">动作</th>
+                                <th style="width:80px;">大小</th>
+                            </tr>
+                        </thead>
+                        <tbody id="nfo-write-tbody"></tbody>
+                    </table>
+                </div>
+                <div id="nfo-write-result" class="mt-2 small" style="display:none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button id="nfo-write-confirm-btn" type="button" class="btn btn-primary" onclick="confirmNfoWrite()">
+                    <i class="bi bi-check-lg me-1"></i>确认写入
+                </button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
             </div>
         </div>
     </div>

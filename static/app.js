@@ -498,10 +498,19 @@ function humanSize(bytes) {
 
 // ==================== 文件详情 ====================
 
-function renderNfoCard(p) {
-    // 把 _parse_emby_nfo 返回的对象渲染成 Bootstrap 卡片
+function renderNfoCard(p, nfoPath) {
+    // 把 _parse_emby_nfo 返回的对象渲染成 Bootstrap 卡片。
+    // nfoPath 可选——传了就在卡片头显示一行 sidecar 文件名（用于 sidecar 自动发现路径）。
     const card = createElement("div", { className: "card border-info mb-2" });
     const body = createElement("div", { className: "card-body p-2" });
+
+    if (nfoPath) {
+        const sideBadge = createElement("div", {
+            className: "small text-secondary mb-1",
+            textContent: `📋 ${nfoPath.split("/").pop()}`,
+        });
+        body.appendChild(sideBadge);
+    }
 
     const typeLabel = { episodedetails: "剧集", tvshow: "剧", movie: "电影" }[p.type] || p.type;
 
@@ -814,6 +823,29 @@ function renderMetadataCard(container, data) {
             innerHTML: '<i class="bi bi-lightbulb me-1"></i>配 DeepSeek 让 AI 帮选（中文 / 模糊命名都搞得定）→ 顶部 <strong>AI</strong> 按钮'
         }));
     }
+
+    // 写 NFO 按钮（置信度 ≥ 0.7 才出）
+    if (top && data.confidence >= 0.7 && container.__videoPath) {
+        const writeBtnWrap = createElement("div", { className: "mt-2" });
+        const writeBtn = createElement("button", {
+            className: "btn btn-sm btn-outline-info",
+            innerHTML: '<i class="bi bi-file-earmark-text me-1"></i>写入 NFO 元数据',
+        });
+        writeBtn.addEventListener("click", () => {
+            const item = {
+                video_path: container.__videoPath,
+                tmdb_id: top.external_ids?.tmdb_id || top.id,
+                media_type: top.media_type,
+                title: top.title,
+                original_title: top.original_title,
+                season: data.parse?.season,
+                episode: data.parse?.episode,
+            };
+            openNfoWritePreview([item]);
+        });
+        writeBtnWrap.appendChild(writeBtn);
+        container.appendChild(writeBtnWrap);
+    }
 }
 
 
@@ -853,17 +885,59 @@ async function showDetail(path) {
     });
     content.appendChild(table);
 
-    // === AI 识别按钮（视频文件） ===
+    // === 元数据区（视频文件） ===
+    // 流程：(1) 先查 sidecar .nfo 是否存在 → 存在直接展示已有 metadata
+    //       (2) 提供"AI 识别"按钮（无 NFO 时叫"AI 识别", 有 NFO 时叫"重新识别（覆盖）"）
     const VIDEO_EXTS = new Set(["mkv","mp4","avi","mov","ts","m4v","mpg","wmv","flv","webm","m2ts","rmvb"]);
     const fileExt = (file.name.split(".").pop() || "").toLowerCase();
     if (!file.is_dir && VIDEO_EXTS.has(fileExt)) {
         const aiSection = createElement("div", { className: "mb-3" });
+        const nfoCard = createElement("div", { className: "mb-2" });           // sidecar .nfo 卡片
+        const cachedCard = createElement("div", { className: "mb-2" });        // DB cache 卡片
         const aiBtn = createElement("button", {
             className: "btn btn-sm btn-outline-info",
-            innerHTML: '<i class="bi bi-stars me-1"></i>AI 识别（TMDB）'
+            innerHTML: '<span class="spinner-border spinner-border-sm me-1"></span>检查缓存...',
+            disabled: true,
         });
         const aiResult = createElement("div", { className: "mt-2" });
+        aiResult.__videoPath = file.path;
+
+        // 并行：(1) 查 DB cache (2) 查 sidecar .nfo
+        // 两者都可能命中（cache 来自 TMDB；NFO 来自 sidecar 文件，可能不同步）。
+        // 都展示给用户看，按钮 label 反映"有 cache"优先信号。
+        const cachePromise = apiFetch(`${API_BASE}/api/metadata/cached?path=${encodeURIComponent(file.path)}`)
+            .then(r => r.json())
+            .catch(() => ({ cached: false }));
+        const nfoPromise = apiFetch(`${API_BASE}/api/metadata/from-nfo?video_path=${encodeURIComponent(file.path)}`)
+            .then(r => r.json())
+            .catch(() => ({ has_nfo: false }));
+
+        Promise.all([cachePromise, nfoPromise]).then(([cacheData, nfoData]) => {
+            let labelSuffix = "";
+            if (cacheData.cached) {
+                renderMetadataCard(cachedCard, cacheData);
+                labelSuffix = "（覆盖缓存）";
+            } else if (cacheData.stale) {
+                cachedCard.innerHTML = '<small class="text-warning">⚠ 缓存已过期（文件 mtime 变了），重新识别推荐</small>';
+            }
+            if (nfoData.has_nfo && nfoData.parsed) {
+                nfoCard.innerHTML = "";
+                nfoCard.appendChild(renderNfoCard(nfoData.parsed, nfoData.nfo_path));
+                labelSuffix = labelSuffix || "（覆盖 NFO）";
+            } else if (nfoData.has_nfo && !nfoData.parsed) {
+                nfoCard.innerHTML = '<small class="text-warning">⚠ 同目录有 .nfo 但解析失败</small>';
+            }
+            if (labelSuffix) {
+                aiBtn.innerHTML = `<i class="bi bi-arrow-clockwise me-1"></i>重新识别${labelSuffix}`;
+            } else {
+                aiBtn.innerHTML = '<i class="bi bi-stars me-1"></i>AI 识别（TMDB）';
+            }
+        }).finally(() => {
+            aiBtn.disabled = false;
+        });
+
         aiBtn.addEventListener("click", async () => {
+            const origLabel = aiBtn.innerHTML;
             aiBtn.disabled = true;
             aiBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>识别中...';
             aiResult.innerHTML = "";
@@ -875,6 +949,8 @@ async function showDetail(path) {
                 });
                 const data = await res.json();
                 renderMetadataCard(aiResult, data);
+                // 写入成功 → 旧的 cache 卡片用新数据替换（让用户看到刚 cache 的）
+                cachedCard.innerHTML = "";
             } catch (err) {
                 aiResult.innerHTML = "";
                 aiResult.appendChild(createElement("p", {
@@ -882,9 +958,11 @@ async function showDetail(path) {
                 }));
             } finally {
                 aiBtn.disabled = false;
-                aiBtn.innerHTML = '<i class="bi bi-stars me-1"></i>AI 识别（TMDB）';
+                aiBtn.innerHTML = origLabel;
             }
         });
+        aiSection.appendChild(cachedCard);
+        aiSection.appendChild(nfoCard);
         aiSection.appendChild(aiBtn);
         aiSection.appendChild(aiResult);
         content.appendChild(aiSection);
@@ -1362,9 +1440,6 @@ async function confirmDelete() {
             addLog(`释放空间: ${result.space_freed_human}`, "info");
         }
 
-        await loadFiles(currentPath);
-        refreshDisk();
-
     } catch (err) {
         addLog(`删除操作失败: ${err.message}`, "danger");
     } finally {
@@ -1372,6 +1447,9 @@ async function confirmDelete() {
         btn.innerHTML = '<i class="bi bi-trash"></i> 确认删除';
         deleteModal.hide();
         deletePreviewData = null;
+        // 所有路径都刷新 — 成功 / 已变化 / 失败都可能让本地视图与 NAS 状态错位
+        try { await loadFiles(currentPath); } catch {}
+        refreshDisk();
     }
 }
 
@@ -1455,6 +1533,7 @@ function refresh() {
 let batchIdentifyModal = null;
 let batchAborted = false;
 let batchInProgress = false;
+// 批量 identify 结果缓存：idx → identify response（含 top_pick + parse），供"批量写入 NFO"采集
 
 async function openBatchIdentify() {
     if (!batchIdentifyModal) {
@@ -1467,6 +1546,7 @@ async function openBatchIdentify() {
     document.getElementById("batch-result-tbody").innerHTML = "";
     document.getElementById("batch-start-btn").disabled = true;
     document.getElementById("batch-stop-btn").style.display = "none";
+    document.getElementById("batch-nfo-write-btn").style.display = "none";
     batchIdentifyModal.show();
 
     // 列视频文件
@@ -1535,6 +1615,9 @@ async function startBatchIdentify() {
 
     batchAborted = false;
     batchInProgress = true;
+    // reset 缓存
+    rows.forEach(r => { delete r.__identifyData; });
+    document.getElementById("batch-nfo-write-btn").style.display = "none";
     document.getElementById("batch-start-btn").style.display = "none";
     document.getElementById("batch-stop-btn").style.display = "inline-block";
 
@@ -1569,6 +1652,7 @@ async function startBatchIdentify() {
                 body: JSON.stringify({ path })
             });
             const data = await res.json();
+            row.__identifyData = data;
             renderBatchRow(idx, row, data);
         } catch (err) {
             document.getElementById(`batch-result-${idx}`).innerHTML = `<span class="text-danger">错误: ${err.message}</span>`;
@@ -1582,6 +1666,16 @@ async function startBatchIdentify() {
     document.getElementById("batch-start-btn").style.display = "inline-block";
     document.getElementById("batch-start-btn").innerHTML = '<i class="bi bi-arrow-clockwise"></i> 重新跑';
 
+    // 统计可写 NFO 的行（confidence ≥ 0.7 且有 top_pick）
+    const eligible = rows.filter(r => {
+        const d = r.__identifyData;
+        return d && d.top_pick && d.confidence >= 0.7;
+    });
+    if (eligible.length > 0 && !batchAborted) {
+        document.getElementById("batch-nfo-eligible-count").textContent = eligible.length;
+        document.getElementById("batch-nfo-write-btn").style.display = "inline-block";
+    }
+
     addLog(`批量识别完成: ${done} 个文件`, batchAborted ? "warning" : "success");
 }
 
@@ -1590,6 +1684,167 @@ function stopBatchIdentify() {
     batchAborted = true;
     document.getElementById("batch-stop-btn").disabled = true;
     document.getElementById("batch-stop-btn").innerHTML = '<i class="bi bi-stop-fill"></i> 停止中...';
+}
+
+
+// ==================== NFO 写入流程（contract #1 preview → confirm） ====================
+
+let nfoWriteModal = null;
+// 当前 preview 的状态：action_id + signed_token，confirm 阶段用
+let nfoWritePending = null;
+
+async function openBatchNfoWrite() {
+    // 从 batch identify 结果里采集 eligible items
+    const tbody = document.getElementById("batch-result-tbody");
+    const rows = Array.from(tbody.querySelectorAll("tr"));
+    const items = [];
+    rows.forEach(r => {
+        const d = r.__identifyData;
+        if (!d || !d.top_pick || d.confidence < 0.7) return;
+        items.push({
+            video_path: r.dataset.path,
+            tmdb_id: d.top_pick.external_ids?.tmdb_id || d.top_pick.id,
+            media_type: d.top_pick.media_type,
+            title: d.top_pick.title,
+            original_title: d.top_pick.original_title,
+            season: d.parse?.season,
+            episode: d.parse?.episode,
+        });
+    });
+    if (items.length === 0) {
+        alert("没有可写入 NFO 的识别结果（需要 confidence ≥ 70%）");
+        return;
+    }
+    await openNfoWritePreview(items);
+}
+
+async function openNfoWritePreview(items) {
+    if (!nfoWriteModal) {
+        nfoWriteModal = new bootstrap.Modal(document.getElementById("nfoWriteModal"));
+    }
+    // 重置 UI
+    document.getElementById("nfo-write-summary").innerHTML = '<span class="text-secondary"><span class="spinner-border spinner-border-sm me-1"></span>正在生成预览...</span>';
+    document.getElementById("nfo-write-tbody").innerHTML = "";
+    document.getElementById("nfo-write-warning").style.display = "none";
+    document.getElementById("nfo-write-result").style.display = "none";
+    document.getElementById("nfo-write-confirm-btn").disabled = true;
+    document.getElementById("nfo-write-confirm-btn").innerHTML = '<i class="bi bi-check-lg me-1"></i>确认写入';
+    nfoWriteModal.show();
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/metadata/preview-nfo-write`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ items })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            document.getElementById("nfo-write-summary").innerHTML = `<span class="text-danger">生成预览失败: ${data.error || JSON.stringify(data)}</span>`;
+            return;
+        }
+        renderNfoWritePreview(data);
+    } catch (err) {
+        document.getElementById("nfo-write-summary").innerHTML = `<span class="text-danger">网络错误: ${err.message}</span>`;
+    }
+}
+
+function renderNfoWritePreview(data) {
+    nfoWritePending = {
+        action_id: data.action_id,
+        signed_token: data.signed_token,
+    };
+    const p = data.preview;
+    const tbody = document.getElementById("nfo-write-tbody");
+    tbody.innerHTML = "";
+
+    const summary = document.getElementById("nfo-write-summary");
+    summary.innerHTML = `共 <strong>${p.total}</strong> 个文件 · 新建 <strong class="text-success">${p.to_create}</strong> · 覆盖 <strong class="text-warning">${p.to_overwrite}</strong>`;
+
+    if (p.errors && p.errors.length > 0) {
+        const warn = document.getElementById("nfo-write-warning");
+        warn.innerHTML = `<strong>${p.errors.length} 个 item 准备时失败：</strong><ul class="mb-0 mt-1">` +
+            p.errors.map(e => `<li>#${e.index}: ${e.reason}</li>`).join("") + "</ul>";
+        warn.style.display = "block";
+    }
+
+    p.items.forEach(it => {
+        const tr = createElement("tr");
+        const tdPath = createElement("td", { className: "small" });
+        const filename = it.nfo_path.split("/").pop();
+        const parentPath = it.nfo_path.substring(0, it.nfo_path.length - filename.length - 1);
+        tdPath.innerHTML = `<div class="text-truncate" style="max-width:480px;" title="${it.nfo_path}"><span class="text-secondary">${parentPath}/</span><strong>${filename}</strong></div>`;
+        tr.appendChild(tdPath);
+
+        const tdAction = createElement("td", { className: "small" });
+        if (it.action === "create") {
+            tdAction.innerHTML = '<span class="badge bg-success">新建</span>';
+        } else {
+            tdAction.innerHTML = '<span class="badge bg-warning text-dark" title="原文件会备份到 .nfo.bak">覆盖</span>';
+        }
+        tr.appendChild(tdAction);
+
+        tr.appendChild(createElement("td", {
+            className: "small text-secondary",
+            textContent: humanSize(it.xml_size_bytes),
+        }));
+        tbody.appendChild(tr);
+    });
+
+    document.getElementById("nfo-write-confirm-btn").disabled = false;
+}
+
+async function confirmNfoWrite() {
+    if (!nfoWritePending) return;
+    const btn = document.getElementById("nfo-write-confirm-btn");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>写入中...';
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/action/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(nfoWritePending),
+        });
+        const data = await res.json();
+        const resultBox = document.getElementById("nfo-write-result");
+        resultBox.style.display = "block";
+
+        if (!res.ok) {
+            resultBox.innerHTML = `<div class="alert alert-danger py-2 mb-0">写入失败: ${data.error || JSON.stringify(data)}</div>`;
+            return;
+        }
+        const r = data.result || {};
+        const counts = r.status_counts || {};
+        const lines = [];
+        if (r.total_created) lines.push(`<span class="text-success">✓ 新建 ${r.total_created}</span>`);
+        if (r.total_overwrote) lines.push(`<span class="text-success">✓ 覆盖 ${r.total_overwrote}</span>`);
+        if (r.total_skipped) lines.push(`<span class="text-warning">⚠ 跳过 ${r.total_skipped}</span>`);
+        if (r.total_failed) lines.push(`<span class="text-danger">✗ 失败 ${r.total_failed}</span>`);
+        resultBox.innerHTML = `<div class="alert alert-success py-2 mb-0">${lines.join(" · ")}</div>`;
+
+        // 列出 skipped/failed 详情
+        if (r.items) {
+            const issues = r.items.filter(i => i.status === "skipped" || i.status === "failed");
+            if (issues.length > 0) {
+                resultBox.innerHTML += `<details class="mt-2 small"><summary class="text-secondary">查看 ${issues.length} 个未写入项</summary><ul class="mt-1 mb-0">` +
+                    issues.map(i => `<li><code>${i.nfo_path}</code> — ${i.status}: ${i.reason || ""}</li>`).join("") + "</ul></details>";
+            }
+        }
+
+        addLog(`NFO 写入: ${lines.join(" / ").replace(/<[^>]+>/g, "")}`, r.total_failed ? "warning" : "success");
+        btn.innerHTML = '<i class="bi bi-check-lg me-1"></i>完成';
+        // 刷新当前目录视图（新建/覆盖的 .nfo 出现在列表里）
+        if ((r.total_created || 0) + (r.total_overwrote || 0) > 0) {
+            await loadFiles(currentPath);
+        }
+    } catch (err) {
+        document.getElementById("nfo-write-result").style.display = "block";
+        document.getElementById("nfo-write-result").innerHTML = `<div class="alert alert-danger py-2 mb-0">网络错误: ${err.message}</div>`;
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-check-lg me-1"></i>重试';
+    } finally {
+        nfoWritePending = null;
+    }
 }
 
 

@@ -19,6 +19,8 @@ from flask import Flask, render_template, jsonify, request, abort, g
 from services import destructive_action
 from services import identify as identify_svc
 from services import llm
+from services import metadata_cache
+from services import nfo_writer
 from services.metadata.tmdb import TMDBProvider
 
 # 配置日志
@@ -747,7 +749,7 @@ def disk_usage():
 @app.route("/api/files")
 @require_token
 def list_files():
-    """列出目录内容"""
+    """列出目录内容。返回禁缓存 header — 删除/写 NFO 后前端 loadFiles 必须拿 fresh 数据。"""
     path = request.args.get("path", NAS_BASE_PATH)
 
     # 安全验证
@@ -822,11 +824,13 @@ def list_files():
     # 排序：目录在前，然后按名称
     files.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
 
-    return jsonify({
+    resp = jsonify({
         "path": validated_path,
         "parent": os.path.dirname(validated_path) if validated_path != NAS_BASE_PATH else None,
         "files": files
     })
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/api/hardlinks")
@@ -1596,11 +1600,127 @@ def _delete_executor(payload: dict) -> dict:
     }
 
 
+def _nfo_write_executor(payload: dict) -> dict:
+    """Confirm 阶段：重读 .nfo + video snapshot → atomic write → readback verify。
+
+    Per-item 错误不让整批 fail；每个 item 给单独 status，summary 在 result 里。
+    """
+    items = payload["items"]
+    # 重读所有 nfo + video path 的 ground truth
+    all_paths = [it["nfo_path"] for it in items] + [it["video_path"] for it in items]
+    stat_now = _ssh_stat_paths(all_paths)
+
+    results: list[dict] = []
+    for it in items:
+        video_path = it["video_path"]
+        nfo_path = it["nfo_path"]
+        new_xml = it["new_xml"]
+        tmdb_id = it.get("tmdb_id") or ""
+
+        video_now = stat_now.get(video_path, {"exists": False})
+        nfo_now = stat_now.get(nfo_path, {"exists": False})
+
+        # video 文件如果消失 → 写 NFO 没意义，skip
+        if not video_now.get("exists"):
+            results.append({
+                "video_path": video_path, "nfo_path": nfo_path,
+                "status": "skipped", "reason": "video_missing",
+            })
+            continue
+
+        # nfo 的 preview-to-confirm 漂移检测
+        snap = it["nfo_snapshot"]
+        if snap["existed"]:
+            if not nfo_now.get("exists"):
+                # 用户在 preview→confirm 之间删了 nfo —— 还是写新的（不再有冲突）
+                pass
+            else:
+                # 仍然存在：size/mtime 必须跟 snapshot 一致；否则有人改过，跳过
+                if (nfo_now["size_bytes"] != snap["size_bytes"]
+                        or nfo_now["mtime"] != snap["mtime"]):
+                    results.append({
+                        "video_path": video_path, "nfo_path": nfo_path,
+                        "status": "skipped", "reason": "nfo_changed_since_preview",
+                    })
+                    continue
+        else:
+            # snapshot 时不存在；现在存在 → 别人写了一份
+            if nfo_now.get("exists"):
+                results.append({
+                    "video_path": video_path, "nfo_path": nfo_path,
+                    "status": "skipped", "reason": "nfo_appeared_since_preview",
+                })
+                continue
+
+        # 执行写入：base64 over SSH，原子 mv
+        try:
+            xml_b64 = base64.b64encode(new_xml.encode("utf-8")).decode("ascii")
+            safe_nfo = shlex.quote(nfo_path)
+            safe_tmp = shlex.quote(nfo_path + ".tmp")
+            safe_bak = shlex.quote(nfo_path + ".bak")
+
+            # 1. 若旧 .nfo 存在 → cp 到 .bak（覆盖之前的 .bak）
+            backup_step = (
+                f"[ -e {safe_nfo} ] && cp -p {safe_nfo} {safe_bak}; "
+                if snap["existed"] else ""
+            )
+            # 2. 写 .tmp（base64 解码 + 重定向）
+            # 3. 原子 mv
+            # 4. readback 提取 tmdbid 验证
+            cmd = (
+                f"{backup_step}"
+                f"printf '%s' {shlex.quote(xml_b64)} | base64 -d > {safe_tmp} && "
+                f"mv {safe_tmp} {safe_nfo} && "
+                f"grep -c 'tmdb' {safe_nfo}"
+            )
+            rc, out, err = ssh_exec(cmd, timeout=30)
+            if rc != 0:
+                results.append({
+                    "video_path": video_path, "nfo_path": nfo_path,
+                    "status": "failed",
+                    "reason": f"write_failed: {err.strip()[:200]}",
+                })
+                continue
+            # readback verify: grep -c 'tmdb' 至少应该 ≥ 1（我们写了 uniqueid + tmdbid）
+            count = int(out.strip().splitlines()[-1]) if out.strip() else 0
+            if tmdb_id and count < 1:
+                results.append({
+                    "video_path": video_path, "nfo_path": nfo_path,
+                    "status": "failed", "reason": "readback_missing_tmdbid",
+                })
+                continue
+            results.append({
+                "video_path": video_path, "nfo_path": nfo_path,
+                "status": "overwrote" if snap["existed"] else "created",
+                "backup_path": (nfo_path + ".bak") if snap["existed"] else None,
+            })
+        except Exception as e:  # noqa: BLE001
+            results.append({
+                "video_path": video_path, "nfo_path": nfo_path,
+                "status": "failed", "reason": f"{type(e).__name__}: {e}",
+            })
+
+    counts: dict[str, int] = {}
+    for r in results:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    logger.info(f"[action/nfo_write] done: {counts}")
+    return {
+        "items": results,
+        "status_counts": counts,
+        "total_created": counts.get("created", 0),
+        "total_overwrote": counts.get("overwrote", 0),
+        "total_skipped": counts.get("skipped", 0),
+        "total_failed": counts.get("failed", 0),
+    }
+
+
 def _route_executor_by_kind(payload: dict) -> dict:
-    """Spike 阶段只支持 'delete'。后续 Phase 2/3 加 nfo_write / archive / purge_provider。"""
+    """Spike 阶段支持 'delete' + 'nfo_write'。Phase 3 加 archive / purge_provider。"""
     kind = payload.get("kind")
     if kind == "delete":
         return _delete_executor(payload)
+    if kind == "nfo_write":
+        return _nfo_write_executor(payload)
     raise ValueError(f"unsupported kind: {kind!r}")
 
 
@@ -1943,7 +2063,134 @@ def metadata_identify():
                     "genres": details.genres,
                     "runtime_minutes": details.runtime_minutes,
                 }
+
+    # 持久化到 media_files：以 path 为键 upsert。成功 / needs_review 都写入
+    # （让"已尝试过"被记录，避免下次 detail 面板再点白白浪费 API）。
+    try:
+        stat_map = _ssh_stat_paths([path])
+        stat = stat_map.get(path, {})
+        if stat.get("exists"):
+            db = get_db()
+            metadata_cache.upsert_identification(
+                db, path=path, stat=stat, identify_result=result,
+            )
+            # 把 lookup_by_id 拿到的 details 补丁式写入（不覆盖核心字段）
+            d = response.get("details") or {}
+            ep = d.get("episode") or {}
+            metadata_cache.upsert_details(
+                db, path=path,
+                genres=d.get("genres") or None,
+                cast=d.get("cast") or None,
+                runtime_minutes=d.get("runtime_minutes"),
+                episode_air_date=ep.get("air_date"),
+                episode_overview=ep.get("overview"),
+                episode_still_url=ep.get("still_url"),
+            )
+            response["cached"] = True
+    except Exception as e:  # noqa: BLE001
+        # cache 写失败不影响识别 response 返回（best-effort 持久化）
+        logger.warning(f"[metadata_cache] upsert failed for {path}: {e}")
+
     return jsonify(response)
+
+
+@app.route("/api/metadata/cached", methods=["GET"])
+@require_token
+def metadata_cached():
+    """读 media_files cache，不调 TMDB。
+
+    query: path
+    返回：
+      hit   → {cached: true, stale: false, top_pick, parse, confidence, ..., fetched_at}
+      miss  → {cached: false, stale: false}
+      stale → {cached: false, stale: true, fetched_at}（前端应触发重识别）
+    """
+    path = request.args.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "path required"}), 400
+    try:
+        validated = validate_path(path)
+    except Exception:
+        return jsonify({"error": f"invalid path: {path}"}), 400
+
+    # SSH stat 拿当前 mtime/inode 用于 stale 检测
+    stat_map = _ssh_stat_paths([validated])
+    stat = stat_map.get(validated, {})
+    if not stat.get("exists"):
+        # 文件已不存在 — cache 即使有也没意义
+        return jsonify({"cached": False, "stale": False, "reason": "file_not_found"})
+
+    cached, status = metadata_cache.get_by_path(
+        get_db(), validated,
+        current_mtime=stat["mtime"], current_inode=stat["inode"],
+    )
+    if status == "miss":
+        return jsonify({"cached": False, "stale": False})
+    if status == "stale":
+        return jsonify({
+            "cached": False, "stale": True,
+            "fetched_at": cached.metadata_fetched_at if cached else None,
+        })
+
+    # hit — 还原 shape 接近 /api/metadata/identify
+    c = cached
+    top_pick = None
+    if c.tmdb_id:
+        top_pick = {
+            "id": f"tmdb:{c.media_type}:{c.tmdb_id}",
+            "external_ids": {
+                k: v for k, v in (("tmdb_id", c.tmdb_id), ("imdb_id", c.imdb_id)) if v
+            },
+            "title": c.title,
+            "original_title": c.original_title,
+            "year": c.year,
+            "media_type": c.media_type,
+            "poster_url": c.poster_url,
+            "overview": c.overview,
+            "vote_average": c.vote_average,
+        }
+    details = None
+    if c.genres or c.cast or c.runtime_minutes or c.episode_air_date:
+        details = {
+            "genres": c.genres,
+            "cast": c.cast,
+            "runtime_minutes": c.runtime_minutes,
+        }
+        if c.episode_air_date or c.episode_overview or c.episode_still_url:
+            details["episode"] = {
+                "season_number": c.season_number,
+                "episode_number": c.episode_number,
+                "name": c.episode_title,
+                "overview": c.episode_overview,
+                "still_url": c.episode_still_url,
+                "air_date": c.episode_air_date,
+            }
+    return jsonify({
+        "cached": True,
+        "stale": False,
+        "fetched_at": c.metadata_fetched_at,
+        "parse": {
+            "raw_name": c.parse_raw_name,
+            "title": c.title,
+            "year": c.year,
+            "season": c.season_number,
+            "episode": c.episode_number,
+            "episode_title": c.episode_title,
+            "media_type": "episode" if c.media_type == "tv" else c.media_type,
+            "resolution": c.parse_resolution,
+            "source": c.parse_source,
+            "release_group": c.parse_release_group,
+        },
+        "candidates": [],  # cache 不存全候选；只要 top_pick 够前端展示
+        "top_pick": top_pick,
+        "confidence": c.metadata_confidence or 0.0,
+        "reasoning": c.metadata_reasoning or "",
+        "pick_source": c.metadata_pick_source or "cached",
+        "details": details,
+        "metadata_status": c.metadata_status,
+        "llm_configured": bool(load_deepseek_key()),
+        "provider_state": "ok",
+    })
 
 
 def _candidate_to_dict(c) -> dict:
@@ -1958,6 +2205,218 @@ def _candidate_to_dict(c) -> dict:
         "overview": c.overview,
         "vote_average": c.vote_average,
     }
+
+
+@app.route("/api/metadata/from-nfo", methods=["GET"])
+@require_token
+def metadata_from_nfo():
+    """读视频同目录的 sidecar .nfo（若存在）并返回结构化元数据。
+
+    用途：点选视频文件时直接展示已有 .nfo 信息，省一次 TMDB 调用。
+    query: video_path（NAS 真实路径，validate_path 校验）
+    返回: {has_nfo: bool, nfo_path?: str, parsed?: {...}}
+        parsed 字段同 file-content 的 .nfo 解析结果（_parse_emby_nfo + show_title 补全）
+    """
+    video_path = request.args.get("video_path", "").strip()
+    if not video_path:
+        return jsonify({"error": "video_path required"}), 400
+    try:
+        validated = validate_path(video_path)
+    except Exception:
+        return jsonify({"error": f"invalid video_path: {video_path}"}), 400
+
+    nfo_path = nfo_writer.nfo_path_for_video(validated)
+    # 沙箱校验沿用 _read_remote_text 内部（real path 必须在 NAS_BASE_PATH 下）
+    text = _read_remote_text(nfo_path)
+    if text is None:
+        return jsonify({"has_nfo": False, "nfo_path": nfo_path})
+
+    parsed = _parse_emby_nfo(text)
+    if not parsed:
+        # nfo 存在但 XML 解析失败（编码 / 非 Emby schema）→ 仍标 has_nfo 但 parsed=None
+        return jsonify({"has_nfo": True, "nfo_path": nfo_path, "parsed": None})
+
+    # episodedetails → 顺手补剧名 from sibling tvshow.nfo（同 file-content 逻辑）
+    if parsed.get("type") == "episodedetails":
+        show_dir = os.path.dirname(validated)
+        tvshow_text = _read_remote_text(os.path.join(show_dir, "tvshow.nfo"))
+        if tvshow_text:
+            tv = _parse_emby_nfo(tvshow_text)
+            if tv:
+                if tv.get("title"):
+                    parsed["show_title"] = tv["title"]
+                if tv.get("original_title"):
+                    parsed["show_original_title"] = tv["original_title"]
+                if tv.get("year") and not parsed.get("year"):
+                    parsed["year"] = tv["year"]
+
+    return jsonify({"has_nfo": True, "nfo_path": nfo_path, "parsed": parsed})
+
+
+@app.route("/api/metadata/preview-nfo-write", methods=["POST"])
+@require_token
+def metadata_preview_nfo_write():
+    """生成 NFO 写回的 destructive action preview。
+
+    body: {
+        "items": [
+            {
+                "video_path": "/share/.../Show.S01E01.mkv",
+                "tmdb_id": "60625",
+                "media_type": "tv" | "movie",
+                "season": 6,           # tv 时必填
+                "episode": 2,          # tv 时必填
+                "title": "瑞克和莫蒂",     # 用于 fallback；后端会用 lookup_by_id 重新拉权威值
+                "original_title": "Rick and Morty"
+            },
+            ...
+        ]
+    }
+
+    返回 {action_id, signed_token, expires_at, kind: 'nfo_write', preview: {items: [...]}}
+    用户用 signed_token 走标准 /api/action/confirm 执行。
+    """
+    data = request.json or {}
+    items_in = data.get("items") or []
+    if not isinstance(items_in, list) or not items_in:
+        return jsonify({"error": "items required"}), 400
+    if len(items_in) > 200:
+        return jsonify({"error": "too many items (max 200 per batch)"}), 400
+
+    provider = get_tmdb_provider()
+    if provider is None:
+        return jsonify({"error": "TMDB API key not configured"}), 400
+
+    # Step 1: 每个 item 调 TMDB lookup_by_id + 构造 XML
+    enriched_items: list[dict] = []
+    errors: list[dict] = []
+    for idx, raw in enumerate(items_in):
+        try:
+            video_path = validate_path(raw["video_path"])
+        except Exception:
+            errors.append({"index": idx, "reason": f"invalid video_path: {raw.get('video_path')!r}"})
+            continue
+        tmdb_id = str(raw.get("tmdb_id") or "").strip()
+        media_type = raw.get("media_type", "movie")
+        # 把 tv (provider 内部) → episode/movie (NFO 内部) 的映射统一
+        nfo_media_type = "episode" if media_type == "tv" else "movie"
+        if media_type == "tv" and not raw.get("season") and not raw.get("episode"):
+            # 没 season/episode 时退化成 tvshow 级 NFO
+            nfo_media_type = "tvshow"
+
+        if not tmdb_id:
+            errors.append({"index": idx, "reason": "tmdb_id required"})
+            continue
+
+        details = provider.lookup_by_id(
+            tmdb_id,
+            media_type="tv" if media_type == "tv" else "movie",
+            season=raw.get("season"),
+            episode=raw.get("episode"),
+        )
+        if details is None:
+            errors.append({"index": idx, "reason": f"tmdb lookup failed for id={tmdb_id}"})
+            continue
+        cand = details.candidate
+
+        nfo_payload = nfo_writer.NFOPayload(
+            media_type=nfo_media_type,
+            title=cand.title,
+            original_title=cand.original_title,
+            year=cand.year,
+            plot=cand.overview,
+            tmdb_id=cand.external_ids.get("tmdb_id") or tmdb_id,
+            imdb_id=cand.external_ids.get("imdb_id"),
+            tvdb_id=cand.external_ids.get("tvdb_id"),
+            rating=cand.vote_average,
+            genres=details.genres,
+            cast=details.cast,
+            runtime_minutes=details.runtime_minutes,
+            poster_url=cand.poster_url,
+            season=raw.get("season") if nfo_media_type == "episode" else None,
+            episode=raw.get("episode") if nfo_media_type == "episode" else None,
+            episode_title=(details.episode or {}).get("name") if details.episode else None,
+            episode_overview=(details.episode or {}).get("overview") if details.episode else None,
+            episode_air_date=(details.episode or {}).get("air_date") if details.episode else None,
+            episode_still_url=(details.episode or {}).get("still_url") if details.episode else None,
+        )
+        xml = nfo_writer.build_nfo(nfo_payload)
+        nfo_path = nfo_writer.nfo_path_for_video(video_path)
+        enriched_items.append({
+            "video_path": video_path,
+            "nfo_path": nfo_path,
+            "new_xml": xml,
+            "tmdb_id": nfo_payload.tmdb_id,
+            "media_type": nfo_media_type,
+        })
+
+    if not enriched_items:
+        return jsonify({"error": "no_valid_items", "errors": errors}), 400
+
+    # Step 2: SSH stat video + nfo paths（一次性批量）
+    all_paths = [it["video_path"] for it in enriched_items] + [it["nfo_path"] for it in enriched_items]
+    stat_map = _ssh_stat_paths(all_paths)
+
+    snap_items: list[dict] = []
+    for it in enriched_items:
+        v_stat = stat_map.get(it["video_path"], {"exists": False})
+        n_stat = stat_map.get(it["nfo_path"], {"exists": False})
+        snap_items.append({
+            **it,
+            "video_snapshot": {
+                "exists": v_stat.get("exists", False),
+                "inode": v_stat.get("inode", 0),
+                "size_bytes": v_stat.get("size_bytes", 0),
+                "mtime": v_stat.get("mtime", 0),
+            },
+            "nfo_snapshot": {
+                "existed": n_stat.get("exists", False),
+                "inode": n_stat.get("inode", 0),
+                "size_bytes": n_stat.get("size_bytes", 0),
+                "mtime": n_stat.get("mtime", 0),
+            },
+        })
+
+    # Step 3: 落 destructive_actions 表
+    payload = {
+        "kind": "nfo_write",
+        "items": snap_items,
+        "captured_at": int(time.time()),
+    }
+    res = destructive_action.create_preview(
+        get_db(),
+        kind="nfo_write",
+        payload=payload,
+        server_secret=SERVER_SECRET,
+        created_by="web_ui",
+    )
+
+    # Step 4: 返回给前端的 preview shape（XML 太大不全返；只返 head 200 字符）
+    preview_items = [{
+        "video_path": it["video_path"],
+        "nfo_path": it["nfo_path"],
+        "tmdb_id": it["tmdb_id"],
+        "media_type": it["media_type"],
+        "video_exists": it["video_snapshot"]["exists"],
+        "nfo_existed": it["nfo_snapshot"]["existed"],
+        "action": "overwrite" if it["nfo_snapshot"]["existed"] else "create",
+        "xml_preview": it["new_xml"][:300],
+        "xml_size_bytes": len(it["new_xml"].encode("utf-8")),
+    } for it in snap_items]
+
+    return jsonify({
+        "action_id": res.action_id,
+        "signed_token": res.signed_token,
+        "expires_at": res.expires_at,
+        "kind": "nfo_write",
+        "preview": {
+            "items": preview_items,
+            "errors": errors,
+            "total": len(preview_items),
+            "to_create": sum(1 for it in preview_items if it["action"] == "create"),
+            "to_overwrite": sum(1 for it in preview_items if it["action"] == "overwrite"),
+        },
+    })
 
 
 @app.route("/api/action/recovery", methods=["GET"])
