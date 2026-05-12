@@ -151,9 +151,11 @@ def _llm_filename_rescue(
     LLM 不直接绑 TMDB id（仍属上游），下游 _pick_top / select_candidate 接着 ground。
     """
     filename = path.rsplit("/", 1)[-1]
-    extraction = llm.extract_title_from_filename(filename, api_key=api_key)
-    if extraction is None or not extraction.title:
-        return parse, [], "llm_rescue_no_title"
+    extraction, err = llm.extract_title_from_filename(filename, api_key=api_key)
+    if extraction is None:
+        # err 形如 "llm_error: NotFoundError: Model 'deepseek-v4-flash' not found"
+        # 透传给 UI 让 user 看具体原因
+        return parse, [], f"llm_rescue_failed: {err}"
 
     # 用 LLM 提取的 title 重搜 TMDB
     media_type = extraction.media_type if extraction.media_type != "unknown" else parse.media_type or "movie"

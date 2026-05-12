@@ -199,7 +199,8 @@ def test_identify_llm_rescue_when_provider_returns_zero():
         year=2006, season=1, episode=None, media_type="tv",
         raw_response='{"title":"死亡笔记"}',
     )
-    with patch.object(llm_module, "extract_title_from_filename", return_value=fake_extraction):
+    with patch.object(llm_module, "extract_title_from_filename",
+                      return_value=(fake_extraction, "")):
         result = identify_svc.identify(
             "/share/.../死亡笔记.BDrip1080P.X264.AC3.LGGZ S.01.mkv",
             provider,
@@ -218,7 +219,8 @@ def test_identify_llm_rescue_returns_no_title_falls_through():
 
     provider = MagicMock()
     provider.search.return_value = []  # 无论怎么搜都 0
-    with patch.object(llm_module, "extract_title_from_filename", return_value=None):
+    with patch.object(llm_module, "extract_title_from_filename",
+                      return_value=(None, "no_title")):
         result = identify_svc.identify(
             "/share/.../random.mkv", provider, llm_api_key="fake-key"
         )

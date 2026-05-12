@@ -124,19 +124,31 @@ def extract_title_from_filename(
     model: str = DEFAULT_MODEL,
     base_url: str = DEFAULT_BASE_URL,
     timeout: float = 30.0,
-) -> FilenameExtraction | None:
-    """LLM 解析文件名 → title/year/season/episode/media_type。失败返 None。
+) -> tuple[FilenameExtraction | None, str]:
+    """LLM 解析文件名 → title/year/season/episode/media_type。
+
+    Returns: (FilenameExtraction or None, error_reason_string)
+    error_reason 形态:
+      ""                                  → 成功
+      "no_filename" / "no_api_key"        → 调用前 short circuit
+      "sdk_missing"                       → openai SDK 没装
+      "llm_error: <ErrorType>: <msg[:200]>" → SDK 抛错（含 model 不存在 / auth 失败等）
+      "empty_response"                    → API 200 但 content 空
+      "malformed_json: <raw[:80]>"        → JSON 解析失败
+      "no_title"                          → LLM 明确说不认识
 
     用途：guessit / 正则在中文 release / 模糊命名上失败时的 fallback。
     本函数不返回 TMDB id（只生成 title 字符串），仍属契约 #3 grounded 流程的
     上游——下游会拿 title 去 TMDB.search() 再过 grounded select。
     """
-    if not filename or not api_key:
-        return None
+    if not filename:
+        return None, "no_filename"
+    if not api_key:
+        return None, "no_api_key"
     try:
         import openai
     except ImportError:
-        return None
+        return None, "sdk_missing"
 
     prompt = EXTRACT_TITLE_PROMPT_V1.format(filename=filename)
     try:
@@ -148,12 +160,14 @@ def extract_title_from_filename(
             messages=[{"role": "user", "content": prompt}],
         )
     except Exception as e:  # noqa: BLE001
-        logger.error(f"[llm] extract_title call failed: {e}")
-        return None
+        msg = str(e)[:200]
+        logger.error(f"[llm] extract_title call failed: {type(e).__name__}: {msg}")
+        return None, f"llm_error: {type(e).__name__}: {msg}"
+
     try:
         raw = (resp.choices[0].message.content or "").strip()
     except (AttributeError, IndexError):
-        return None
+        return None, "empty_response"
 
     # 容忍 markdown fence
     json_text = raw
@@ -165,12 +179,12 @@ def extract_title_from_filename(
         data = json.loads(json_text)
     except json.JSONDecodeError:
         logger.warning(f"[llm] extract_title JSON parse failed; raw={raw[:200]!r}")
-        return None
+        return None, f"malformed_json: {raw[:80]}"
 
     # title 必须是非空字符串才算成功
     title = data.get("title")
     if not isinstance(title, str) or not title.strip():
-        return None
+        return None, "no_title"
 
     def _int_or_none(v):
         try:
@@ -190,7 +204,7 @@ def extract_title_from_filename(
         episode=_int_or_none(data.get("episode")),
         media_type=media_type,
         raw_response=raw,
-    )
+    ), ""
 
 
 def select_candidate(

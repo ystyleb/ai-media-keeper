@@ -31,11 +31,12 @@ def test_extract_title_happy_path():
         "year": 2006, "season": 1, "episode": None, "media_type": "tv",
     }))
     with patch.dict(sys.modules, {"openai": fake}):
-        ext = llm.extract_title_from_filename(
+        ext, err = llm.extract_title_from_filename(
             "死亡笔记.BDrip1080P.X264.AC3.LGGZ S.01.mkv",
             api_key="fake-key",
         )
     assert ext is not None
+    assert err == ""
     assert ext.title == "死亡笔记"
     assert ext.alt_title == "Death Note"
     assert ext.year == 2006
@@ -45,28 +46,33 @@ def test_extract_title_happy_path():
 def test_extract_title_returns_null_when_unrecognizable():
     fake = _make_openai_mock(json.dumps({"title": None}))
     with patch.dict(sys.modules, {"openai": fake}):
-        ext = llm.extract_title_from_filename(
+        ext, err = llm.extract_title_from_filename(
             "random.gibberish.mkv", api_key="fake-key"
         )
     assert ext is None
+    assert err == "no_title"
 
 
 def test_extract_title_empty_string_treated_as_null():
     fake = _make_openai_mock(json.dumps({"title": "", "media_type": "unknown"}))
     with patch.dict(sys.modules, {"openai": fake}):
-        ext = llm.extract_title_from_filename("noise.mkv", api_key="fake-key")
+        ext, err = llm.extract_title_from_filename("noise.mkv", api_key="fake-key")
     assert ext is None
+    assert err == "no_title"
 
 
 def test_extract_title_no_api_key_returns_none():
-    assert llm.extract_title_from_filename("anything.mkv", api_key="") is None
+    ext, err = llm.extract_title_from_filename("anything.mkv", api_key="")
+    assert ext is None
+    assert err == "no_api_key"
 
 
 def test_extract_title_malformed_json_returns_none():
     fake = _make_openai_mock("not valid json at all")
     with patch.dict(sys.modules, {"openai": fake}):
-        ext = llm.extract_title_from_filename("anything.mkv", api_key="fake-key")
+        ext, err = llm.extract_title_from_filename("anything.mkv", api_key="fake-key")
     assert ext is None
+    assert err.startswith("malformed_json")
 
 
 def test_extract_title_markdown_fence_tolerated():
@@ -76,10 +82,11 @@ def test_extract_title_markdown_fence_tolerated():
 ```"""
     fake = _make_openai_mock(response)
     with patch.dict(sys.modules, {"openai": fake}):
-        ext = llm.extract_title_from_filename(
+        ext, err = llm.extract_title_from_filename(
             "庆余年.S02E01.1080p.WEB-DL.mkv", api_key="fake-key"
         )
     assert ext is not None
+    assert err == ""
     assert ext.title == "庆余年"
     assert ext.year == 2019
     assert ext.season == 2
@@ -90,8 +97,9 @@ def test_extract_title_invalid_media_type_falls_to_unknown():
         "title": "Something", "media_type": "tv_or_movie",  # invalid enum
     }))
     with patch.dict(sys.modules, {"openai": fake}):
-        ext = llm.extract_title_from_filename("x.mkv", api_key="fake-key")
+        ext, err = llm.extract_title_from_filename("x.mkv", api_key="fake-key")
     assert ext is not None
+    assert err == ""
     assert ext.media_type == "unknown"
 
 
@@ -100,15 +108,19 @@ def test_extract_title_non_int_year_handled():
         "title": "X", "year": "not a number", "media_type": "movie",
     }))
     with patch.dict(sys.modules, {"openai": fake}):
-        ext = llm.extract_title_from_filename("x.mkv", api_key="fake-key")
+        ext, err = llm.extract_title_from_filename("x.mkv", api_key="fake-key")
     assert ext is not None
+    assert err == ""
     assert ext.year is None  # parse failure → None, not crash
 
 
-def test_extract_title_network_error_returns_none():
-    fake_class = MagicMock(side_effect=RuntimeError("connection timeout"))
+def test_extract_title_network_error_returns_reason():
+    """SDK 抛 NotFoundError 之类 → err 字符串带具体原因（便于 UI 透传）。"""
+    fake_class = MagicMock(side_effect=RuntimeError("Model 'deepseek-v4-flash' not found"))
     fake_module = types.ModuleType("openai")
     fake_module.OpenAI = fake_class
     with patch.dict(sys.modules, {"openai": fake_module}):
-        ext = llm.extract_title_from_filename("x.mkv", api_key="fake-key")
+        ext, err = llm.extract_title_from_filename("x.mkv", api_key="fake-key")
     assert ext is None
+    assert err.startswith("llm_error: RuntimeError")
+    assert "Model 'deepseek-v4-flash' not found" in err
