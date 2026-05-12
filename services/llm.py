@@ -155,7 +155,7 @@ def extract_title_from_filename(
         client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
         resp = client.chat.completions.create(
             model=model,
-            max_tokens=300,
+            max_tokens=1500,  # reasoning 模式需要内部思考 token 预算，给宽裕
             temperature=0.1,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -165,9 +165,18 @@ def extract_title_from_filename(
         return None, f"llm_error: {type(e).__name__}: {msg}"
 
     try:
-        raw = (resp.choices[0].message.content or "").strip()
+        msg = resp.choices[0].message
+        raw = (msg.content or "").strip()
+        # DeepSeek V4 / R1 reasoning 模式：真实输出在 reasoning_content
+        # 而非 content。content 可能完全空 → 必须 fallback。
+        if not raw and hasattr(msg, "reasoning_content") and msg.reasoning_content:
+            raw = msg.reasoning_content.strip()
+            logger.info(f"[llm] using reasoning_content (model is in reasoning mode)")
     except (AttributeError, IndexError):
         return None, "empty_response"
+
+    if not raw:
+        return None, "empty_response (content + reasoning_content both empty)"
 
     # 容忍 markdown fence
     json_text = raw
@@ -175,10 +184,18 @@ def extract_title_from_filename(
     if m:
         json_text = m.group(1)
 
+    # reasoning_content 通常带 narrative + 末尾的 JSON；找最后一段 JSON 块
+    if "{" in json_text and not json_text.lstrip().startswith("{"):
+        # 取最后一个 { 开头到对应 } 的子串
+        last_open = json_text.rfind("{")
+        last_close = json_text.rfind("}")
+        if last_open != -1 and last_close > last_open:
+            json_text = json_text[last_open:last_close + 1]
+
     try:
         data = json.loads(json_text)
     except json.JSONDecodeError:
-        logger.warning(f"[llm] extract_title JSON parse failed; raw={raw[:200]!r}")
+        logger.warning(f"[llm] extract_title JSON parse failed; raw={raw[:300]!r}")
         return None, f"malformed_json: {raw[:80]}"
 
     # title 必须是非空字符串才算成功
@@ -260,7 +277,7 @@ def select_candidate(
         client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
         resp = client.chat.completions.create(
             model=model,
-            max_tokens=400,
+            max_tokens=2000,  # reasoning 模式 + 多候选时给宽裕预算
             temperature=0.1,
             messages=[{"role": "user", "content": prompt}],
             # DeepSeek 支持 response_format={'type':'json_object'} 但有的网关不支持；
@@ -271,15 +288,29 @@ def select_candidate(
         return LLMSelection(None, 0.0, f"llm_error: {type(e).__name__}", "")
 
     try:
-        raw = (resp.choices[0].message.content or "").strip()
+        msg = resp.choices[0].message
+        raw = (msg.content or "").strip()
+        # DeepSeek V4 / R1 reasoning 模式 fallback
+        if not raw and hasattr(msg, "reasoning_content") and msg.reasoning_content:
+            raw = msg.reasoning_content.strip()
     except (AttributeError, IndexError):
         return LLMSelection(None, 0.0, "empty_response", "")
+
+    if not raw:
+        return LLMSelection(None, 0.0, "empty_response_both_fields", "")
 
     # 容忍 markdown code fence 包裹（DeepSeek 偶发会加 ```json）
     json_text = raw
     m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", json_text)
     if m:
         json_text = m.group(1)
+
+    # reasoning_content 通常含 narrative；取最后一段 JSON 子串
+    if "{" in json_text and not json_text.lstrip().startswith("{"):
+        last_open = json_text.rfind("{")
+        last_close = json_text.rfind("}")
+        if last_open != -1 and last_close > last_open:
+            json_text = json_text[last_open:last_close + 1]
 
     try:
         parsed = json.loads(json_text)
