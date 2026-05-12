@@ -109,6 +109,25 @@ def test_top_pick_low_confidence_returns_none():
     assert "low confidence" in reasoning
 
 
+def test_top_pick_matches_original_title_when_localized():
+    """zh-CN 下 TMDB 返回 c.title='瑞克和莫蒂' / c.original_title='Rick and Morty'，
+    guessit 解析的是英文 → 必须比对 original_title 才能 match。"""
+    parse = _parse("Rick and Morty", media_type="episode")
+    cands = [
+        MediaCandidate(
+            id="tmdb:tv:1", external_ids={"tmdb_id": "1"},
+            title="瑞克和莫蒂", original_title="Rick and Morty",
+            year=2013, media_type="tv",
+            poster_url=None, overview=None, vote_average=8.7,
+        )
+    ]
+    top, score, reasoning = identify_svc._pick_top(parse, cands)
+    assert top is not None
+    assert top.title == "瑞克和莫蒂"
+    assert score >= 0.7
+    assert "original exact" in reasoning or "original substring" in reasoning
+
+
 def test_top_pick_episode_type_filters_to_tv():
     """guessit 标 episode → 候选里应该优先 tv，过滤掉同名 movie。"""
     parse = _parse("Friends", year=1994, media_type="episode")

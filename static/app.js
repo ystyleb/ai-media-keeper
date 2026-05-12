@@ -678,12 +678,20 @@ function renderMetadataCard(container, data) {
             const item = createElement("div", {
                 className: "list-group-item list-group-item-action bg-transparent text-light border-secondary py-2"
             });
+            const poster = c.poster_url
+                ? `<img src="${c.poster_url}" style="width:50px;height:auto;flex-shrink:0;border-radius:3px;margin-right:8px"/>`
+                : `<div style="width:50px;height:75px;flex-shrink:0;margin-right:8px;background:#222;border-radius:3px"></div>`;
             item.innerHTML = `
-                <div class="d-flex justify-content-between">
-                    <strong>${c.title}${c.original_title && c.original_title !== c.title ? ` <small class="text-secondary">(${c.original_title})</small>` : ""}</strong>
-                    <small class="text-secondary">${c.year || "?"} · ${c.media_type} · ⭐${c.vote_average?.toFixed(1) || "—"}</small>
+                <div class="d-flex">
+                    ${poster}
+                    <div class="flex-grow-1">
+                        <div class="d-flex justify-content-between">
+                            <strong>${c.title}${c.original_title && c.original_title !== c.title ? ` <small class="text-secondary">(${c.original_title})</small>` : ""}</strong>
+                            <small class="text-secondary">${c.year || "?"} · ${c.media_type} · ⭐${c.vote_average?.toFixed(1) || "—"}</small>
+                        </div>
+                        ${c.overview ? `<small class="text-secondary d-block mt-1" style="line-height:1.3">${c.overview.slice(0, 200)}</small>` : ""}
+                    </div>
                 </div>
-                ${c.overview ? `<small class="text-secondary d-block mt-1" style="line-height:1.3">${c.overview.slice(0, 200)}</small>` : ""}
             `;
             list.appendChild(item);
         });

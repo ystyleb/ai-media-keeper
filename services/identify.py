@@ -97,13 +97,27 @@ def _pick_top(
     for c in candidates:
         score = 0.0
         reasons: list[str] = []
-        got = _normalize_title(c.title)
-        if got == want:
-            score += 0.7
-            reasons.append("title exact")
-        elif want in got or got in want:
-            score += 0.4
-            reasons.append("title substring")
+        # 关键：同时比对 title（本地化，如 'zh-CN' 下 "瑞克和莫蒂"）和
+        # original_title（"Rick and Morty"）。guessit 出的多半是英文，
+        # 但 TMDB 返回的 title 是 language-localized，必须两边都看。
+        got_title = _normalize_title(c.title)
+        got_orig = _normalize_title(c.original_title or "")
+        title_score = 0.0
+        title_reason = ""
+        for got, label in [(got_title, "title"), (got_orig, "original")]:
+            if not got:
+                continue
+            if got == want:
+                cand_score, cand_reason = 0.7, f"{label} exact"
+            elif want in got or got in want:
+                cand_score, cand_reason = 0.4, f"{label} substring"
+            else:
+                continue
+            if cand_score > title_score:
+                title_score, title_reason = cand_score, cand_reason
+        if title_score > 0:
+            score += title_score
+            reasons.append(title_reason)
 
         if want_year and c.year == want_year:
             score += 0.2
