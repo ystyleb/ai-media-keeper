@@ -17,6 +17,8 @@ import requests
 from flask import Flask, render_template, jsonify, request, abort, g
 
 from services import destructive_action
+from services import identify as identify_svc
+from services.metadata.tmdb import TMDBProvider
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -173,6 +175,39 @@ DEFAULT_QBIT_CONFIG = {
 }
 
 QBIT_PASS_FILE = CONFIG_DIR / ".qbit_pass"
+TMDB_KEY_FILE = CONFIG_DIR / ".tmdb_key"
+
+
+def load_tmdb_key() -> str:
+    """env > config/.tmdb_key > 空"""
+    env = os.environ.get("TMDB_API_KEY", "").strip()
+    if env:
+        return env
+    if TMDB_KEY_FILE.exists():
+        return TMDB_KEY_FILE.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def save_tmdb_key(key: str) -> None:
+    """落盘 + chmod 600；空 key 删文件"""
+    key = key.strip()
+    if not key:
+        if TMDB_KEY_FILE.exists():
+            TMDB_KEY_FILE.unlink()
+        return
+    TMDB_KEY_FILE.write_text(key, encoding="utf-8")
+    try:
+        os.chmod(TMDB_KEY_FILE, 0o600)
+    except OSError as e:
+        logger.warning(f"could not chmod 600 {TMDB_KEY_FILE}: {e}")
+
+
+def get_tmdb_provider() -> TMDBProvider | None:
+    """每请求按需创建（key 可能 UI 上刚改），key 为空返回 None。"""
+    key = load_tmdb_key()
+    if not key:
+        return None
+    return TMDBProvider(api_key=key)
 
 
 class QBitClient:
@@ -1669,6 +1704,133 @@ def action_confirm():
 # ─────────────────────────────────────────────────────────────
 # 手工恢复面板：列出 needs_manual_recovery / running 的 action
 # ─────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase 2: 媒体元数据识别（TMDB）
+# ─────────────────────────────────────────────────────────────
+
+
+@app.route("/api/config/tmdb", methods=["GET"])
+@require_token
+def get_tmdb_config():
+    return jsonify({"has_key": bool(load_tmdb_key())})
+
+
+@app.route("/api/config/tmdb", methods=["POST"])
+@require_token
+def set_tmdb_config():
+    data = request.json or {}
+    key = (data.get("api_key") or "").strip()
+    save_tmdb_key(key)
+    return jsonify({"ok": True, "has_key": bool(key)})
+
+
+@app.route("/api/config/tmdb/test", methods=["POST"])
+@require_token
+def test_tmdb_config():
+    """临时 key 验证：body 里传 api_key 直接测，不落盘；不传则用现有 key。"""
+    data = request.json or {}
+    key = (data.get("api_key") or "").strip() or load_tmdb_key()
+    if not key:
+        return jsonify({"ok": False, "message": "no key configured"}), 400
+    try:
+        result = TMDBProvider(api_key=key).test_connection()
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)}), 200
+    return jsonify(result)
+
+
+@app.route("/api/metadata/identify", methods=["POST"])
+@require_token
+def metadata_identify():
+    """识别单个文件：返回 guessit 解析 + TMDB 候选 + top_pick。
+
+    body: {"path": "/share/..."}
+    """
+    data = request.json or {}
+    path = data.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "path required"}), 400
+    try:
+        path = validate_path(path)
+    except Exception:
+        return jsonify({"error": f"invalid path: {path}"}), 400
+
+    provider = get_tmdb_provider()
+    if provider is None:
+        # 仅文件名解析，不查 provider
+        parse = identify_svc.parse_filename(path)
+        return jsonify({
+            "parse": {
+                "raw_name": parse.raw_name, "title": parse.title, "year": parse.year,
+                "season": parse.season, "episode": parse.episode,
+                "episode_title": parse.episode_title, "media_type": parse.media_type,
+                "resolution": parse.resolution, "source": parse.source,
+                "release_group": parse.release_group,
+            },
+            "candidates": [],
+            "top_pick": None,
+            "confidence": 0.0,
+            "reasoning": "TMDB API key not configured. Set it in settings to enable metadata lookup.",
+            "provider_state": "not_configured",
+        })
+
+    result = identify_svc.identify(path, provider)
+    response = {
+        "parse": {
+            "raw_name": result.parse.raw_name, "title": result.parse.title, "year": result.parse.year,
+            "season": result.parse.season, "episode": result.parse.episode,
+            "episode_title": result.parse.episode_title, "media_type": result.parse.media_type,
+            "resolution": result.parse.resolution, "source": result.parse.source,
+            "release_group": result.parse.release_group,
+        },
+        "candidates": [_candidate_to_dict(c) for c in result.candidates],
+        "top_pick": _candidate_to_dict(result.top_pick) if result.top_pick else None,
+        "confidence": result.confidence,
+        "reasoning": result.reasoning,
+        "provider_state": "ok",
+    }
+
+    # tv 类型且有 top_pick → 顺手把单集详情也带上（episode title / overview / still）
+    if result.top_pick and result.parse.media_type == "episode" and result.top_pick.media_type == "tv":
+        tmdb_id = result.top_pick.external_ids.get("tmdb_id")
+        if tmdb_id:
+            details = provider.lookup_by_id(
+                tmdb_id, media_type="tv",
+                season=result.parse.season, episode=result.parse.episode,
+            )
+            if details:
+                response["details"] = {
+                    "episode": details.episode,
+                    "cast": details.cast,
+                    "genres": details.genres,
+                }
+    elif result.top_pick and result.parse.media_type == "movie":
+        tmdb_id = result.top_pick.external_ids.get("tmdb_id")
+        if tmdb_id:
+            details = provider.lookup_by_id(tmdb_id, media_type="movie")
+            if details:
+                response["details"] = {
+                    "cast": details.cast,
+                    "genres": details.genres,
+                    "runtime_minutes": details.runtime_minutes,
+                }
+    return jsonify(response)
+
+
+def _candidate_to_dict(c) -> dict:
+    return {
+        "id": c.id,
+        "external_ids": c.external_ids,
+        "title": c.title,
+        "original_title": c.original_title,
+        "year": c.year,
+        "media_type": c.media_type,
+        "poster_url": c.poster_url,
+        "overview": c.overview,
+        "vote_average": c.vote_average,
+    }
 
 
 @app.route("/api/action/recovery", methods=["GET"])

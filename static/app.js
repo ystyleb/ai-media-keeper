@@ -598,6 +598,158 @@ function renderNfoCard(p) {
 }
 
 
+async function configureTmdbKeyPrompt() {
+    const key = window.prompt(
+        "粘贴 TMDB API key（v3，~32 字符）\n\n免费申请：https://www.themoviedb.org/settings/api\n（注册账号 → 申请 Developer key → 复制 API Key (v3 auth)）"
+    );
+    if (!key || !key.trim()) return false;
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/tmdb`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ api_key: key.trim() })
+        });
+        const data = await res.json();
+        if (!data.ok) {
+            alert("保存失败：" + (data.error || "unknown"));
+            return false;
+        }
+        // 顺手测一下
+        const tr = await apiFetch(`${API_BASE}/api/config/tmdb/test`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({})
+        });
+        const td = await tr.json();
+        if (!td.ok) {
+            alert("TMDB 连接失败：" + td.message);
+            return false;
+        }
+        return true;
+    } catch (err) {
+        alert("出错：" + err.message);
+        return false;
+    }
+}
+
+function renderMetadataCard(container, data) {
+    container.innerHTML = "";
+    // provider 未配置 → 提示用户去设置页填 TMDB key
+    if (data.provider_state === "not_configured") {
+        const warn = createElement("div", {
+            className: "alert alert-warning py-2 small mb-2",
+            innerHTML: 'TMDB API key 未配置。<a href="#" id="open-tmdb-config">点这里配置</a>（免费，1 分钟）。'
+        });
+        warn.querySelector("#open-tmdb-config").addEventListener("click", async (e) => {
+            e.preventDefault();
+            const ok = await configureTmdbKeyPrompt();
+            if (ok) {
+                warn.innerHTML = '<small class="text-success">已保存。再点一次 "AI 识别" 按钮试试。</small>';
+            }
+        });
+        container.appendChild(warn);
+        // 仍然显示文件名解析（guessit 结果）让用户看 parser 至少识别到了什么
+        if (data.parse?.title) {
+            const parseInfo = createElement("small", {
+                className: "text-secondary d-block",
+                textContent: `解析：${data.parse.title}${data.parse.year ? " ("+data.parse.year+")" : ""}${data.parse.season ? " S"+String(data.parse.season).padStart(2,"0") : ""}${data.parse.episode ? "E"+String(data.parse.episode).padStart(2,"0") : ""}`
+            });
+            container.appendChild(parseInfo);
+        }
+        return;
+    }
+
+    const top = data.top_pick;
+    // 没绑定到 top_pick → 显示候选列表让用户挑（spike 阶段不入库，只展示）
+    if (!top) {
+        const banner = createElement("div", {
+            className: "alert alert-warning py-2 small mb-2",
+            textContent: `未自动匹配（${data.reasoning || "no candidate"}）。下面是候选：`
+        });
+        container.appendChild(banner);
+        if (!data.candidates || data.candidates.length === 0) {
+            container.appendChild(createElement("p", {
+                className: "text-secondary small", textContent: "TMDB 也没找到匹配。"
+            }));
+            return;
+        }
+        const list = createElement("div", { className: "list-group small" });
+        data.candidates.forEach(c => {
+            const item = createElement("div", {
+                className: "list-group-item list-group-item-action bg-transparent text-light border-secondary py-2"
+            });
+            item.innerHTML = `
+                <div class="d-flex justify-content-between">
+                    <strong>${c.title}${c.original_title && c.original_title !== c.title ? ` <small class="text-secondary">(${c.original_title})</small>` : ""}</strong>
+                    <small class="text-secondary">${c.year || "?"} · ${c.media_type} · ⭐${c.vote_average?.toFixed(1) || "—"}</small>
+                </div>
+                ${c.overview ? `<small class="text-secondary d-block mt-1" style="line-height:1.3">${c.overview.slice(0, 200)}</small>` : ""}
+            `;
+            list.appendChild(item);
+        });
+        container.appendChild(list);
+        return;
+    }
+
+    // 主卡片：海报 + 标题 + 评分 + 剧情
+    const card = createElement("div", { className: "d-flex gap-2 mb-2" });
+    if (top.poster_url) {
+        const img = createElement("img", {
+            src: top.poster_url, className: "rounded"
+        });
+        Object.assign(img.style, { width: "90px", height: "auto", flexShrink: "0" });
+        card.appendChild(img);
+    }
+    const text = createElement("div");
+    const titleLine = `<strong>${top.title}</strong>` +
+        (top.original_title && top.original_title !== top.title ? ` <small class="text-secondary">(${top.original_title})</small>` : "");
+    const metaLine = [
+        top.year,
+        top.media_type === "tv" ? "剧集" : "电影",
+        `⭐ ${top.vote_average?.toFixed(1) || "—"}`,
+        `置信度 ${(data.confidence * 100).toFixed(0)}%`
+    ].filter(Boolean).join(" · ");
+
+    text.innerHTML = `
+        <div>${titleLine}</div>
+        <small class="text-secondary d-block mb-1">${metaLine}</small>
+    `;
+    if (top.overview) {
+        text.innerHTML += `<small class="d-block" style="line-height:1.4">${top.overview}</small>`;
+    }
+    card.appendChild(text);
+    container.appendChild(card);
+
+    // tv 剧 + 拿到了 episode 详情 → 显示单集卡
+    if (data.details?.episode) {
+        const ep = data.details.episode;
+        const epCard = createElement("div", { className: "border-top pt-2 mt-2 small" });
+        epCard.innerHTML = `
+            <strong>S${String(ep.season_number).padStart(2,"0")}E${String(ep.episode_number).padStart(2,"0")} · ${ep.name || "—"}</strong>
+            ${ep.air_date ? ` <small class="text-secondary">${ep.air_date}</small>` : ""}
+            ${ep.overview ? `<div class="text-secondary mt-1" style="line-height:1.4">${ep.overview}</div>` : ""}
+        `;
+        container.appendChild(epCard);
+    }
+
+    // 演员 / 类型
+    if (data.details) {
+        if (data.details.genres?.length) {
+            container.appendChild(createElement("small", {
+                className: "text-secondary d-block mt-2",
+                textContent: "类型：" + data.details.genres.join(" / ")
+            }));
+        }
+        if (data.details.cast?.length) {
+            container.appendChild(createElement("small", {
+                className: "text-secondary d-block",
+                textContent: "演员：" + data.details.cast.slice(0, 6).join(" · ")
+            }));
+        }
+    }
+}
+
+
 async function showDetail(path) {
     const file = currentFiles.find(f => f.path === path);
     if (!file) return;
@@ -633,6 +785,43 @@ async function showDetail(path) {
         table.appendChild(tr);
     });
     content.appendChild(table);
+
+    // === AI 识别按钮（视频文件） ===
+    const VIDEO_EXTS = new Set(["mkv","mp4","avi","mov","ts","m4v","mpg","wmv","flv","webm","m2ts","rmvb"]);
+    const fileExt = (file.name.split(".").pop() || "").toLowerCase();
+    if (!file.is_dir && VIDEO_EXTS.has(fileExt)) {
+        const aiSection = createElement("div", { className: "mb-3" });
+        const aiBtn = createElement("button", {
+            className: "btn btn-sm btn-outline-info",
+            innerHTML: '<i class="bi bi-stars me-1"></i>AI 识别（TMDB）'
+        });
+        const aiResult = createElement("div", { className: "mt-2" });
+        aiBtn.addEventListener("click", async () => {
+            aiBtn.disabled = true;
+            aiBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>识别中...';
+            aiResult.innerHTML = "";
+            try {
+                const res = await apiFetch(`${API_BASE}/api/metadata/identify`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ path: file.path })
+                });
+                const data = await res.json();
+                renderMetadataCard(aiResult, data);
+            } catch (err) {
+                aiResult.innerHTML = "";
+                aiResult.appendChild(createElement("p", {
+                    className: "text-danger small", textContent: `识别失败：${err.message}`
+                }));
+            } finally {
+                aiBtn.disabled = false;
+                aiBtn.innerHTML = '<i class="bi bi-stars me-1"></i>AI 识别（TMDB）';
+            }
+        });
+        aiSection.appendChild(aiBtn);
+        aiSection.appendChild(aiResult);
+        content.appendChild(aiSection);
+    }
 
     // 文本文件预览（.nfo / .srt / .log / .ass 等）
     const TEXT_EXTS = new Set([
