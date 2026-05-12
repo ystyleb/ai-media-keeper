@@ -177,7 +177,7 @@ DEFAULT_QBIT_CONFIG = {
 
 QBIT_PASS_FILE = CONFIG_DIR / ".qbit_pass"
 TMDB_KEY_FILE = CONFIG_DIR / ".tmdb_key"
-ANTHROPIC_KEY_FILE = CONFIG_DIR / ".anthropic_key"
+DEEPSEEK_KEY_FILE = CONFIG_DIR / ".deepseek_key"
 
 
 def load_tmdb_key() -> str:
@@ -212,21 +212,21 @@ def get_tmdb_provider() -> TMDBProvider | None:
     return TMDBProvider(api_key=key)
 
 
-def load_anthropic_key() -> str:
-    return llm.load_api_key(ANTHROPIC_KEY_FILE)
+def load_deepseek_key() -> str:
+    return llm.load_api_key(DEEPSEEK_KEY_FILE)
 
 
-def save_anthropic_key(key: str) -> None:
+def save_deepseek_key(key: str) -> None:
     key = key.strip()
     if not key:
-        if ANTHROPIC_KEY_FILE.exists():
-            ANTHROPIC_KEY_FILE.unlink()
+        if DEEPSEEK_KEY_FILE.exists():
+            DEEPSEEK_KEY_FILE.unlink()
         return
-    ANTHROPIC_KEY_FILE.write_text(key, encoding="utf-8")
+    DEEPSEEK_KEY_FILE.write_text(key, encoding="utf-8")
     try:
-        os.chmod(ANTHROPIC_KEY_FILE, 0o600)
+        os.chmod(DEEPSEEK_KEY_FILE, 0o600)
     except OSError as e:
-        logger.warning(f"could not chmod 600 {ANTHROPIC_KEY_FILE}: {e}")
+        logger.warning(f"could not chmod 600 {DEEPSEEK_KEY_FILE}: {e}")
 
 
 class QBitClient:
@@ -1745,42 +1745,42 @@ def set_tmdb_config():
     return jsonify({"ok": True, "has_key": bool(key)})
 
 
-@app.route("/api/config/anthropic", methods=["GET"])
+@app.route("/api/config/deepseek", methods=["GET"])
 @require_token
-def get_anthropic_config():
-    return jsonify({"has_key": bool(load_anthropic_key())})
+def get_deepseek_config():
+    return jsonify({"has_key": bool(load_deepseek_key())})
 
 
-@app.route("/api/config/anthropic", methods=["POST"])
+@app.route("/api/config/deepseek", methods=["POST"])
 @require_token
-def set_anthropic_config():
+def set_deepseek_config():
     data = request.json or {}
     key = (data.get("api_key") or "").strip()
-    save_anthropic_key(key)
+    save_deepseek_key(key)
     return jsonify({"ok": True, "has_key": bool(key)})
 
 
-@app.route("/api/config/anthropic/test", methods=["POST"])
+@app.route("/api/config/deepseek/test", methods=["POST"])
 @require_token
-def test_anthropic_config():
+def test_deepseek_config():
     """临时 key 验证：body 里传 api_key 直接测；不传用现有 key。
     用一个最小 message 测真实 SDK 调用，验证 key + 网络通畅。"""
     data = request.json or {}
-    key = (data.get("api_key") or "").strip() or load_anthropic_key()
+    key = (data.get("api_key") or "").strip() or load_deepseek_key()
     if not key:
         return jsonify({"ok": False, "message": "no key configured"}), 400
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=key, timeout=10)
-        msg = client.messages.create(
+        import openai
+        client = openai.OpenAI(api_key=key, base_url=llm.DEFAULT_BASE_URL, timeout=10)
+        resp = client.chat.completions.create(
             model=llm.DEFAULT_MODEL,
             max_tokens=10,
             messages=[{"role": "user", "content": "Reply with just: OK"}],
         )
-        text = msg.content[0].text.strip() if msg.content else ""
+        text = (resp.choices[0].message.content or "").strip() if resp.choices else ""
         return jsonify({"ok": True, "model": llm.DEFAULT_MODEL, "sample": text[:50]})
     except ImportError:
-        return jsonify({"ok": False, "message": "anthropic SDK not installed"}), 500
+        return jsonify({"ok": False, "message": "openai SDK not installed"}), 500
     except Exception as e:
         return jsonify({"ok": False, "message": f"{type(e).__name__}: {e}"}), 200
 
@@ -1835,7 +1835,7 @@ def metadata_identify():
             "provider_state": "not_configured",
         })
 
-    result = identify_svc.identify(path, provider, llm_api_key=load_anthropic_key() or None)
+    result = identify_svc.identify(path, provider, llm_api_key=load_deepseek_key() or None)
     response = {
         "parse": {
             "raw_name": result.parse.raw_name, "title": result.parse.title, "year": result.parse.year,
@@ -1849,7 +1849,7 @@ def metadata_identify():
         "confidence": result.confidence,
         "reasoning": result.reasoning,
         "pick_source": result.pick_source,
-        "llm_configured": bool(load_anthropic_key()),
+        "llm_configured": bool(load_deepseek_key()),
         "provider_state": "ok",
     }
 

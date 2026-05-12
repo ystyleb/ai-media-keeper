@@ -598,13 +598,13 @@ function renderNfoCard(p) {
 }
 
 
-async function configureAnthropicKeyPrompt() {
+async function configureDeepseekKeyPrompt() {
     const key = window.prompt(
-        "粘贴 Anthropic API key（sk-ant-...）\n\n申请：https://console.anthropic.com/settings/keys\n（注册账号 → API Keys → Create Key）\n\n用于：中文剧名识别 + 模糊匹配。免费 tier 够个人 PT 库扫描。"
+        "粘贴 DeepSeek API key（sk-...）\n\n申请：https://platform.deepseek.com/api_keys\n（注册账号 → API Keys → 创建）\n\n用于：中文剧名识别 + 模糊匹配。比 OpenAI / Claude 便宜数倍，个人 PT 库扫描成本忽略不计。"
     );
     if (!key || !key.trim()) return false;
     try {
-        const res = await apiFetch(`${API_BASE}/api/config/anthropic`, {
+        const res = await apiFetch(`${API_BASE}/api/config/deepseek`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ api_key: key.trim() })
@@ -614,14 +614,14 @@ async function configureAnthropicKeyPrompt() {
             alert("保存失败：" + (data.error || "unknown"));
             return false;
         }
-        const tr = await apiFetch(`${API_BASE}/api/config/anthropic/test`, {
+        const tr = await apiFetch(`${API_BASE}/api/config/deepseek/test`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({})
         });
         const td = await tr.json();
         if (!td.ok) {
-            alert("Anthropic 连接失败：" + td.message);
+            alert("DeepSeek 连接失败：" + td.message);
             return false;
         }
         return true;
@@ -706,11 +706,11 @@ function renderMetadataCard(container, data) {
         if (!data.llm_configured && data.candidates && data.candidates.length > 1) {
             const llmHint = createElement("div", {
                 className: "alert alert-info py-2 small mb-2",
-                innerHTML: '🤖 配置 Anthropic API key 后，AI 会自动从候选里挑（中文剧名 / 模糊命名都搞得定）。<a href="#" id="open-anthropic-config">点这里配置</a>'
+                innerHTML: '🤖 配置 DeepSeek API key 后，AI 会自动从候选里挑（中文剧名 / 模糊命名都搞得定，免费 tier 够用）。<a href="#" id="open-deepseek-config">点这里配置</a>'
             });
-            llmHint.querySelector("#open-anthropic-config").addEventListener("click", async (e) => {
+            llmHint.querySelector("#open-deepseek-config").addEventListener("click", async (e) => {
                 e.preventDefault();
-                const ok = await configureAnthropicKeyPrompt();
+                const ok = await configureDeepseekKeyPrompt();
                 if (ok) {
                     llmHint.innerHTML = '<small class="text-success">已保存。再点一次 "AI 识别" 按钮让 AI 帮选。</small>';
                 }
@@ -810,6 +810,22 @@ function renderMetadataCard(container, data) {
                 textContent: "演员：" + data.details.cast.slice(0, 6).join(" · ")
             }));
         }
+    }
+
+    // 即使匹配上了，LLM 未配置时给个小提示——用户能主动配 LLM 升级体验
+    if (!data.llm_configured && data.pick_source !== "llm") {
+        const llmHint = createElement("small", {
+            className: "d-block mt-2 text-info",
+            innerHTML: '<i class="bi bi-lightbulb me-1"></i>配置 <a href="#" class="text-info" id="open-deepseek-config-inline">DeepSeek API key</a>（免费 tier 够用），AI 帮选能识别中文 release / 模糊命名 / 多版本。'
+        });
+        llmHint.querySelector("#open-deepseek-config-inline").addEventListener("click", async (e) => {
+            e.preventDefault();
+            const ok = await configureDeepseekKeyPrompt();
+            if (ok) {
+                llmHint.innerHTML = '<small class="text-success">DeepSeek 已配。后续识别会用 AI 选。</small>';
+            }
+        });
+        container.appendChild(llmHint);
     }
 }
 

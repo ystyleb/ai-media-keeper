@@ -1,10 +1,14 @@
 """LLM grounded selection — 契约 #3 唯一出口。
 
+**Provider 默认：DeepSeek**（用户偏好，按 ~/.claude/projects/<this>/memory/
+feedback_llm_provider.md：Anthropic 太贵不用）。走 OpenAI-compatible 协议
+chat-completions endpoint（参考 ai-sdk-third-party.md 第三方网关经验）。
+
 **Single call site rule** (plan v3 R2-I5):
-Any other module that needs LLM **must** route through this file.
-Direct `import anthropic` outside `services/llm.py` is a code review
-red flag — the Anthropic SDK is intentionally imported lazily here
-so the rest of the project never touches it.
+Any module that needs LLM **must** route through this file. Direct
+`import openai` outside `services/llm.py` is a code review red flag.
+The SDK is lazily imported inside the function so the rest of the
+project never touches it.
 
 Reference: ~/.claude/plans/ai-native-mutable-bubble.md 契约 #3
 """
@@ -21,10 +25,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# CLAUDE.md 偏好：Claude 4.x 系列最新。Haiku 4.5 在中文识别上够用 + 便宜
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+# DeepSeek 默认：deepseek-chat（通用，便宜）。复杂推理可换 deepseek-reasoner。
+DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_BASE_URL = "https://api.deepseek.com"
 
-# 契约 #3 prompt template（v1，单一注册名，禁止其他模块自定义）
+# 契约 #3 prompt template（v1，单一注册名）
 SELECT_PROMPT_V1 = """You are matching a video file to its TMDB entry. Given the parsed filename info and a list of TMDB candidates, pick the best match.
 
 **Hard rules**:
@@ -57,8 +62,8 @@ class LLMSelection:
 
 
 def load_api_key(config_path: Path | str | None = None) -> str:
-    """env > config 文件 > 空。同 .api_token / .tmdb_key 模式。"""
-    env = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    """env DEEPSEEK_API_KEY > config 文件 > 空。同 .api_token / .tmdb_key 模式。"""
+    env = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if env:
         return env
     if config_path:
@@ -78,6 +83,7 @@ def select_candidate(
     *,
     api_key: str,
     model: str = DEFAULT_MODEL,
+    base_url: str = DEFAULT_BASE_URL,
     timeout: float = 30.0,
 ) -> LLMSelection:
     """grounded selection。永远不让 LLM 编 id；output schema enforce 后失败 → needs_review。
@@ -85,19 +91,20 @@ def select_candidate(
     Args:
         parse: filename 解析结果（含 title/year/season/episode/...）
         candidates: provider 返回的候选 dict 列表，必须含 'id'、'title'
-        api_key: BYOK Anthropic key
-        model: 默认 claude-haiku-4-5-20251001（CLAUDE.md 偏好）
+        api_key: BYOK DeepSeek key
+        model: 默认 deepseek-chat
+        base_url: 默认 DeepSeek（https://api.deepseek.com）；可改成 OpenAI / 第三方网关
     """
     if not candidates:
         return LLMSelection(None, 0.0, "no_candidates", "")
     if not api_key:
         return LLMSelection(None, 0.0, "no_api_key", "")
 
-    # 懒 import，让项目不强依赖 anthropic（用户没装/没 key 仍能跑）
+    # 懒 import：openai SDK 没装时优雅 fallback；其他模块不该直接 import
     try:
-        import anthropic
+        import openai
     except ImportError:
-        return LLMSelection(None, 0.0, "anthropic_sdk_missing", "")
+        return LLMSelection(None, 0.0, "openai_sdk_missing", "")
 
     valid_ids = {c["id"] for c in candidates}
 
@@ -120,23 +127,25 @@ def select_candidate(
     )
 
     try:
-        client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
-        msg = client.messages.create(
+        client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        resp = client.chat.completions.create(
             model=model,
             max_tokens=400,
+            temperature=0.1,
             messages=[{"role": "user", "content": prompt}],
+            # DeepSeek 支持 response_format={'type':'json_object'} 但有的网关不支持；
+            # 我们靠 prompt 要求 JSON + markdown-fence 容忍的解析做兜底，更可移植
         )
     except Exception as e:  # noqa: BLE001 — SDK 多种异常都视作 LLM 不可用
-        logger.error(f"[llm] anthropic call failed: {e}")
+        logger.error(f"[llm] call failed: {e}")
         return LLMSelection(None, 0.0, f"llm_error: {type(e).__name__}", "")
 
-    # SDK response 拿文本
     try:
-        raw = msg.content[0].text.strip()
+        raw = (resp.choices[0].message.content or "").strip()
     except (AttributeError, IndexError):
         return LLMSelection(None, 0.0, "empty_response", "")
 
-    # 容忍 markdown code fence 包裹（虽然 prompt 要求 strict JSON，但 LLM 偶发会加）
+    # 容忍 markdown code fence 包裹（DeepSeek 偶发会加 ```json）
     json_text = raw
     m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", json_text)
     if m:
