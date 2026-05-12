@@ -142,6 +142,47 @@ def _pick_top(
     return top, top_score, reasons
 
 
+def _llm_filename_rescue(
+    path: str, parse: FilenameParse, provider: MetadataProvider, api_key: str
+) -> tuple[FilenameParse, list[MediaCandidate], str]:
+    """LLM 解析文件名 → 用 LLM 提取的 title 重搜 TMDB。返 (updated_parse, candidates, reason)。
+
+    专门救中文 release（"死亡笔记.BDrip..."）这种 guessit 拿不到 title 的文件名。
+    LLM 不直接绑 TMDB id（仍属上游），下游 _pick_top / select_candidate 接着 ground。
+    """
+    filename = path.rsplit("/", 1)[-1]
+    extraction = llm.extract_title_from_filename(filename, api_key=api_key)
+    if extraction is None or not extraction.title:
+        return parse, [], "llm_rescue_no_title"
+
+    # 用 LLM 提取的 title 重搜 TMDB
+    media_type = extraction.media_type if extraction.media_type != "unknown" else parse.media_type or "movie"
+    candidates = provider.search(
+        title=extraction.title, year=extraction.year, media_type=media_type,
+    )
+    # 如果 alt_title 不同且 candidates 仍空，试 alt
+    if not candidates and extraction.alt_title and extraction.alt_title != extraction.title:
+        candidates = provider.search(
+            title=extraction.alt_title, year=extraction.year, media_type=media_type,
+        )
+
+    # 更新 parse：用 LLM 的 title / year / season / episode 替换（guessit 拿不到的部分）
+    new_parse = FilenameParse(
+        raw_name=parse.raw_name,
+        title=extraction.title,
+        year=extraction.year or parse.year,
+        season=extraction.season or parse.season,
+        episode=extraction.episode or parse.episode,
+        episode_title=parse.episode_title,
+        media_type=media_type,
+        resolution=parse.resolution,
+        source=parse.source,
+        release_group=parse.release_group,
+        raw=parse.raw,
+    )
+    return new_parse, candidates, f"llm_rescue: title={extraction.title!r}"
+
+
 def identify(
     path: str,
     provider: MetadataProvider,
@@ -151,25 +192,41 @@ def identify(
     """完整 pipeline：解析文件名 → provider.search → 三级 fallback top_pick。
 
     Pick 优先级（节省 LLM token）:
+      0. guessit fail / TMDB 0 候选 + llm_api_key 可用 → LLM 重新解析文件名
+         （针对中文 release / 模糊命名）后重搜 TMDB
       1. single_exact：候选只有 1 个且 title/original_title exact match → 直接绑
       2. heuristic：_pick_top 算出 ≥ 0.9 → 直接绑（很高把握）
       3. llm：heuristic 在 [0, 0.9) 且 llm_api_key 可用 → 走契约 #3 grounded select
       4. needs_review：以上都 fail → top_pick=None
     """
     parse = parse_filename(path)
-    if not parse.title:
+    rescue_reason = ""
+
+    # Step 0a: guessit 没拿到 title → LLM rescue（如果可用）
+    if not parse.title and llm_api_key:
+        parse, candidates, rescue_reason = _llm_filename_rescue(path, parse, provider, llm_api_key)
+    elif not parse.title:
         return IdentifyResult(
             parse=parse, candidates=[], top_pick=None,
-            confidence=0.0, reasoning="guessit failed to parse title",
+            confidence=0.0, reasoning="guessit failed to parse title (LLM not configured to rescue)",
             pick_source="needs_review",
         )
-    candidates = provider.search(
-        title=parse.title, year=parse.year, media_type=parse.media_type
-    )
+    else:
+        candidates = provider.search(
+            title=parse.title, year=parse.year, media_type=parse.media_type,
+        )
+
+    # Step 0b: 有 title 但 provider 返 0 → LLM 重解析（也许 guessit 截出的 title 不对）
+    if not candidates and llm_api_key:
+        new_parse, new_cands, rescue_reason = _llm_filename_rescue(path, parse, provider, llm_api_key)
+        if new_cands:
+            parse, candidates = new_parse, new_cands
+
     if not candidates:
         return IdentifyResult(
             parse=parse, candidates=[], top_pick=None,
-            confidence=0.0, reasoning="no candidates from provider",
+            confidence=0.0,
+            reasoning=f"no candidates from provider{' (' + rescue_reason + ')' if rescue_reason else ''}",
             pick_source="needs_review",
         )
 

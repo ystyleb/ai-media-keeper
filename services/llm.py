@@ -32,6 +32,30 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 
+# LLM filename rescue prompt：guessit / 正则解析不出 title 时让 LLM 看文件名
+# 不是 grounded（LLM 自由输出 title 字符串）—— 但下游会用 title 去 TMDB ground 一次，
+# 不会让 LLM 直接绑 TMDB id。中文 PT release "死亡笔记.BDrip1080P.X264.AC3.LGGZ S.01.mkv"
+# guessit 拿不到 title，LLM 几乎一秒看懂"死亡笔记 / Death Note"。
+EXTRACT_TITLE_PROMPT_V1 = """Extract the media title and basic metadata from this filename.
+
+Many filenames mix Chinese / English / Japanese release naming with codecs / sources / encoder tags. Strip those and recover the *show* or *movie* title.
+
+Filename: {filename}
+
+Return strict JSON ONLY (no markdown, no commentary):
+{{
+  "title": "<best guess at title in its primary language (zh / en / ja)>",
+  "alt_title": "<alternate-language name if reasonably confident, else null>",
+  "year": <number or null>,
+  "season": <number or null>,
+  "episode": <number or null>,
+  "media_type": "movie" or "tv" or "unknown"
+}}
+
+If you cannot identify the work at all, return {{"title": null}}.
+"""
+
+
 # 契约 #3 prompt template（v1，单一注册名）
 SELECT_PROMPT_V1 = """You are matching a video file to its TMDB entry. Given the parsed filename info and a list of TMDB candidates, pick the best match.
 
@@ -57,6 +81,19 @@ Return strict JSON ONLY (no markdown, no commentary):
 
 
 @dataclass(frozen=True)
+class FilenameExtraction:
+    """LLM 从文件名拆出的最小媒体信息。下游用 title 去 TMDB 二次 ground。"""
+
+    title: str | None
+    alt_title: str | None
+    year: int | None
+    season: int | None
+    episode: int | None
+    media_type: str  # 'movie' | 'tv' | 'unknown'
+    raw_response: str
+
+
+@dataclass(frozen=True)
 class LLMSelection:
     selected_id: str | None       # 必 ∈ {c.id for c in candidates}，否则置 None
     confidence: float             # 0.0-1.0
@@ -78,6 +115,82 @@ def load_api_key(config_path: Path | str | None = None) -> str:
 
 def is_available(config_path: Path | str | None = None) -> bool:
     return bool(load_api_key(config_path))
+
+
+def extract_title_from_filename(
+    filename: str,
+    *,
+    api_key: str,
+    model: str = DEFAULT_MODEL,
+    base_url: str = DEFAULT_BASE_URL,
+    timeout: float = 30.0,
+) -> FilenameExtraction | None:
+    """LLM 解析文件名 → title/year/season/episode/media_type。失败返 None。
+
+    用途：guessit / 正则在中文 release / 模糊命名上失败时的 fallback。
+    本函数不返回 TMDB id（只生成 title 字符串），仍属契约 #3 grounded 流程的
+    上游——下游会拿 title 去 TMDB.search() 再过 grounded select。
+    """
+    if not filename or not api_key:
+        return None
+    try:
+        import openai
+    except ImportError:
+        return None
+
+    prompt = EXTRACT_TITLE_PROMPT_V1.format(filename=filename)
+    try:
+        client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=300,
+            temperature=0.1,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[llm] extract_title call failed: {e}")
+        return None
+    try:
+        raw = (resp.choices[0].message.content or "").strip()
+    except (AttributeError, IndexError):
+        return None
+
+    # 容忍 markdown fence
+    json_text = raw
+    m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", json_text)
+    if m:
+        json_text = m.group(1)
+
+    try:
+        data = json.loads(json_text)
+    except json.JSONDecodeError:
+        logger.warning(f"[llm] extract_title JSON parse failed; raw={raw[:200]!r}")
+        return None
+
+    # title 必须是非空字符串才算成功
+    title = data.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return None
+
+    def _int_or_none(v):
+        try:
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    media_type = data.get("media_type")
+    if media_type not in ("movie", "tv", "unknown"):
+        media_type = "unknown"
+
+    return FilenameExtraction(
+        title=title.strip(),
+        alt_title=(data.get("alt_title") or None) if isinstance(data.get("alt_title"), str) else None,
+        year=_int_or_none(data.get("year")),
+        season=_int_or_none(data.get("season")),
+        episode=_int_or_none(data.get("episode")),
+        media_type=media_type,
+        raw_response=raw,
+    )
 
 
 def select_candidate(

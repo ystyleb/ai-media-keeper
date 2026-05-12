@@ -5,7 +5,7 @@ TMDB HTTP 调用全 mock；专注 pipeline 逻辑（解析 / 评分 / grounded m
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -173,3 +173,68 @@ def test_identify_no_candidates_returns_needs_review():
     assert result.top_pick is None
     assert result.confidence == 0.0
     assert "no candidates" in result.reasoning.lower() or "no candidate" in result.reasoning.lower()
+
+
+# ---------------- LLM filename rescue ---------------- #
+
+
+def test_identify_llm_rescue_when_provider_returns_zero():
+    """guessit 拿不到 title 或 provider 0 → LLM 解析文件名 → 重搜 TMDB 拿到候选。
+
+    场景：'死亡笔记.BDrip1080P.X264.AC3.LGGZ S.01.mkv'，guessit 解析 title=""，
+    LLM 看到"死亡笔记" → 搜 TMDB → 拿到死亡笔记候选。
+    """
+    from services import llm as llm_module
+
+    provider = MagicMock()
+    # 第一次搜（用 guessit title）→ 0
+    # 第二次搜（用 LLM 重解析的 title "死亡笔记"）→ 1 候选
+    provider.search.side_effect = [
+        [],  # first call
+        [_cand("tmdb:tv:13916", "死亡笔记", year=2006, media_type="tv")],
+    ]
+
+    fake_extraction = llm_module.FilenameExtraction(
+        title="死亡笔记", alt_title="Death Note",
+        year=2006, season=1, episode=None, media_type="tv",
+        raw_response='{"title":"死亡笔记"}',
+    )
+    with patch.object(llm_module, "extract_title_from_filename", return_value=fake_extraction):
+        result = identify_svc.identify(
+            "/share/.../死亡笔记.BDrip1080P.X264.AC3.LGGZ S.01.mkv",
+            provider,
+            llm_api_key="fake-key",
+        )
+
+    assert result.candidates  # 应该有候选
+    assert result.parse.title == "死亡笔记"
+    # rescue reason 应该出现在某处（reasoning 或者直接 top_pick OK）
+    assert "llm_rescue" in result.reasoning.lower() or result.top_pick is not None
+
+
+def test_identify_llm_rescue_returns_no_title_falls_through():
+    """LLM 也拿不到 title → 优雅 fallback 到 needs_review。"""
+    from services import llm as llm_module
+
+    provider = MagicMock()
+    provider.search.return_value = []  # 无论怎么搜都 0
+    with patch.object(llm_module, "extract_title_from_filename", return_value=None):
+        result = identify_svc.identify(
+            "/share/.../random.mkv", provider, llm_api_key="fake-key"
+        )
+    assert result.top_pick is None
+    assert result.candidates == []
+
+
+def test_identify_no_llm_key_no_rescue():
+    """没有 llm_api_key → 不调 LLM rescue，直接 needs_review。"""
+    from services import llm as llm_module
+
+    provider = MagicMock()
+    provider.search.return_value = []
+    with patch.object(llm_module, "extract_title_from_filename") as mock_extract:
+        result = identify_svc.identify(
+            "/share/.../random.mkv", provider, llm_api_key=None
+        )
+        mock_extract.assert_not_called()
+    assert result.top_pick is None
