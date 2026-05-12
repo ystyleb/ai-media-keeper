@@ -18,6 +18,7 @@ from flask import Flask, render_template, jsonify, request, abort, g
 
 from services import destructive_action
 from services import identify as identify_svc
+from services import llm
 from services.metadata.tmdb import TMDBProvider
 
 # 配置日志
@@ -176,6 +177,7 @@ DEFAULT_QBIT_CONFIG = {
 
 QBIT_PASS_FILE = CONFIG_DIR / ".qbit_pass"
 TMDB_KEY_FILE = CONFIG_DIR / ".tmdb_key"
+ANTHROPIC_KEY_FILE = CONFIG_DIR / ".anthropic_key"
 
 
 def load_tmdb_key() -> str:
@@ -208,6 +210,23 @@ def get_tmdb_provider() -> TMDBProvider | None:
     if not key:
         return None
     return TMDBProvider(api_key=key)
+
+
+def load_anthropic_key() -> str:
+    return llm.load_api_key(ANTHROPIC_KEY_FILE)
+
+
+def save_anthropic_key(key: str) -> None:
+    key = key.strip()
+    if not key:
+        if ANTHROPIC_KEY_FILE.exists():
+            ANTHROPIC_KEY_FILE.unlink()
+        return
+    ANTHROPIC_KEY_FILE.write_text(key, encoding="utf-8")
+    try:
+        os.chmod(ANTHROPIC_KEY_FILE, 0o600)
+    except OSError as e:
+        logger.warning(f"could not chmod 600 {ANTHROPIC_KEY_FILE}: {e}")
 
 
 class QBitClient:
@@ -1726,6 +1745,46 @@ def set_tmdb_config():
     return jsonify({"ok": True, "has_key": bool(key)})
 
 
+@app.route("/api/config/anthropic", methods=["GET"])
+@require_token
+def get_anthropic_config():
+    return jsonify({"has_key": bool(load_anthropic_key())})
+
+
+@app.route("/api/config/anthropic", methods=["POST"])
+@require_token
+def set_anthropic_config():
+    data = request.json or {}
+    key = (data.get("api_key") or "").strip()
+    save_anthropic_key(key)
+    return jsonify({"ok": True, "has_key": bool(key)})
+
+
+@app.route("/api/config/anthropic/test", methods=["POST"])
+@require_token
+def test_anthropic_config():
+    """临时 key 验证：body 里传 api_key 直接测；不传用现有 key。
+    用一个最小 message 测真实 SDK 调用，验证 key + 网络通畅。"""
+    data = request.json or {}
+    key = (data.get("api_key") or "").strip() or load_anthropic_key()
+    if not key:
+        return jsonify({"ok": False, "message": "no key configured"}), 400
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=key, timeout=10)
+        msg = client.messages.create(
+            model=llm.DEFAULT_MODEL,
+            max_tokens=10,
+            messages=[{"role": "user", "content": "Reply with just: OK"}],
+        )
+        text = msg.content[0].text.strip() if msg.content else ""
+        return jsonify({"ok": True, "model": llm.DEFAULT_MODEL, "sample": text[:50]})
+    except ImportError:
+        return jsonify({"ok": False, "message": "anthropic SDK not installed"}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"{type(e).__name__}: {e}"}), 200
+
+
 @app.route("/api/config/tmdb/test", methods=["POST"])
 @require_token
 def test_tmdb_config():
@@ -1776,7 +1835,7 @@ def metadata_identify():
             "provider_state": "not_configured",
         })
 
-    result = identify_svc.identify(path, provider)
+    result = identify_svc.identify(path, provider, llm_api_key=load_anthropic_key() or None)
     response = {
         "parse": {
             "raw_name": result.parse.raw_name, "title": result.parse.title, "year": result.parse.year,
@@ -1789,6 +1848,8 @@ def metadata_identify():
         "top_pick": _candidate_to_dict(result.top_pick) if result.top_pick else None,
         "confidence": result.confidence,
         "reasoning": result.reasoning,
+        "pick_source": result.pick_source,
+        "llm_configured": bool(load_anthropic_key()),
         "provider_state": "ok",
     }
 

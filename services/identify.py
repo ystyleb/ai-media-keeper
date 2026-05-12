@@ -18,6 +18,7 @@ from typing import Any
 
 from guessit import guessit
 
+from . import llm
 from .metadata.base import MediaCandidate, MetadataProvider
 
 
@@ -43,6 +44,7 @@ class IdentifyResult:
     top_pick: MediaCandidate | None  # None = needs_review
     confidence: float                # 0.0-1.0
     reasoning: str
+    pick_source: str                 # 'single_exact' | 'heuristic' | 'llm' | 'needs_review'
 
 
 def parse_filename(path: str) -> FilenameParse:
@@ -140,25 +142,96 @@ def _pick_top(
     return top, top_score, reasons
 
 
-def identify(path: str, provider: MetadataProvider) -> IdentifyResult:
-    """完整 pipeline：解析文件名 → provider.search → top_pick。"""
+def identify(
+    path: str,
+    provider: MetadataProvider,
+    *,
+    llm_api_key: str | None = None,
+) -> IdentifyResult:
+    """完整 pipeline：解析文件名 → provider.search → 三级 fallback top_pick。
+
+    Pick 优先级（节省 LLM token）:
+      1. single_exact：候选只有 1 个且 title/original_title exact match → 直接绑
+      2. heuristic：_pick_top 算出 ≥ 0.9 → 直接绑（很高把握）
+      3. llm：heuristic 在 [0, 0.9) 且 llm_api_key 可用 → 走契约 #3 grounded select
+      4. needs_review：以上都 fail → top_pick=None
+    """
     parse = parse_filename(path)
     if not parse.title:
         return IdentifyResult(
-            parse=parse,
-            candidates=[],
-            top_pick=None,
-            confidence=0.0,
-            reasoning="guessit failed to parse title from filename",
+            parse=parse, candidates=[], top_pick=None,
+            confidence=0.0, reasoning="guessit failed to parse title",
+            pick_source="needs_review",
         )
     candidates = provider.search(
         title=parse.title, year=parse.year, media_type=parse.media_type
     )
-    top, score, reasoning = _pick_top(parse, candidates)
+    if not candidates:
+        return IdentifyResult(
+            parse=parse, candidates=[], top_pick=None,
+            confidence=0.0, reasoning="no candidates from provider",
+            pick_source="needs_review",
+        )
+
+    # 路径 1: 唯一候选 + title exact → 直接绑（省 token，最常见 happy path）
+    if len(candidates) == 1:
+        c = candidates[0]
+        norm_want = _normalize_title(parse.title)
+        norm_t = _normalize_title(c.title)
+        norm_o = _normalize_title(c.original_title or "")
+        if norm_want and norm_want in (norm_t, norm_o):
+            return IdentifyResult(
+                parse=parse, candidates=candidates, top_pick=c,
+                confidence=0.95, reasoning="only candidate with exact title match",
+                pick_source="single_exact",
+            )
+
+    # 路径 2: heuristic 高分（≥0.9）→ 直接绑
+    heur_top, heur_score, heur_reason = _pick_top(parse, candidates)
+    if heur_top is not None and heur_score >= 0.9:
+        return IdentifyResult(
+            parse=parse, candidates=candidates, top_pick=heur_top,
+            confidence=heur_score, reasoning=f"heuristic high: {heur_reason}",
+            pick_source="heuristic",
+        )
+
+    # 路径 3: LLM 可用 → grounded select
+    if llm_api_key:
+        parse_dict = {
+            "title": parse.title, "year": parse.year,
+            "season": parse.season, "episode": parse.episode,
+            "episode_title": parse.episode_title,
+            "media_type": parse.media_type,
+            "resolution": parse.resolution, "source": parse.source,
+        }
+        cand_dicts = [{
+            "id": c.id, "title": c.title, "original_title": c.original_title,
+            "year": c.year, "media_type": c.media_type,
+            "overview": c.overview, "vote_average": c.vote_average,
+        } for c in candidates]
+        sel = llm.select_candidate(parse_dict, cand_dicts, api_key=llm_api_key)
+        if sel.selected_id:
+            # 找回对应的 MediaCandidate object（契约 #3 已 enforce id ∈ candidates）
+            chosen = next((c for c in candidates if c.id == sel.selected_id), None)
+            if chosen:
+                return IdentifyResult(
+                    parse=parse, candidates=candidates, top_pick=chosen,
+                    confidence=sel.confidence,
+                    reasoning=f"llm: {sel.reasoning}",
+                    pick_source="llm",
+                )
+        # LLM 也没选出 → needs_review，把 LLM 的 reasoning 透传给 UI 让用户判断
+        return IdentifyResult(
+            parse=parse, candidates=candidates, top_pick=None,
+            confidence=sel.confidence,
+            reasoning=f"llm needs_review: {sel.reasoning}",
+            pick_source="needs_review",
+        )
+
+    # 路径 4: LLM 不可用 → needs_review，附 heuristic reasoning
     return IdentifyResult(
-        parse=parse,
-        candidates=candidates,
-        top_pick=top,
-        confidence=score,
-        reasoning=reasoning,
+        parse=parse, candidates=candidates, top_pick=heur_top,
+        confidence=heur_score,
+        reasoning=f"heuristic: {heur_reason} (LLM not configured, would help)",
+        pick_source="heuristic" if heur_top else "needs_review",
     )

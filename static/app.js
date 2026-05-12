@@ -598,6 +598,40 @@ function renderNfoCard(p) {
 }
 
 
+async function configureAnthropicKeyPrompt() {
+    const key = window.prompt(
+        "粘贴 Anthropic API key（sk-ant-...）\n\n申请：https://console.anthropic.com/settings/keys\n（注册账号 → API Keys → Create Key）\n\n用于：中文剧名识别 + 模糊匹配。免费 tier 够个人 PT 库扫描。"
+    );
+    if (!key || !key.trim()) return false;
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/anthropic`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ api_key: key.trim() })
+        });
+        const data = await res.json();
+        if (!data.ok) {
+            alert("保存失败：" + (data.error || "unknown"));
+            return false;
+        }
+        const tr = await apiFetch(`${API_BASE}/api/config/anthropic/test`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({})
+        });
+        const td = await tr.json();
+        if (!td.ok) {
+            alert("Anthropic 连接失败：" + td.message);
+            return false;
+        }
+        return true;
+    } catch (err) {
+        alert("出错：" + err.message);
+        return false;
+    }
+}
+
+
 async function configureTmdbKeyPrompt() {
     const key = window.prompt(
         "粘贴 TMDB API key（v3，~32 字符）\n\n免费申请：https://www.themoviedb.org/settings/api\n（注册账号 → 申请 Developer key → 复制 API Key (v3 auth)）"
@@ -667,6 +701,22 @@ function renderMetadataCard(container, data) {
             textContent: `未自动匹配（${data.reasoning || "no candidate"}）。下面是候选：`
         });
         container.appendChild(banner);
+
+        // 如果 LLM 未配置 + 走到这里 → 引导配置 LLM 帮选
+        if (!data.llm_configured && data.candidates && data.candidates.length > 1) {
+            const llmHint = createElement("div", {
+                className: "alert alert-info py-2 small mb-2",
+                innerHTML: '🤖 配置 Anthropic API key 后，AI 会自动从候选里挑（中文剧名 / 模糊命名都搞得定）。<a href="#" id="open-anthropic-config">点这里配置</a>'
+            });
+            llmHint.querySelector("#open-anthropic-config").addEventListener("click", async (e) => {
+                e.preventDefault();
+                const ok = await configureAnthropicKeyPrompt();
+                if (ok) {
+                    llmHint.innerHTML = '<small class="text-success">已保存。再点一次 "AI 识别" 按钮让 AI 帮选。</small>';
+                }
+            });
+            container.appendChild(llmHint);
+        }
         if (!data.candidates || data.candidates.length === 0) {
             container.appendChild(createElement("p", {
                 className: "text-secondary small", textContent: "TMDB 也没找到匹配。"
@@ -711,11 +761,17 @@ function renderMetadataCard(container, data) {
     const text = createElement("div");
     const titleLine = `<strong>${top.title}</strong>` +
         (top.original_title && top.original_title !== top.title ? ` <small class="text-secondary">(${top.original_title})</small>` : "");
+    const pickLabel = {
+        single_exact: "单候选",
+        heuristic: "启发式",
+        llm: "🤖 AI",
+        needs_review: "待复核"
+    }[data.pick_source] || data.pick_source || "?";
     const metaLine = [
         top.year,
         top.media_type === "tv" ? "剧集" : "电影",
         `⭐ ${top.vote_average?.toFixed(1) || "—"}`,
-        `置信度 ${(data.confidence * 100).toFixed(0)}%`
+        `置信度 ${(data.confidence * 100).toFixed(0)}% (${pickLabel})`
     ].filter(Boolean).join(" · ");
 
     text.innerHTML = `
