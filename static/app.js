@@ -87,6 +87,12 @@ function createElement(tag, attrs = {}, children = []) {
             el.textContent = value;
         } else if (key === "innerHTML") {
             el.innerHTML = value;
+        } else if (key === "dataset") {
+            // 把 {path, isDir} 翻译成 data-path / data-is-dir，否则 DOMStringMap 拿不到
+            Object.entries(value).forEach(([dk, dv]) => {
+                const attr = "data-" + dk.replace(/[A-Z]/g, c => "-" + c.toLowerCase());
+                el.setAttribute(attr, dv);
+            });
         } else if (key.startsWith("on")) {
             el.addEventListener(key.slice(2).toLowerCase(), value);
         } else {
