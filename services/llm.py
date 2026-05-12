@@ -25,8 +25,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# DeepSeek 默认：deepseek-chat（通用，便宜）。复杂推理可换 deepseek-reasoner。
-DEFAULT_MODEL = "deepseek-chat"
+# DeepSeek V4 系列（按用户偏好 2026-05-12 确认）：
+#   deepseek-v4-flash — 默认（更便宜、更快，足够 grounded-select 任务）
+#   deepseek-v4-pro   — 可在 UI / env 切换（复杂推理 / 精度敏感场景）
+# Legacy alias `deepseek-chat` 仍可用，但项目内统一走 V4 显式命名。
+DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 
 # 契约 #3 prompt template（v1，单一注册名）
@@ -92,7 +95,7 @@ def select_candidate(
         parse: filename 解析结果（含 title/year/season/episode/...）
         candidates: provider 返回的候选 dict 列表，必须含 'id'、'title'
         api_key: BYOK DeepSeek key
-        model: 默认 deepseek-chat
+        model: 默认 deepseek-v4-flash（V4 Pro 可在调用方覆盖）
         base_url: 默认 DeepSeek（https://api.deepseek.com）；可改成 OpenAI / 第三方网关
     """
     if not candidates:
