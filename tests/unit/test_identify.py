@@ -46,11 +46,231 @@ def test_parse_filename_chinese():
     # title 可能是 "庆余年" 或空——不强校验，只确保 pipeline 不挂
 
 
+def test_parse_filename_ambiguous_returns_int_not_list():
+    """guessit 对 ambiguous 命名（老电影含 BD2 / DD2.0 之类数字）会返
+    list-typed episode/season，FilenameParse 必须规约成 int 或 None
+    （否则下游 SQL bind / NFO XML 都会撞类型错）。
+
+    Regression test: 1916 默片 Judex 命名引起的 ProgrammingError。
+    """
+    p = identify_svc.parse_filename(
+        "/share/.../Judex.1916.BD2.BluRay.1080p.DD2.0.x264-BMDru.mkv"
+    )
+    # 不强校验 guessit 怎么解析（它的启发式可能升级），但严格要求
+    # 类型为 int 或 None，永远不是 list
+    assert p.season is None or isinstance(p.season, int)
+    assert p.episode is None or isinstance(p.episode, int)
+    assert p.year is None or isinstance(p.year, int)
+
+
+def test_normalize_int_handles_list_and_scalars():
+    """_normalize_int 规约函数本身的单元测试。"""
+    f = identify_svc._normalize_int
+    assert f(None) is None
+    assert f(5) == 5
+    assert f([7]) == 7              # 单元素 list → 取值
+    assert f([1916, 16]) is None    # 多元素 ambiguous → None
+    assert f("string") is None      # 异常类型 → None
+    assert f([]) is None
+    assert f(["not_int"]) is None   # list 里非 int → None
+
+
 def test_parse_filename_empty_returns_unknown():
     p = identify_svc.parse_filename("/some/path/randomfile.mkv")
     # title 可能被 guessit 抽到 "randomfile"，但不会崩；只确保字段存在
     assert hasattr(p, "title")
     assert hasattr(p, "media_type")
+
+
+# ---------------- extras detection ---------------- #
+
+
+def test_parse_filename_extras_dash_number():
+    """Lost.Highway.1997.Extras-01.BDRip... → 不当 S1997E01 TV，标 extra。"""
+    p = identify_svc.parse_filename(
+        "/share/Moives/Lost.Highway.1997/Lost.Highway.1997.Extras-01.BDRip.1080p.Ac3.x264.BMDru.mkv"
+    )
+    assert p.media_type == "extra"
+    assert p.season is None
+    assert p.episode is None
+    assert p.raw.get("_extra_kind") == "extra"
+
+
+def test_parse_filename_featurette():
+    p = identify_svc.parse_filename(
+        "/share/Moives/Foo.2020.Featurette.1080p.mkv"
+    )
+    assert p.media_type == "extra"
+    assert p.raw.get("_extra_kind") == "featurette"
+
+
+def test_parse_filename_trailer_sample():
+    p1 = identify_svc.parse_filename("/x/foo.trailer.1080p.mkv")
+    assert p1.media_type == "extra"
+    p2 = identify_svc.parse_filename("/x/Sample-TBHM10.mkv")
+    assert p2.media_type == "extra"
+
+
+def test_parse_filename_interview_behind_scenes():
+    p1 = identify_svc.parse_filename("/x/Foo.Interview.With.Director.mkv")
+    assert p1.media_type == "extra"
+    p2 = identify_svc.parse_filename("/x/Foo.Behind.The.Scenes.mkv")
+    assert p2.media_type == "extra"
+
+
+def test_parse_filename_main_feature_not_misclassified():
+    """主片不能被 extras pattern 误伤。"""
+    p = identify_svc.parse_filename(
+        "/share/Moives/Citizen.Kane.1941.BluRay.1080p.x264.BMDru/"
+        "Citizen.Kane.1941.Criterion.Collection.BluRay.1080p.DD1.0.x264.BMDru.mkv"
+    )
+    assert p.media_type == "movie"
+    assert p.year == 1941
+
+
+def test_identify_extras_short_circuits_provider():
+    """extra 文件不调 provider.search 也不调 LLM。"""
+    fake_provider = MagicMock()
+    result = identify_svc.identify(
+        "/share/Movies/Foo/Foo.2020.Extras-03.1080p.mkv",
+        provider=fake_provider,
+        llm_api_key="sk-fake",
+    )
+    fake_provider.search.assert_not_called()
+    assert result.parse.media_type == "extra"
+    assert result.top_pick is None
+    assert result.pick_source == "extra"
+    assert result.candidates == []
+
+
+# ---------------- multi-disc parts (BD1/BD2/Disc1/Disc2/CD/DVD) ---------------- #
+
+
+def test_parse_filename_bd1_is_main():
+    """BD1 是主片入口，media_type 保持 movie（让下游正常调 TMDB）。"""
+    p = identify_svc.parse_filename(
+        "/share/Moives/Judex.1916/Judex.1916.BD1.BluRay.1080p.DD2.0.x264-BMDru.mkv"
+    )
+    assert p.media_type == "movie"
+    assert p.season is None  # 清掉污染（guessit 把 1916 前两位当 season=19）
+    assert p.episode is None
+    assert p.raw.get("_part_index") == 1
+
+
+def test_parse_filename_bd2_is_part():
+    """BD2 是主片第 2 段 → media_type='part'，库视图隐藏。"""
+    p = identify_svc.parse_filename(
+        "/share/Moives/Judex.1916/Judex.1916.BD2.BluRay.1080p.DD2.0.x264-BMDru.mkv"
+    )
+    assert p.media_type == "part"
+    assert p.season is None
+    assert p.episode is None
+    assert p.raw.get("_part_index") == 2
+
+
+def test_parse_filename_disc_cd_dvd_variants():
+    for name, expected_idx in [
+        ("/x/Foo.Disc1.1080p.mkv", 1),
+        ("/x/Foo.Disc2.1080p.mkv", 2),
+        ("/x/Foo.CD1.mkv", 1),
+        ("/x/Foo.CD3.mkv", 3),
+        ("/x/Foo.DVD2.mkv", 2),
+    ]:
+        p = identify_svc.parse_filename(name)
+        assert p.raw.get("_part_index") == expected_idx, name
+        if expected_idx >= 2:
+            assert p.media_type == "part", name
+
+
+def test_part_pattern_not_in_title():
+    """主片名含 'Part' 但没分盘 marker 不该被误标 part。"""
+    p = identify_svc.parse_filename("/x/Pirates.of.the.Caribbean.Part.1.2003.mkv")
+    # Part.1 不是 BD/Disc/CD/DVD marker，不该匹配
+    assert p.media_type != "part"
+    assert p.raw.get("_part_index") is None
+
+
+def test_identify_part_short_circuits_provider():
+    """BD2+ 不调 TMDB / LLM。"""
+    fake_provider = MagicMock()
+    result = identify_svc.identify(
+        "/share/Movies/Foo.1916/Foo.1916.BD2.BluRay.1080p.mkv",
+        provider=fake_provider,
+        llm_api_key="sk-fake",
+    )
+    fake_provider.search.assert_not_called()
+    assert result.parse.media_type == "part"
+    assert result.pick_source == "part"
+
+
+# ---------------- 续集 "Part N" 合并回 title（教父 II / III 之类） ---------------- #
+
+
+def test_parse_filename_sequel_part_merged_to_title():
+    """guessit 把 'Part II' 抽到 part 字段，title 留下 'The Godfather'。
+    为了 TMDB 能搜到正确续集，要把 'Part N' 合并回 title。"""
+    p = identify_svc.parse_filename(
+        "/x/The.Godfather.Part.II.1974.BluRay.1080p.mkv"
+    )
+    assert p.title == "The Godfather Part 2"
+    assert p.year == 1974
+    assert p.media_type == "movie"
+    # 不能跟 BD/Disc 混淆 — 这里没 _part_index
+    assert p.raw.get("_part_index") is None
+
+
+def test_parse_filename_sequel_part_iii():
+    p = identify_svc.parse_filename(
+        "/x/The.Godfather.Part.III.1990.BluRay.1080p.mkv"
+    )
+    assert p.title == "The Godfather Part 3"
+
+
+def test_parse_filename_bd1_does_not_inject_part_n():
+    """BD1 是分盘 marker，guessit 不会同时给 part 字段，title 不该被注入 'Part N'。"""
+    p = identify_svc.parse_filename(
+        "/x/Judex.1916/Judex.1916.BD1.BluRay.1080p.mkv"
+    )
+    # title 应该是 guessit 给的 raw，不带 'Part N'
+    assert "Part" not in p.title
+    assert p.raw.get("_part_index") == 1
+
+
+# ---------------- _pick_top year-mismatch penalty ---------------- #
+
+
+def test_pick_top_penalizes_year_mismatch():
+    """两个候选 title 都 match 时，year 匹配的应该胜出（即使 substring vs exact）。
+
+    场景：'The Godfather Part 2' 1974 vs '教父' (1972) + '教父2' (1974)
+    - 教父 1972: original exact 0.7 + year mismatch (-0.2) + vote 0.05 = 0.55
+    - 教父2 1974: original substring 0.4 + year exact 0.2 + vote 0.05 = 0.65 ← 应该选这个
+    """
+    cands = [
+        MediaCandidate(
+            id="tmdb:movie:238",
+            external_ids={"tmdb_id": "238"},
+            title="教父",
+            original_title="The Godfather",
+            year=1972,
+            media_type="movie",
+            poster_url=None, overview=None, vote_average=8.7, raw={},
+        ),
+        MediaCandidate(
+            id="tmdb:movie:240",
+            external_ids={"tmdb_id": "240"},
+            title="教父2",
+            original_title="The Godfather Part II",
+            year=1974,
+            media_type="movie",
+            poster_url=None, overview=None, vote_average=8.6, raw={},
+        ),
+    ]
+    parse = identify_svc.parse_filename("/x/The.Godfather.Part.II.1974.BluRay.1080p.mkv")
+    top, score, reason = identify_svc._pick_top(parse, cands)
+    # heuristic 阈值 ≥0.7 才返非 None，所以这里 score=0.65 还是 < 0.7 → top is None
+    # 但 reason 应该指向"Part II"那一项；下游 heuristic_fallback (≥0.5) 会用它
+    assert "year mismatch" in reason or "year exact" in reason
 
 
 # ---------------- _pick_top ---------------- #

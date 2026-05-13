@@ -47,30 +47,156 @@ class IdentifyResult:
     pick_source: str                 # 'single_exact' | 'heuristic' | 'llm' | 'needs_review'
 
 
+_EXTRA_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\bextras?[-_.\s]*\d", re.I), "extra"),
+    (re.compile(r"\bfeaturettes?\b", re.I), "featurette"),
+    (re.compile(r"\binterviews?\b", re.I), "interview"),
+    (re.compile(r"\btrailers?\b", re.I), "trailer"),
+    (re.compile(r"\bdeleted[-_.\s]*scenes?\b", re.I), "deleted_scene"),
+    (re.compile(r"\bbehind[-_.\s]*the[-_.\s]*scenes?\b", re.I), "bts"),
+    (re.compile(r"\bmaking[-_.\s]*of\b", re.I), "making_of"),
+    (re.compile(r"\bbloopers?\b", re.I), "bloopers"),
+    (re.compile(r"\bgag[-_.\s]*reel\b", re.I), "gag_reel"),
+    (re.compile(r"\bsample\b", re.I), "sample"),
+]
+
+# 多盘分段：BD1/BD2 / Disc1/Disc2 / CD1/CD2 / DVD1/DVD2
+# 老电影常分 2-3 盘发，每盘是主片的一段（不是花絮）。Part1/Pt1 太歧义不包含
+# （"Pirates of the Caribbean Part 1" 是片名而非分盘）。
+_DISC_PATTERN = re.compile(r"\b(BD|Disc|CD|DVD)[-_.\s]*(\d+)\b", re.I)
+
+
+def _detect_part_index(name: str) -> int | None:
+    """检测多盘分段 marker，返回 part index（1, 2, 3, ...）或 None。
+
+    BD1/Disc1/CD1/DVD1 → 1（第一盘 = 主片入口）
+    BD2/Disc2/... → 2+（后续段，库视图隐藏，详情卡聚合显示）
+    """
+    m = _DISC_PATTERN.search(name)
+    if not m:
+        return None
+    try:
+        return int(m.group(2))
+    except ValueError:
+        return None
+
+
+def _detect_extra(name: str) -> str | None:
+    """识别特典 / 花絮 / 采访 / 预告 / 删除场景 / 样片等附属内容。
+
+    返回 extra 子类（'extra' / 'featurette' / 'interview' / ...）或 None。
+    用 \\b 边界 + 数字后缀避免误伤（"The Interview" 这种电影本名很少撞），
+    但 'sample' / 'trailer' 这类 keyword 在主片文件名里也几乎不会出现。
+    """
+    for pat, kind in _EXTRA_PATTERNS:
+        if pat.search(name):
+            return kind
+    return None
+
+
+def _normalize_int(v: Any) -> int | None:
+    """guessit 对 ambiguous 文件名（如 "Judex.1916.BD2..." 老电影）会返回 list[int]
+    表示"可能是这几个之一"。FilenameParse.season/episode 语义是 int|None，
+    需要把 list 规约掉——否则下游 SQL bind / NFO XML 都会撞类型错。
+
+    规约规则：
+      - None / int → 原样
+      - list[int] 长度=1 → 取唯一值
+      - list[int] 多个值 → None（明显 ambiguous，宁可 None 让 TMDB 全候选挑）
+      - 其他类型 → None
+    """
+    if v is None:
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, list):
+        if len(v) == 1 and isinstance(v[0], int):
+            return v[0]
+        return None
+    return None
+
+
 def parse_filename(path: str) -> FilenameParse:
-    """用 guessit 解析路径末尾的文件名。"""
+    """用 guessit 解析路径末尾的文件名。
+
+    特典 / 花絮 / 预告等附属文件先于 guessit 检测 — guessit 对 'Extras-01' 这种
+    后缀会硬当 S1997E01 episode 解析，污染 season/episode，并诱导下游绑到
+    无关 TV 剧。检出 extra 时直接标 media_type='extra' 且不带 season/episode。
+    """
     name = path.rsplit("/", 1)[-1]
+
+    extra_kind = _detect_extra(name)
+    if extra_kind:
+        # extras：title 取去掉 release tag 的 stem 给 UI 显示；不靠 guessit 推断 type
+        # （不调 guessit 也能省一次解析，但 year 提取还有用，保留 guessit）
+        g = dict(guessit(name))
+        year = _normalize_int(g.get("year"))
+        return FilenameParse(
+            raw_name=name,
+            title=g.get("title", "") or extra_kind,
+            year=year,
+            season=None,                                # extras 不参与 S/E 索引
+            episode=None,
+            episode_title=None,
+            media_type="extra",
+            resolution=str(g.get("screen_size") or "") or None,
+            source=str(g.get("source") or "") or None,
+            release_group=str(g.get("release_group") or "") or None,
+            raw={**g, "_extra_kind": extra_kind},
+        )
+
+    # 多盘分段：BD1/BD2/Disc1/Disc2/CD1/CD2/DVD1/DVD2
+    # 第 2+ 盘标 'part'（库视图隐藏，详情卡聚合）；第 1 盘按 movie/tv 正常走 TMDB
+    # 共同点：清空 guessit 错推的 s/e（如 "19" 是把 1916 前两位当 season）
+    part_index = _detect_part_index(name)
+
     g = dict(guessit(name))
+
+    season = _normalize_int(g.get("season"))
+    episode = _normalize_int(g.get("episode"))
+    year = _normalize_int(g.get("year"))
+
     media_type = "movie"
     if g.get("type") == "episode":
         media_type = "episode"
     elif g.get("type") == "movie":
         media_type = "movie"
-    elif g.get("season") or g.get("episode"):
+    elif season or episode:
         media_type = "episode"
+
+    if part_index is not None:
+        # 检测到 BD/Disc/CD/DVD 分盘 marker → 强制覆盖 guessit 的推断
+        # 分盘几乎只用于 movie（TV 剧用 SxxExx），所以 part_index == 1 → movie
+        # 同时清掉污染的 s/e（guessit 把 1916 前两位当 season=19、BD1 当 episode）
+        season = None
+        episode = None
+        if part_index >= 2:
+            media_type = "part"
+        else:
+            media_type = "movie"                    # BD1/Disc1/CD1 → 主片入口走 TMDB
+
+    # 续集 "Part N"（罗马字/阿拉伯字）— guessit 把 "Part II" 抽到 `part` 字段，title 留下纯
+    # "The Godfather"。但 TMDB 上正版 title 是 "The Godfather Part II"，所以 search 必须
+    # 把 "Part N" 合并回去，否则候选 #1 是 Godfather 1972 而非 1974。
+    # 跟上面的 BD/Disc 分盘 (_DISC_PATTERN) 不冲突：BDx 的 g['part'] 通常不存在（guessit
+    # 把 BD1 当 source.disc 不是 part），所以这里只处理 "Part N" 形式的续集编号。
+    title = g.get("title", "")
+    guessit_part = g.get("part")
+    if title and guessit_part is not None and part_index is None:
+        title = f"{title} Part {guessit_part}"
 
     return FilenameParse(
         raw_name=name,
-        title=g.get("title", ""),
-        year=g.get("year"),
-        season=g.get("season"),
-        episode=g.get("episode"),
+        title=title,
+        year=year,
+        season=season,
+        episode=episode,
         episode_title=g.get("episode_title"),
         media_type=media_type,
         resolution=str(g.get("screen_size") or "") or None,
         source=str(g.get("source") or "") or None,
         release_group=str(g.get("release_group") or "") or None,
-        raw=g,
+        raw={**g, "_part_index": part_index} if part_index is not None else g,
     )
 
 
@@ -127,6 +253,12 @@ def _pick_top(
         elif want_year and c.year and abs(c.year - want_year) == 1:
             score += 0.05
             reasons.append("year ±1")
+        elif want_year and c.year:
+            # 双方都知道 year 但不匹配 → 强负信号。文件名 year 通常很准（PT 命名习惯），
+            # candidate year 在 TMDB 也是权威。"The Godfather 1972" 在 query year=1974
+            # 时是错的候选，必须低于"The Godfather Part II 1974"。
+            score -= 0.2
+            reasons.append("year mismatch")
 
         # vote 高 + 候选首位（TMDB 默认按热度排）轻微 boost
         if c.vote_average and c.vote_average >= 7:
@@ -203,6 +335,28 @@ def identify(
     """
     parse = parse_filename(path)
     rescue_reason = ""
+
+    # Step 0: extras / featurette / trailer / sample 等附属文件 → 短路
+    # 不调 TMDB（省 API + 避免 mismatch），UI 上单独归类，不和 main feature 混展
+    if parse.media_type == "extra":
+        extra_kind = parse.raw.get("_extra_kind", "extra")
+        return IdentifyResult(
+            parse=parse, candidates=[], top_pick=None,
+            confidence=1.0,
+            reasoning=f"detected as {extra_kind} (附属文件，不调 TMDB)",
+            pick_source="extra",
+        )
+
+    # Step 0.5: 多盘分段第 2+ 盘 → 短路（库视图隐藏，详情卡聚合）
+    # 第 1 盘走正常 movie/tv 识别流程
+    if parse.media_type == "part":
+        part_index = parse.raw.get("_part_index")
+        return IdentifyResult(
+            parse=parse, candidates=[], top_pick=None,
+            confidence=1.0,
+            reasoning=f"multi-disc part #{part_index} (附属于主片，不调 TMDB)",
+            pick_source="part",
+        )
 
     # Step 0a: guessit 没拿到 title → LLM rescue（如果可用）
     if not parse.title and llm_api_key:

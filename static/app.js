@@ -1884,6 +1884,224 @@ function renderBatchRow(idx, row, data) {
 
 // ==================== AI / 元数据配置 ====================
 
+// ==================== 全库扫描 modal ====================
+
+let scanModal = null;
+let scanPollTimer = null;
+let activeScanRunId = null;
+let scanStartedAt = 0;
+
+async function openScanModal() {
+    if (!scanModal) {
+        scanModal = new bootstrap.Modal(document.getElementById("scanModal"));
+    }
+    // 重置 UI 到 setup 视图
+    document.getElementById("scan-setup").style.display = "block";
+    document.getElementById("scan-progress").style.display = "none";
+    document.getElementById("scan-base-path").value = nasBasePath || "";
+    document.getElementById("scan-depth").value = 5;
+    document.getElementById("scan-depth-label").textContent = "5";
+    document.getElementById("scan-start-btn").style.display = "inline-block";
+    document.getElementById("scan-abort-btn").style.display = "none";
+    document.getElementById("scan-result").style.display = "none";
+
+    // depth slider 联动
+    document.getElementById("scan-depth").oninput = (e) => {
+        document.getElementById("scan-depth-label").textContent = e.target.value;
+    };
+
+    scanModal.show();
+
+    // 加载历史 + 检查 active scan
+    try {
+        const res = await apiFetch(`${API_BASE}/api/scan/runs?limit=5`);
+        const data = await res.json();
+        renderScanRecent(data.runs || []);
+        // 找正在跑的 scan
+        const active = (data.runs || []).find(r => r.status === "running");
+        if (active) {
+            // 已有 active scan → 直接进入进度视图监听
+            attachToRunningScan(active.id);
+        }
+    } catch (err) {
+        console.warn("load scan history failed", err);
+    }
+}
+
+function renderScanRecent(runs) {
+    const box = document.getElementById("scan-recent");
+    if (!runs.length) {
+        box.innerHTML = "（暂无历史记录）";
+        return;
+    }
+    const rows = runs.map(r => {
+        const at = new Date(r.started_at * 1000).toLocaleString();
+        const statusEmoji = {
+            running: "⏳", done: "✓", aborted: "⊘", failed: "✗"
+        }[r.status] || "·";
+        const counts = `${r.files_done}/${r.files_total} done · ${r.files_skipped} skip · ${r.files_failed} fail`;
+        return `<div style="line-height:1.4">${statusEmoji} <code style="font-size:11px;">${r.base_path}</code> · ${counts} · <span style="font-size:10px;opacity:0.7">${at}</span></div>`;
+    }).join("");
+    box.innerHTML = `<strong>最近扫描：</strong><div class="mt-1">${rows}</div>`;
+}
+
+async function startFullScan() {
+    const basePath = document.getElementById("scan-base-path").value.trim();
+    const maxDepth = parseInt(document.getElementById("scan-depth").value, 10);
+    if (!basePath) {
+        alert("请输入扫描根路径");
+        return;
+    }
+    const btn = document.getElementById("scan-start-btn");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>启动中...';
+    try {
+        const res = await apiFetch(`${API_BASE}/api/scan/start`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ base_path: basePath, max_depth: maxDepth }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            alert(`启动失败：${data.error || JSON.stringify(data)}\n${data.detail || ""}`);
+            return;
+        }
+        attachToRunningScan(data.scan_run_id);
+    } catch (err) {
+        alert(`网络错误：${err.message}`);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-play-fill me-1"></i>开始扫描';
+    }
+}
+
+function attachToRunningScan(scanRunId) {
+    activeScanRunId = scanRunId;
+    scanStartedAt = Date.now() / 1000;
+    document.getElementById("scan-setup").style.display = "none";
+    document.getElementById("scan-progress").style.display = "block";
+    document.getElementById("scan-start-btn").style.display = "none";
+    document.getElementById("scan-abort-btn").style.display = "inline-block";
+    document.getElementById("scan-abort-btn").disabled = false;
+    document.getElementById("scan-abort-btn").innerHTML = '<i class="bi bi-stop-fill me-1"></i>中止';
+    // 启动轮询
+    if (scanPollTimer) clearInterval(scanPollTimer);
+    pollScanStatus();
+    scanPollTimer = setInterval(pollScanStatus, 2000);
+}
+
+async function pollScanStatus() {
+    if (activeScanRunId === null) return;
+    try {
+        const res = await apiFetch(`${API_BASE}/api/scan/status?id=${activeScanRunId}`);
+        const s = await res.json();
+        if (!res.ok) {
+            console.warn("scan status fetch failed", s);
+            return;
+        }
+        renderScanProgress(s);
+        if (s.status !== "running") {
+            // 完成 / 失败 / aborted → 停止轮询 + 显示终态
+            clearInterval(scanPollTimer);
+            scanPollTimer = null;
+            await renderScanResult(s);
+        }
+    } catch (err) {
+        console.warn("scan status poll error", err);
+    }
+}
+
+function renderScanProgress(s) {
+    const total = s.files_total || 0;
+    const processed = (s.files_done || 0) + (s.files_skipped || 0) + (s.files_failed || 0);
+    const pct = total > 0 ? (processed / total * 100) : 0;
+    document.getElementById("scan-progress-bar").style.width = pct + "%";
+    document.getElementById("scan-progress-text").textContent = `${processed} / ${total}`;
+    document.getElementById("scan-status-label").innerHTML =
+        s.status === "running" ? '<span class="text-info">⏳ 扫描中</span>'
+        : s.status === "done" ? '<span class="text-success">✓ 完成</span>'
+        : s.status === "aborted" ? '<span class="text-warning">⊘ 已中止</span>'
+        : s.status === "failed" ? '<span class="text-danger">✗ 失败</span>'
+        : s.status;
+    document.getElementById("scan-counts").innerHTML =
+        `<span class="text-success">${s.files_done} done</span> · ` +
+        `<span class="text-secondary">${s.files_skipped} skip</span> · ` +
+        `<span class="text-danger">${s.files_failed} fail</span>`;
+    document.getElementById("scan-current-path").textContent = s.current_path || "—";
+
+    // ETA：基于已处理速率
+    if (s.status === "running" && processed > 0 && total > processed) {
+        const elapsed = Date.now() / 1000 - scanStartedAt;
+        const rate = processed / elapsed;
+        const remaining = (total - processed) / rate;
+        const m = Math.floor(remaining / 60);
+        const sec = Math.floor(remaining % 60);
+        document.getElementById("scan-eta").textContent = `预计剩余 ${m}m ${sec}s`;
+    } else {
+        document.getElementById("scan-eta").textContent = "";
+    }
+}
+
+async function renderScanResult(s) {
+    document.getElementById("scan-abort-btn").style.display = "none";
+    document.getElementById("scan-start-btn").style.display = "inline-block";
+    document.getElementById("scan-start-btn").innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>再扫一次';
+
+    const box = document.getElementById("scan-result");
+    box.style.display = "block";
+
+    let html = "";
+    if (s.status === "done") {
+        html += `<div class="alert alert-success py-2 mb-2 small">✓ 扫描完成：${s.files_done} 识别 · ${s.files_skipped} 跳过 · ${s.files_failed} 失败</div>`;
+        addLog(`扫描完成: ${s.files_done} 识别 / ${s.files_skipped} 跳过 / ${s.files_failed} 失败`, "success");
+    } else if (s.status === "aborted") {
+        html += `<div class="alert alert-warning py-2 mb-2 small">⊘ 已中止：完成 ${(s.files_done||0)+(s.files_skipped||0)} / ${s.files_total}</div>`;
+    } else if (s.status === "failed") {
+        html += `<div class="alert alert-danger py-2 mb-2 small">✗ 扫描失败：${s.error || "unknown"}</div>`;
+    }
+
+    // 拉 failed 详情列表（如果有）
+    if (s.files_failed > 0) {
+        try {
+            const r = await apiFetch(`${API_BASE}/api/scan/failed?id=${s.scan_run_id}&limit=50`);
+            const data = await r.json();
+            if (data.items && data.items.length > 0) {
+                html += `<details class="small mt-2"><summary class="text-secondary" style="cursor:pointer">查看 ${data.items.length} 个失败项</summary><ul class="mt-1 mb-0" style="font-size:11px;">`;
+                data.items.forEach(it => {
+                    html += `<li><code>${it.path}</code> — ${it.error || "?"}</li>`;
+                });
+                html += `</ul></details>`;
+            }
+        } catch (err) {
+            console.warn("load failed items error", err);
+        }
+    }
+    box.innerHTML = html;
+
+    activeScanRunId = null;
+}
+
+async function abortFullScan() {
+    if (activeScanRunId === null) return;
+    const btn = document.getElementById("scan-abort-btn");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>停止中...';
+    try {
+        await apiFetch(`${API_BASE}/api/scan/abort`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ scan_run_id: activeScanRunId }),
+        });
+        // worker 会在下一 loop 退出。继续轮询直到 status != running
+    } catch (err) {
+        alert(`中止失败：${err.message}`);
+        btn.disabled = false;
+    }
+}
+
+
+// ==================== AI / 元数据配置 ====================
+
 let aiConfigModal = null;
 
 async function showAIConfig() {
@@ -2248,5 +2466,271 @@ async function testNASConnection() {
     } catch (err) {
         statusEl.innerHTML = "";
         renderConnectError(statusEl, err.message);
+    }
+}
+
+
+// ==================== 库视图（按 TMDB 元数据浏览） ====================
+
+let currentView = "files";              // 'files' | 'library'
+let libraryOffset = 0;
+let libraryHasMore = false;
+const LIBRARY_PAGE_SIZE = 60;
+
+function switchView(view) {
+    console.log("[switchView] called with:", view);
+    currentView = view;
+    const fileTab = document.getElementById("view-tab-files");
+    const libTab = document.getElementById("view-tab-library");
+    const libPanel = document.getElementById("library-panel");
+    console.log("[switchView] elements:", {fileTab: !!fileTab, libTab: !!libTab, libPanel: !!libPanel});
+    if (!libPanel) {
+        console.error("[switchView] #library-panel 不存在！HTML 没有加载新版本，请 hard reload");
+        return;
+    }
+    fileTab.classList.toggle("active", view === "files");
+    libTab.classList.toggle("active", view === "library");
+
+    // 库视图用 absolute fill 覆盖在 main-panel 上（CSS: position:absolute inset:0）
+    // 切到 library 时 .active 让它显示，不动文件视图的元素—— file-container 之类
+    // 仍然在 DOM 但被 library-panel 完全盖住。切回 files 时 .active 移除即可。
+    document.getElementById("library-panel").classList.toggle("active", view === "library");
+
+    if (view === "library") {
+        loadLibrary(true);
+        loadLibraryStats();
+    }
+}
+
+let libraryDebounce = null;
+function _bindLibraryFilters() {
+    const trigger = () => {
+        clearTimeout(libraryDebounce);
+        libraryDebounce = setTimeout(() => loadLibrary(true), 200);
+    };
+    ["library-search", "library-year-from", "library-year-to"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el && !el.__bound) {
+            el.addEventListener("input", trigger);
+            el.__bound = true;
+        }
+    });
+    ["library-type", "library-sort"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el && !el.__bound) {
+            el.addEventListener("change", () => loadLibrary(true));
+            el.__bound = true;
+        }
+    });
+}
+
+function _libraryQueryParams() {
+    const p = new URLSearchParams();
+    const q = document.getElementById("library-search").value.trim();
+    const t = document.getElementById("library-type").value;
+    const sort = document.getElementById("library-sort").value;
+    const yf = document.getElementById("library-year-from").value;
+    const yt = document.getElementById("library-year-to").value;
+    if (q) p.set("q", q);
+    if (t) p.set("media_type", t);
+    if (sort) p.set("sort", sort);
+    if (yf) p.set("year_from", yf);
+    if (yt) p.set("year_to", yt);
+    p.set("limit", LIBRARY_PAGE_SIZE);
+    p.set("offset", libraryOffset);
+    return p;
+}
+
+async function loadLibrary(reset = false) {
+    _bindLibraryFilters();
+    if (reset) {
+        libraryOffset = 0;
+        document.getElementById("library-grid").innerHTML = "";
+    }
+    try {
+        const res = await apiFetch(`${API_BASE}/api/library/items?${_libraryQueryParams()}`);
+        const data = await res.json();
+        if (!res.ok) {
+            console.warn("library load failed", data);
+            return;
+        }
+        renderLibraryGrid(data.items, !reset);
+        libraryHasMore = data.has_more;
+        libraryOffset += data.items.length;
+        document.getElementById("library-count").textContent = `${data.total} 个媒体`;
+        document.getElementById("library-empty").style.display = (data.total === 0) ? "block" : "none";
+        document.getElementById("library-loadmore").style.display = libraryHasMore ? "block" : "none";
+    } catch (err) {
+        console.error("library load error", err);
+    }
+}
+
+async function loadMoreLibrary() {
+    if (!libraryHasMore) return;
+    await loadLibrary(false);
+}
+
+async function loadLibraryStats() {
+    try {
+        const res = await apiFetch(`${API_BASE}/api/library/stats`);
+        const s = await res.json();
+        const parts = [`${s.total} 部`];
+        if (s.by_media_type?.movie) parts.push(`${s.by_media_type.movie} 电影`);
+        if (s.by_media_type?.tv) parts.push(`${s.by_media_type.tv} 剧集`);
+        if (s.top_genres?.length) parts.push(`Top: ${s.top_genres.slice(0, 3).map(g => g.name).join(" · ")}`);
+        document.getElementById("library-stats-mini").textContent = parts.join(" · ");
+    } catch (err) {
+        console.warn("library stats error", err);
+    }
+}
+
+function renderLibraryGrid(items, append = false) {
+    const grid = document.getElementById("library-grid");
+    if (!append) grid.innerHTML = "";
+    items.forEach(it => {
+        const card = createElement("div", { className: "lib-card" });
+        const poster = createElement("div", { className: "lib-poster" });
+        if (it.poster_url) {
+            poster.style.backgroundImage = `url('${it.poster_url}')`;
+        } else {
+            poster.classList.add("no-poster");
+            poster.innerHTML = '<i class="bi bi-film"></i>';
+        }
+        if (it.media_type) {
+            const badge = createElement("div", { className: "lib-type-badge", textContent: it.media_type === "tv" ? "TV" : "电影" });
+            poster.appendChild(badge);
+        }
+        if (it.vote_average) {
+            const rating = createElement("div", { className: "lib-rating", textContent: "⭐ " + it.vote_average.toFixed(1) });
+            poster.appendChild(rating);
+        }
+        card.appendChild(poster);
+
+        const meta = createElement("div", { className: "lib-meta" });
+        const titleText = it.title || "未命名";
+        const epSuffix = (it.season && it.episode)
+            ? ` S${String(it.season).padStart(2, "0")}E${String(it.episode).padStart(2, "0")}` : "";
+        meta.appendChild(createElement("div", { className: "lib-title", textContent: titleText + epSuffix }));
+        const subParts = [];
+        if (it.year) subParts.push(it.year);
+        if (it.resolution) subParts.push(it.resolution);
+        meta.appendChild(createElement("div", { className: "lib-sub", textContent: subParts.join(" · ") }));
+        card.appendChild(meta);
+
+        card.addEventListener("click", () => showLibraryItemDetail(it));
+        grid.appendChild(card);
+    });
+}
+
+function showLibraryItemDetail(item) {
+    const panel = document.getElementById("file-detail");
+    const content = document.getElementById("file-detail-content");
+    panel.style.display = "block";
+    content.innerHTML = "";
+    const sidebar = document.querySelector(".sidebar");
+    if (sidebar) sidebar.scrollTop = 0;
+
+    const titleEl = createElement("h6", { textContent: item.title || "未命名" });
+    if (item.season && item.episode) {
+        titleEl.innerHTML += ` <small class="text-secondary">S${String(item.season).padStart(2, "0")}E${String(item.episode).padStart(2, "0")}</small>`;
+    }
+    content.appendChild(titleEl);
+    if (item.original_title && item.original_title !== item.title) {
+        content.appendChild(createElement("small", { className: "text-secondary d-block mb-2", textContent: item.original_title }));
+    }
+
+    const fakeData = {
+        provider_state: "ok",
+        top_pick: {
+            title: item.title, original_title: item.original_title,
+            year: item.year, media_type: item.media_type,
+            poster_url: item.poster_url, overview: item.overview,
+            vote_average: item.vote_average, external_ids: {tmdb_id: item.tmdb_id},
+            id: `tmdb:${item.media_type}:${item.tmdb_id}`,
+        },
+        confidence: 1.0,
+        reasoning: "cached",
+        pick_source: "cached",
+        parse: { title: item.title, year: item.year, season: item.season, episode: item.episode },
+        details: {
+            genres: item.genres || [],
+            cast: item.cast || [],
+            runtime_minutes: item.runtime_minutes,
+        },
+        llm_configured: true,
+    };
+    const cardBox = createElement("div");
+    cardBox.__videoPath = item.path;
+    renderMetadataCard(cardBox, fakeData);
+    content.appendChild(cardBox);
+
+    content.appendChild(createElement("hr"));
+    content.appendChild(createElement("small", {
+        className: "text-secondary d-block mb-1", textContent: "文件路径",
+    }));
+    content.appendChild(createElement("code", {
+        textContent: item.path,
+        style: "font-size:10px;word-break:break-all;display:block;margin-bottom:8px;",
+    }));
+
+    const btnRow = createElement("div", { className: "d-flex gap-2 mt-2" });
+    const gotoBtn = createElement("button", {
+        className: "btn btn-sm btn-outline-secondary",
+        innerHTML: '<i class="bi bi-folder2-open me-1"></i>进入所在目录',
+    });
+    gotoBtn.addEventListener("click", () => {
+        const dir = item.path.substring(0, item.path.lastIndexOf("/")) || nasBasePath;
+        switchView("files");
+        loadFiles(dir);
+    });
+    btnRow.appendChild(gotoBtn);
+    content.appendChild(btnRow);
+
+    // 异步加载同目录附属文件（特典/花絮/采访/预告）
+    loadExtrasForMain(item.path, content);
+}
+
+async function loadExtrasForMain(mainPath, container) {
+    try {
+        const res = await apiFetch(`${API_BASE}/api/library/companions-in-dir?path=${encodeURIComponent(mainPath)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data.items || data.items.length === 0) return;
+
+        // 按 kind 分组（part = 多盘分段，extra = 花絮）
+        const parts = data.items.filter(i => i.kind === "part");
+        const extras = data.items.filter(i => i.kind === "extra");
+
+        const renderGroup = (label, items, parent) => {
+            if (items.length === 0) return;
+            parent.appendChild(createElement("hr", { className: "my-2" }));
+            parent.appendChild(createElement("small", {
+                className: "text-secondary d-block mb-1",
+                textContent: `${label} (${items.length})`,
+            }));
+            const list = createElement("div", { className: "list-group list-group-flush small" });
+            items.forEach(it => {
+                const row = createElement("div", {
+                    className: "list-group-item bg-transparent text-light border-secondary py-1 px-2",
+                    style: "font-size:11px;",
+                });
+                const sizeHuman = it.size_bytes ? humanSize(it.size_bytes) : "?";
+                const tags = [it.resolution, it.source].filter(Boolean).join(" · ");
+                row.innerHTML = `
+                    <div style="word-break:break-all;">${it.raw_name || it.path}</div>
+                    <div class="text-secondary" style="font-size:10px;">${sizeHuman}${tags ? " · " + tags : ""}</div>
+                `;
+                list.appendChild(row);
+            });
+            parent.appendChild(list);
+        };
+
+        const wrap = createElement("div", { className: "mt-3" });
+        renderGroup("本片其他分段", parts, wrap);    // BD2 / Disc2 等
+        renderGroup("本目录附属文件", extras, wrap); // 花絮 / 采访 / 预告
+        container.appendChild(wrap);
+    } catch (e) {
+        // 加载失败静默 — 不影响主详情展示
+        console.warn("[loadExtrasForMain] failed:", e);
     }
 }

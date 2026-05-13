@@ -232,3 +232,207 @@ def test_delete_by_path(conn):
 
 def test_delete_nonexistent_returns_false(conn):
     assert metadata_cache.delete_by_path(conn, "/share/never.mkv") is False
+
+
+# ---------------- query_library + get_library_stats ---------------- #
+
+
+def _seed_library(conn, items):
+    """便利 seed：items 是 dicts，路径/年份/title 写入 + status=ok。"""
+    for it in items:
+        c = MediaCandidate(
+            id=f"tmdb:{it.get('media_type', 'movie')}:{it.get('tmdb_id', '1')}",
+            external_ids={"tmdb_id": str(it.get("tmdb_id", "1"))},
+            title=it.get("title", "X"),
+            original_title=it.get("original_title"),
+            year=it.get("year", 2000),
+            media_type=it.get("media_type", "movie"),
+            poster_url=None,
+            overview=it.get("overview"),
+            vote_average=it.get("vote_average", 7.5),
+            raw={},
+        )
+        res = _make_result(top=c)
+        metadata_cache.upsert_identification(
+            conn, path=it["path"],
+            stat={"inode": 1, "size_bytes": 100, "mtime": it.get("mtime", 1000)},
+            identify_result=res,
+        )
+
+
+def test_query_library_filters_media_type(conn):
+    _seed_library(conn, [
+        {"path": "/a.mkv", "tmdb_id": "1", "media_type": "movie", "year": 2020},
+        {"path": "/b.mkv", "tmdb_id": "2", "media_type": "tv", "year": 2021},
+        {"path": "/c.mkv", "tmdb_id": "3", "media_type": "movie", "year": 2022},
+    ])
+    items, total = metadata_cache.query_library(conn, media_type="movie")
+    assert total == 2
+    assert all(i.media_type == "movie" for i in items)
+
+
+def test_query_library_filters_year_range(conn):
+    _seed_library(conn, [
+        {"path": "/old.mkv", "tmdb_id": "1", "year": 1995},
+        {"path": "/mid.mkv", "tmdb_id": "2", "year": 2010},
+        {"path": "/new.mkv", "tmdb_id": "3", "year": 2022},
+    ])
+    items, total = metadata_cache.query_library(conn, year_from=2000, year_to=2015)
+    assert total == 1
+    assert items[0].year == 2010
+
+
+def test_query_library_query_matches_title_and_original(conn):
+    """模糊匹配应该 title (zh-CN) 和 original_title (en) 都命中。"""
+    _seed_library(conn, [
+        {"path": "/a.mkv", "tmdb_id": "1", "title": "瑞克和莫蒂",
+         "original_title": "Rick and Morty"},
+        {"path": "/b.mkv", "tmdb_id": "2", "title": "星际穿越",
+         "original_title": "Interstellar"},
+        {"path": "/c.mkv", "tmdb_id": "3", "title": "Other",
+         "original_title": "Other"},
+    ])
+    # 中文搜
+    items, total = metadata_cache.query_library(conn, query="瑞克")
+    assert total == 1 and items[0].tmdb_id == "1"
+    # 英文搜
+    items, total = metadata_cache.query_library(conn, query="Interstellar")
+    assert total == 1 and items[0].tmdb_id == "2"
+    # 大小写不敏感
+    items, total = metadata_cache.query_library(conn, query="interstellar")
+    assert total == 1
+
+
+def test_query_library_sort_year_desc(conn):
+    _seed_library(conn, [
+        {"path": "/a.mkv", "tmdb_id": "1", "year": 1995},
+        {"path": "/b.mkv", "tmdb_id": "2", "year": 2022},
+        {"path": "/c.mkv", "tmdb_id": "3", "year": 2010},
+    ])
+    items, _ = metadata_cache.query_library(conn, sort="year_desc")
+    assert [i.year for i in items] == [2022, 2010, 1995]
+
+
+def test_query_library_sort_vote_desc(conn):
+    _seed_library(conn, [
+        {"path": "/a.mkv", "tmdb_id": "1", "vote_average": 6.5},
+        {"path": "/b.mkv", "tmdb_id": "2", "vote_average": 9.0},
+        {"path": "/c.mkv", "tmdb_id": "3", "vote_average": 7.5},
+    ])
+    items, _ = metadata_cache.query_library(conn, sort="vote_desc")
+    assert [i.vote_average for i in items] == [9.0, 7.5, 6.5]
+
+
+def test_query_library_limit_offset(conn):
+    _seed_library(conn, [
+        {"path": f"/{i}.mkv", "tmdb_id": str(i), "year": 2000 + i}
+        for i in range(10)
+    ])
+    items, total = metadata_cache.query_library(conn, sort="year_desc", limit=3, offset=2)
+    assert total == 10
+    assert len(items) == 3
+    # year_desc → [2009, 2008, 2007, 2006, ...]; offset 2 limit 3 → [2007, 2006, 2005]
+    assert [i.year for i in items] == [2007, 2006, 2005]
+
+
+def test_query_library_excludes_needs_review(conn):
+    # 一个 ok + 一个 needs_review
+    _seed_library(conn, [{"path": "/a.mkv", "tmdb_id": "1"}])
+    metadata_cache.upsert_identification(
+        conn, path="/b.mkv",
+        stat={"inode": 2, "size_bytes": 100, "mtime": 1000},
+        identify_result=_make_result(top=None),  # needs_review
+    )
+    items, total = metadata_cache.query_library(conn)
+    assert total == 1
+    assert items[0].path == "/a.mkv"
+
+
+def test_query_library_excludes_extras_by_default(conn):
+    """media_type='extra' 默认从库视图过滤。"""
+    # 用 raw upsert 模拟扫描时检测到的 extra（直接 insert）
+    _seed_library(conn, [
+        {"path": "/Movies/Foo/Foo.2020.mkv", "tmdb_id": "1", "media_type": "movie", "year": 2020},
+    ])
+    # 手动 insert 一个 extra
+    conn.execute("""
+        INSERT INTO media_files (path, inode, size_bytes, mtime, media_type, title, year,
+                                  metadata_status, metadata_source, metadata_provider,
+                                  metadata_fetched_at, first_seen_at, last_updated_at,
+                                  parse_raw_name)
+        VALUES ('/Movies/Foo/Foo.2020.Extras-01.mkv', 2, 100, 1000, 'extra', 'Foo Extras', 2020,
+                'ok', 'tmdb', 'tmdb', 1000, 1000, 1000, 'Foo.2020.Extras-01.mkv')
+    """)
+    conn.commit()
+    items, total = metadata_cache.query_library(conn)
+    assert total == 1
+    assert items[0].media_type == "movie"
+    # include_extras=True 时能拿到
+    items2, total2 = metadata_cache.query_library(conn, include_extras=True)
+    assert total2 == 2
+
+
+def test_list_extras_in_dir_returns_same_dir_only(conn):
+    """同目录的 extra 返回，子目录或别目录的不返回。"""
+    _seed_library(conn, [
+        {"path": "/Movies/Foo/Foo.2020.mkv", "tmdb_id": "1", "media_type": "movie", "year": 2020},
+    ])
+    conn.executemany(
+        """INSERT INTO media_files (path, inode, size_bytes, mtime, media_type, title,
+                                     metadata_status, metadata_source, metadata_provider,
+                                     metadata_fetched_at, first_seen_at, last_updated_at,
+                                     parse_raw_name)
+           VALUES (?, ?, 100, 1000, 'extra', 'Foo Extras', 'ok', 'tmdb', 'tmdb', 1000, 1000, 1000, ?)""",
+        [
+            ("/Movies/Foo/Foo.2020.Extras-01.mkv", 10, "Foo.2020.Extras-01.mkv"),
+            ("/Movies/Foo/Foo.2020.Featurette.mkv", 11, "Foo.2020.Featurette.mkv"),
+            # 子目录的不该被返回
+            ("/Movies/Foo/sub/inner.Extras-01.mkv", 12, "inner.Extras-01.mkv"),
+            # 别目录的不该被返回
+            ("/Movies/Bar/Bar.2021.Extras-01.mkv", 13, "Bar.2021.Extras-01.mkv"),
+        ],
+    )
+    conn.commit()
+    extras = metadata_cache.list_extras_in_dir(conn, "/Movies/Foo")
+    paths = sorted(e.path for e in extras)
+    assert paths == [
+        "/Movies/Foo/Foo.2020.Extras-01.mkv",
+        "/Movies/Foo/Foo.2020.Featurette.mkv",
+    ]
+
+
+def test_list_extras_in_dir_empty_returns_empty(conn):
+    assert metadata_cache.list_extras_in_dir(conn, "/nonexistent") == []
+    # 边界：空字符串 / 单 slash 不能匹配全表
+    assert metadata_cache.list_extras_in_dir(conn, "") == []
+    assert metadata_cache.list_extras_in_dir(conn, "/") == []
+
+
+def test_library_stats_basic_counts(conn):
+    _seed_library(conn, [
+        {"path": "/a.mkv", "tmdb_id": "1", "media_type": "movie", "year": 1995, "vote_average": 8.5},
+        {"path": "/b.mkv", "tmdb_id": "2", "media_type": "tv", "year": 2010, "vote_average": 7.5},
+        {"path": "/c.mkv", "tmdb_id": "3", "media_type": "movie", "year": 1998, "vote_average": 6.5},
+        {"path": "/d.mkv", "tmdb_id": "4", "media_type": "movie", "year": 2020, "vote_average": 9.2},
+    ])
+    stats = metadata_cache.get_library_stats(conn)
+    assert stats["total"] == 4
+    assert stats["by_media_type"] == {"movie": 3, "tv": 1}
+    assert stats["by_decade"] == {1990: 2, 2010: 1, 2020: 1}
+    # vote buckets
+    assert stats["by_vote_bucket"]["8-9"] == 1
+    assert stats["by_vote_bucket"]["7-8"] == 1
+    assert stats["by_vote_bucket"]["6-7"] == 1
+    assert stats["by_vote_bucket"]["9-10"] == 1
+
+
+def test_library_stats_ignores_needs_review(conn):
+    """stats 只算 ok 的，needs_review 不计入。"""
+    _seed_library(conn, [{"path": "/a.mkv", "tmdb_id": "1"}])
+    metadata_cache.upsert_identification(
+        conn, path="/b.mkv",
+        stat={"inode": 2, "size_bytes": 100, "mtime": 1000},
+        identify_result=_make_result(top=None),
+    )
+    stats = metadata_cache.get_library_stats(conn)
+    assert stats["total"] == 1

@@ -21,6 +21,7 @@ from services import identify as identify_svc
 from services import llm
 from services import metadata_cache
 from services import nfo_writer
+from services import scanner
 from services.metadata.tmdb import TMDBProvider
 
 # 配置日志
@@ -28,6 +29,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+# Dev 阶段禁掉 static (app.js/css) 的浏览器缓存，避免 hard reload 也拿不到新版
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
 # 配置文件路径
 CONFIG_DIR = Path(__file__).parent / "config"
@@ -1920,6 +1923,32 @@ def test_tmdb_config():
     return jsonify(result)
 
 
+VIDEO_EXTS = ["mkv", "mp4", "avi", "mov", "ts", "m4v", "mpg", "wmv", "flv", "webm", "m2ts", "rmvb"]
+
+# 排除原盘镜像内部目录：BDMV (Blu-ray) 和 VIDEO_TS (DVD) 子树里的 .m2ts/.vob
+# 不该作为独立媒体识别——一个 Blu-ray 镜像就有几十个 m2ts 文件，全去 TMDB 搜会
+# 把识别结果污染成同一个 tmdb_id 的多个误命中（看真实扫库数据：968 个 movie 文件
+# 里 ~50 个是 BDMV/STREAM/*.m2ts，全被错误 group 到几个 tmdb_id 上）。
+_PATH_EXCLUDES = ["*/BDMV/*", "*/VIDEO_TS/*", "*/CERTIFICATE/*", "*/AUXDATA/*"]
+
+
+def _list_video_paths(path: str, max_depth: int = 2, limit: int | None = 200) -> list[str]:
+    """SSH find 视频文件路径，按 max_depth 递归。limit=None → 不截断（全库扫描用）。
+
+    自动排除 Blu-ray / DVD 原盘镜像内部目录（BDMV / VIDEO_TS / CERTIFICATE / AUXDATA）。
+    """
+    safe_path = shlex.quote(path)
+    iname_clauses = " -o ".join(f"-iname '*.{ext}'" for ext in VIDEO_EXTS)
+    not_path = " ".join(f"-not -path {shlex.quote(p)}" for p in _PATH_EXCLUDES)
+    cap = f"| head -n {limit + 1}" if limit else ""
+    cmd = (
+        f"find {safe_path} -maxdepth {max_depth} -type f {not_path} "
+        f"\\( {iname_clauses} \\) 2>/dev/null {cap}"
+    )
+    _, out, _ = ssh_exec(cmd, timeout=120)
+    return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+
 @app.route("/api/metadata/list-videos", methods=["GET"])
 @require_token
 def metadata_list_videos():
@@ -1938,19 +1967,10 @@ def metadata_list_videos():
     max_depth = max(1, min(5, int(request.args.get("max_depth", "2"))))
     limit = max(1, min(500, int(request.args.get("limit", "200"))))
 
-    # SSH find video files：常见后缀 + 大小（用 stat 拿；同目录有 .nfo 标记）
-    # 用 find -type f + -iname 过滤
-    safe_path = shlex.quote(path)
-    video_exts = ["mkv", "mp4", "avi", "mov", "ts", "m4v", "mpg", "wmv", "flv", "webm", "m2ts", "rmvb"]
-    iname_clauses = " -o ".join(f"-iname '*.{ext}'" for ext in video_exts)
-    cmd = (
-        f"find {safe_path} -maxdepth {max_depth} -type f \\( {iname_clauses} \\) "
-        f"2>/dev/null | head -n {limit + 1}"
-    )
-    _, out, _ = ssh_exec(cmd, timeout=60)
-    raw_paths = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    raw_paths = _list_video_paths(path, max_depth=max_depth, limit=limit)
     truncated = len(raw_paths) > limit
     raw_paths = raw_paths[:limit]
+    video_exts = VIDEO_EXTS  # 兼容下面循环用
     if not raw_paths:
         return jsonify({"videos": [], "total": 0, "truncated": False})
 
@@ -2417,6 +2437,230 @@ def metadata_preview_nfo_write():
             "to_overwrite": sum(1 for it in preview_items if it["action"] == "overwrite"),
         },
     })
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase 2: 全库后台扫描 worker (services/scanner.py)
+# ─────────────────────────────────────────────────────────────
+
+
+@app.route("/api/scan/start", methods=["POST"])
+@require_token
+def scan_start():
+    """启动后台扫描 worker（一次只允许一个）。
+
+    body: {base_path: "/share/...", max_depth?: 5}
+    return: {scan_run_id} 或 409 ConcurrentScanError
+    """
+    data = request.json or {}
+    base_path = (data.get("base_path") or NAS_BASE_PATH).strip()
+    try:
+        base_path = validate_path(base_path)
+    except Exception:
+        return jsonify({"error": f"invalid base_path: {base_path}"}), 400
+    max_depth = max(1, min(10, int(data.get("max_depth", 5))))
+
+    provider = get_tmdb_provider()
+    if provider is None:
+        return jsonify({"error": "TMDB API key not configured"}), 400
+    llm_key = load_deepseek_key() or None
+
+    # 绑定 dependency-injected callables for the scanner worker
+    def _scan_identify(p: str):
+        return identify_svc.identify(p, provider, llm_api_key=llm_key)
+
+    try:
+        scan_run_id = scanner.start_scan(
+            db_path=DB_PATH,
+            base_path=base_path,
+            max_depth=max_depth,
+            list_video_paths=lambda bp, md: _list_video_paths(bp, max_depth=md, limit=None),
+            ssh_stat=_ssh_stat_paths,
+            identify=_scan_identify,
+        )
+    except scanner.ConcurrentScanError as e:
+        return jsonify({"error": "scan_already_running", "detail": str(e)}), 409
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": "scan_start_failed", "detail": str(e)}), 500
+
+    return jsonify({"scan_run_id": scan_run_id, "base_path": base_path})
+
+
+@app.route("/api/scan/status", methods=["GET"])
+@require_token
+def scan_status():
+    """查询某个 scan_run 的实时状态。前端 ~3s 轮询。"""
+    scan_run_id = request.args.get("id", "").strip()
+    if not scan_run_id.isdigit():
+        return jsonify({"error": "id required (integer)"}), 400
+    summary = scanner.get_status(get_db(), int(scan_run_id))
+    if summary is None:
+        return jsonify({"error": "scan_run_not_found"}), 404
+    resp = jsonify({
+        "scan_run_id": summary.scan_run_id,
+        "base_path": summary.base_path,
+        "max_depth": summary.max_depth,
+        "status": summary.status,
+        "files_total": summary.files_total,
+        "files_done": summary.files_done,
+        "files_failed": summary.files_failed,
+        "files_skipped": summary.files_skipped,
+        "current_path": summary.current_path,
+        "started_at": summary.started_at,
+        "completed_at": summary.completed_at,
+        "error": summary.error,
+    })
+    resp.headers["Cache-Control"] = "no-store"  # 轮询不能 cache
+    return resp
+
+
+@app.route("/api/scan/abort", methods=["POST"])
+@require_token
+def scan_abort():
+    """请求 worker 停止：标 status='aborted'，worker 下一 loop 自然退出。"""
+    data = request.json or {}
+    scan_run_id = data.get("scan_run_id")
+    if not isinstance(scan_run_id, int):
+        return jsonify({"error": "scan_run_id required (integer)"}), 400
+    ok = scanner.abort_scan(get_db(), scan_run_id)
+    if not ok:
+        return jsonify({"error": "not_running_or_not_found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/scan/runs", methods=["GET"])
+@require_token
+def scan_runs_list():
+    """历史扫描记录（最近 N 次）。"""
+    limit = max(1, min(50, int(request.args.get("limit", "10"))))
+    runs = scanner.list_recent_runs(get_db(), limit=limit)
+    return jsonify({"runs": runs})
+
+
+@app.route("/api/scan/failed", methods=["GET"])
+@require_token
+def scan_failed_items():
+    """某次 scan 的 failed item 详情列表。"""
+    scan_run_id = request.args.get("id", "").strip()
+    if not scan_run_id.isdigit():
+        return jsonify({"error": "id required (integer)"}), 400
+    limit = max(1, min(500, int(request.args.get("limit", "100"))))
+    items = scanner.list_failed_items(get_db(), int(scan_run_id), limit=limit)
+    return jsonify({"items": items, "total": len(items)})
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase 2: 库视图 — 按 TMDB 元数据浏览（不按目录树）
+# ─────────────────────────────────────────────────────────────
+
+
+def _cached_to_library_dict(c) -> dict:
+    """CachedMetadata → 库视图 API response dict（瘦身版，不含 provenance）。"""
+    return {
+        "path": c.path,
+        "tmdb_id": c.tmdb_id,
+        "imdb_id": c.imdb_id,
+        "media_type": c.media_type,
+        "title": c.title,
+        "original_title": c.original_title,
+        "year": c.year,
+        "season": c.season_number,
+        "episode": c.episode_number,
+        "episode_title": c.episode_title,
+        "poster_url": c.poster_url,
+        "overview": c.overview,
+        "vote_average": c.vote_average,
+        "genres": c.genres,
+        "cast": c.cast[:6],
+        "runtime_minutes": c.runtime_minutes,
+        "first_seen_at": c.first_seen_at,
+        "resolution": c.parse_resolution,
+        "source": c.parse_source,
+    }
+
+
+@app.route("/api/library/items", methods=["GET"])
+@require_token
+def library_items():
+    """库视图主查询。
+
+    query params:
+      media_type:  'movie' | 'tv'   过滤
+      year_from:   int               年份下限
+      year_to:     int               年份上限
+      q:           str               title 模糊匹配（中文/英文/raw_name 任一命中）
+      sort:        added_desc | year_desc | year_asc | vote_desc | title_asc
+      limit:       默认 200，最大 500
+      offset:      分页偏移
+    """
+    args = request.args
+    media_type = args.get("media_type") or None
+    year_from = args.get("year_from", type=int)
+    year_to = args.get("year_to", type=int)
+    query = (args.get("q") or "").strip() or None
+    sort = args.get("sort", "added_desc")
+    limit = max(1, min(500, args.get("limit", 200, type=int)))
+    offset = max(0, args.get("offset", 0, type=int))
+
+    items, total = metadata_cache.query_library(
+        get_db(),
+        media_type=media_type, year_from=year_from, year_to=year_to,
+        query=query, sort=sort, limit=limit, offset=offset,
+    )
+    resp = jsonify({
+        "items": [_cached_to_library_dict(c) for c in items],
+        "total": total,
+        "has_more": offset + len(items) < total,
+        "limit": limit,
+        "offset": offset,
+    })
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/library/stats", methods=["GET"])
+@require_token
+def library_stats():
+    """库概览统计。"""
+    stats = metadata_cache.get_library_stats(get_db())
+    resp = jsonify(stats)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/library/companions-in-dir", methods=["GET"])
+@app.route("/api/library/extras-in-dir", methods=["GET"])           # 旧名 alias
+@require_token
+def library_companions_in_dir():
+    """列出某 main feature 同目录的附属文件：花絮（extra）+ 多盘分段（part）。
+
+    query: path = main feature 的完整路径（dirname 用来 prefix-match）
+    返回 items 每条带 kind 字段：'extra' 或 'part'
+    """
+    path = (request.args.get("path") or "").strip()
+    if not path:
+        return jsonify({"error": "missing path"}), 400
+    # validate_path 防穿越 + 必须在 nas_base_path 下；失败会直接 abort()
+    validate_path(path)
+    dir_path = path.rsplit("/", 1)[0] if "/" in path else ""
+    companions = metadata_cache.list_companions_in_dir(get_db(), dir_path)
+    resp = jsonify({
+        "dir": dir_path,
+        "items": [
+            {
+                "path": c.path,
+                "raw_name": c.parse_raw_name,
+                "kind": c.media_type,                 # 'extra' | 'part'
+                "size_bytes": c.size_bytes,
+                "resolution": c.parse_resolution,
+                "source": c.parse_source,
+            }
+            for c in companions
+        ],
+        "count": len(companions),
+    })
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/api/action/recovery", methods=["GET"])

@@ -88,8 +88,14 @@ def upsert_identification(
     top = identify_result.top_pick
     now = _now()
 
+    is_extra = parse.media_type == "extra"
+    is_part = parse.media_type == "part"
+    is_companion = is_extra or is_part  # 都不调 TMDB，都从库视图隐藏
+
     # 决定 metadata_status
-    if top is None:
+    if is_companion:
+        status = "ok"                               # extras/parts 明确归类，不算"待审核"
+    elif top is None:
         status = "needs_review"
     else:
         status = "ok"
@@ -97,7 +103,10 @@ def upsert_identification(
     # 从 top_pick 提取字段（top 可能 None → 全 None）
     tmdb_id = top.external_ids.get("tmdb_id") if top else None
     imdb_id = top.external_ids.get("imdb_id") if top else None
-    media_type = top.media_type if top else None
+    if is_companion:
+        media_type = parse.media_type               # 'extra' / 'part'（top 一定 None）
+    else:
+        media_type = top.media_type if top else None
     title = top.title if top else parse.title  # 没 top 时退化到 guessit 解析的 title
     original_title = top.original_title if top else None
     year = top.year if top else parse.year
@@ -106,9 +115,10 @@ def upsert_identification(
     vote_average = top.vote_average if top else None
 
     # season/episode 优先用 parse 出来的（最贴合实际文件）
-    season_number = parse.season
-    episode_number = parse.episode
-    episode_title = parse.episode_title
+    # companions 强制 None — guessit 把 'Extras-01' / 'BD1' 解析的 S/E 是污染数据
+    season_number = None if is_companion else parse.season
+    episode_number = None if is_companion else parse.episode
+    episode_title = None if is_companion else parse.episode_title
 
     # details 是可选的 — 从 IdentifyResult 拿不到，调用方如要可单独传
     # spike 阶段先 None，前端命中 cache 后展示足够，详情可按需重新调 TMDB
@@ -321,3 +331,162 @@ def delete_by_path(conn: sqlite3.Connection, path: str) -> bool:
     cur = conn.execute("DELETE FROM media_files WHERE path = ?", (path,))
     conn.commit()
     return cur.rowcount > 0
+
+
+# ─── 库视图查询 ───
+
+_SORT_SQL = {
+    "added_desc":  "ORDER BY first_seen_at DESC, id DESC",
+    "year_desc":   "ORDER BY year DESC NULLS LAST, title COLLATE NOCASE",
+    "year_asc":    "ORDER BY year ASC NULLS LAST, title COLLATE NOCASE",
+    "vote_desc":   "ORDER BY vote_average DESC NULLS LAST, year DESC NULLS LAST",
+    "title_asc":   "ORDER BY title COLLATE NOCASE ASC",
+}
+
+
+def query_library(
+    conn: sqlite3.Connection,
+    *,
+    media_type: str | None = None,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    query: str | None = None,
+    sort: str = "added_desc",
+    limit: int = 200,
+    offset: int = 0,
+    include_extras: bool = False,
+) -> tuple[list[CachedMetadata], int]:
+    """库视图主查询。返回 (items, total_count_under_filter)。
+
+    只看 metadata_status='ok' 的行（needs_review 不展示——那是后台 worker
+    自动尝试失败的，不应出现在用户的"我的库"视图里）。
+
+    extras / featurette / trailer 等附属文件默认不展示（include_extras=False），
+    它们和 main feature 同目录，库视图按 main feature 聚合更符合用户心智。
+    """
+    where = ["metadata_status = 'ok'"]
+    params: list[Any] = []
+    if media_type:
+        where.append("media_type = ?")
+        params.append(media_type)
+    elif not include_extras:
+        where.append("media_type IN ('movie', 'tv')")
+    if year_from is not None:
+        where.append("year >= ?")
+        params.append(year_from)
+    if year_to is not None:
+        where.append("year <= ?")
+        params.append(year_to)
+    if query:
+        # 模糊匹配：title / original_title / parse_raw_name 任一命中
+        where.append(
+            "(title LIKE ? OR original_title LIKE ? OR parse_raw_name LIKE ?)"
+        )
+        like = f"%{query}%"
+        params.extend([like, like, like])
+    where_sql = " AND ".join(where)
+
+    sort_sql = _SORT_SQL.get(sort, _SORT_SQL["added_desc"])
+
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM media_files WHERE {where_sql}", params
+    ).fetchone()[0]
+
+    rows = conn.execute(
+        f"SELECT * FROM media_files WHERE {where_sql} {sort_sql} LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+    return [_row_to_cached(r) for r in rows], total
+
+
+def list_companions_in_dir(
+    conn: sqlite3.Connection, dir_path: str
+) -> list[CachedMetadata]:
+    """列出同目录的附属文件（extra 花絮 + part 多盘分段，按 path prefix 匹配）。
+
+    dir_path 不要带尾部斜杠。匹配 path LIKE 'dir/%' AND path NOT LIKE 'dir/%/%'
+    保证只取该目录的直接子项（不递归子目录）。
+    """
+    if not dir_path or dir_path == "/":
+        return []
+    prefix = dir_path.rstrip("/") + "/"
+    rows = conn.execute(
+        """
+        SELECT * FROM media_files
+         WHERE media_type IN ('extra', 'part')
+           AND path LIKE ?
+           AND path NOT LIKE ?
+         ORDER BY media_type, parse_raw_name
+        """,
+        (f"{prefix}%", f"{prefix}%/%"),
+    ).fetchall()
+    return [_row_to_cached(r) for r in rows]
+
+
+# 保留旧名作为 alias 避免单测 / 调用方破坏
+list_extras_in_dir = list_companions_in_dir
+
+
+def get_library_stats(conn: sqlite3.Connection) -> dict[str, Any]:
+    """库总览统计：总数 / media_type / 年代分布 / genre top10 / vote 直方图。"""
+    total = conn.execute(
+        "SELECT COUNT(*) FROM media_files WHERE metadata_status = 'ok'"
+    ).fetchone()[0]
+
+    by_type = dict(conn.execute(
+        """
+        SELECT media_type, COUNT(*) FROM media_files
+         WHERE metadata_status = 'ok' AND media_type IS NOT NULL
+         GROUP BY media_type
+        """
+    ).fetchall())
+
+    # 年代：1970s / 1980s / ...，用 (year/10)*10 算 decade
+    by_decade = dict(conn.execute(
+        """
+        SELECT (year / 10) * 10 AS decade, COUNT(*)
+          FROM media_files
+         WHERE metadata_status = 'ok' AND year IS NOT NULL
+         GROUP BY decade ORDER BY decade
+        """
+    ).fetchall())
+
+    # vote 分桶：[0-6) / [6-7) / [7-8) / [8-9) / [9-10]
+    vote_buckets: dict[str, int] = {"<6": 0, "6-7": 0, "7-8": 0, "8-9": 0, "9-10": 0, "unrated": 0}
+    for row in conn.execute(
+        "SELECT vote_average FROM media_files WHERE metadata_status = 'ok'"
+    ):
+        v = row[0]
+        if v is None:
+            vote_buckets["unrated"] += 1
+        elif v < 6:
+            vote_buckets["<6"] += 1
+        elif v < 7:
+            vote_buckets["6-7"] += 1
+        elif v < 8:
+            vote_buckets["7-8"] += 1
+        elif v < 9:
+            vote_buckets["8-9"] += 1
+        else:
+            vote_buckets["9-10"] += 1
+
+    # genre top10：genres_json 是 JSON array，Python 侧 unroll
+    genre_counts: dict[str, int] = {}
+    for row in conn.execute(
+        "SELECT genres_json FROM media_files WHERE metadata_status = 'ok' AND genres_json IS NOT NULL"
+    ):
+        try:
+            for g in json.loads(row[0]):
+                if g:
+                    genre_counts[g] = genre_counts.get(g, 0) + 1
+        except (json.JSONDecodeError, TypeError):
+            continue
+    top_genres = sorted(genre_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    return {
+        "total": total,
+        "by_media_type": by_type,
+        "by_decade": by_decade,
+        "by_vote_bucket": vote_buckets,
+        "top_genres": [{"name": g, "count": c} for g, c in top_genres],
+    }

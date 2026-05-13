@@ -94,3 +94,41 @@ CREATE INDEX IF NOT EXISTS idx_media_dedup
 
 CREATE INDEX IF NOT EXISTS idx_media_status
   ON media_files(metadata_status);
+
+
+-- Phase 2: 全库后台扫描 worker 用的状态机表。
+-- 一个 scan_runs 对应一次"扫某个 base_path"的尝试，包含 N 个 scan_items（每个视频文件）。
+-- worker 顺序 claim pending items，写完 done/failed/skipped_unchanged。可被 abort。
+CREATE TABLE IF NOT EXISTS scan_runs (
+  id              INTEGER PRIMARY KEY,
+  base_path       TEXT NOT NULL,
+  max_depth       INTEGER NOT NULL DEFAULT 5,
+  started_at      INTEGER NOT NULL,
+  completed_at    INTEGER,
+  status          TEXT NOT NULL DEFAULT 'running'
+                    CHECK (status IN ('running', 'done', 'failed', 'aborted')),
+  files_total     INTEGER NOT NULL DEFAULT 0,
+  files_done      INTEGER NOT NULL DEFAULT 0,
+  files_failed    INTEGER NOT NULL DEFAULT 0,
+  files_skipped   INTEGER NOT NULL DEFAULT 0,
+  current_path    TEXT,                            -- worker 当前正在处理的 path（前端展示用）
+  error           TEXT                             -- 整个 run 失败时的原因
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_runs_status
+  ON scan_runs(status, started_at);
+
+CREATE TABLE IF NOT EXISTS scan_items (
+  id              INTEGER PRIMARY KEY,
+  scan_run_id     INTEGER NOT NULL REFERENCES scan_runs(id),
+  path            TEXT NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'in_progress', 'done', 'failed', 'skipped_unchanged')),
+  error           TEXT,
+  last_attempt_at INTEGER,
+  UNIQUE(scan_run_id, path)
+);
+
+-- claim_next_pending 的核心查询：WHERE scan_run_id=? AND status='pending' LIMIT 1
+CREATE INDEX IF NOT EXISTS idx_scan_items_claim
+  ON scan_items(scan_run_id, status);

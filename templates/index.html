@@ -249,6 +249,91 @@
         }
         .tb-btn-icon:hover { color: var(--text-1); border-color: var(--border-med); }
 
+        /* ─── 视图切换 tab（文件/库） ──────────────────────────── */
+        .view-toggle {
+            display: inline-flex; gap: 0;
+            border: 1px solid var(--border); border-radius: var(--r);
+            background: var(--surface-2); padding: 2px;
+        }
+        .view-toggle .view-tab {
+            border: none; padding: 4px 12px; font-size: 12px;
+            background: transparent; color: var(--text-3);
+            border-radius: calc(var(--r) - 2px);
+        }
+        .view-toggle .view-tab:hover { background: transparent; color: var(--text-1); }
+        .view-toggle .view-tab.active {
+            background: var(--teal); color: #0c1417;
+            border-color: var(--teal); font-weight: 600;
+        }
+
+        /* ─── 库视图布局 ───────────────────────────────────────── */
+        /* 用 absolute fill 避免 flex-within-flex 的 sizing 边角问题。
+           .main-panel position:relative （见 .main-panel 那条规则下面） */
+        #library-panel {
+            position: absolute; inset: 0;
+            display: none;
+            flex-direction: column;
+            background: var(--bg);
+            z-index: 1;
+        }
+        #library-panel.active { display: flex; }
+        #library-scroll {
+            flex: 1; overflow-y: auto; background: var(--bg);
+            min-height: 0;
+        }
+        #library-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+            gap: 16px;
+            padding: 16px;
+        }
+        .lib-card {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--r);
+            overflow: hidden;
+            cursor: pointer;
+            transition: all 0.15s;
+            display: flex; flex-direction: column;
+        }
+        .lib-card:hover {
+            border-color: var(--teal);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+        .lib-poster {
+            width: 100%; aspect-ratio: 2/3;
+            background: #1a1f24 url('') center/cover no-repeat;
+            position: relative;
+        }
+        .lib-poster.no-poster {
+            display: flex; align-items: center; justify-content: center;
+            color: var(--text-3); font-size: 24px;
+        }
+        .lib-poster .lib-rating {
+            position: absolute; top: 6px; right: 6px;
+            background: rgba(0,0,0,0.75); padding: 2px 6px;
+            border-radius: 4px; font-size: 11px; color: #f5c518;
+            font-weight: 600;
+        }
+        .lib-poster .lib-type-badge {
+            position: absolute; top: 6px; left: 6px;
+            background: rgba(13,148,136,0.85); color: #fff;
+            padding: 2px 6px; border-radius: 4px; font-size: 10px;
+        }
+        .lib-meta {
+            padding: 8px 10px; min-height: 50px;
+        }
+        .lib-title {
+            font-size: 12px; font-weight: 600; color: var(--text-1);
+            line-height: 1.3;
+            display: -webkit-box; -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical; overflow: hidden;
+        }
+        .lib-sub {
+            font-size: 10px; color: var(--text-3); margin-top: 2px;
+        }
+
         /* ─── APP LAYOUT ─────────────────────────────────────────── */
         .app-body {
             display: flex;
@@ -261,6 +346,7 @@
             flex: 1; display: flex; flex-direction: column;
             overflow: hidden; border-right: 1px solid var(--border);
             min-width: 0;
+            position: relative;  /* #library-panel 用 absolute fill */
         }
 
         /* ─── BREADCRUMB ─────────────────────────────────────────── */
@@ -777,6 +863,20 @@
             <i class="bi bi-stars"></i>
             AI
         </button>
+        <button class="tb-btn" onclick="openScanModal()" title="后台扫描全库 + 自动识别元数据">
+            <i class="bi bi-radar"></i>
+            扫库
+        </button>
+        <div class="view-toggle" role="tablist" style="margin-left:8px;">
+            <button id="view-tab-files" class="tb-btn view-tab active" onclick="switchView('files')">
+                <i class="bi bi-folder2"></i>
+                文件
+            </button>
+            <button id="view-tab-library" class="tb-btn view-tab" onclick="switchView('library')">
+                <i class="bi bi-collection-play"></i>
+                库
+            </button>
+        </div>
     </div>
 </header>
 
@@ -859,6 +959,51 @@
             <div id="empty-state" class="empty-state text-center" style="display:none;">
                 <i class="bi bi-folder2" style="font-size:2.4rem;display:block;margin-bottom:12px;"></i>
                 <div>此目录为空</div>
+            </div>
+        </div>
+
+        <!-- ── 库视图（默认隐藏，view-toggle 切换，absolute fill main-panel） ── -->
+        <div id="library-panel">
+            <div class="bc-bar" style="gap:12px;">
+                <i class="bi bi-collection-play bc-icon"></i>
+                <div style="font-weight:600;">我的库</div>
+                <span id="library-stats-mini" class="text-secondary" style="font-size:12px;margin-left:auto;">—</span>
+            </div>
+
+            <div class="filter-bar">
+                <div class="search-wrap">
+                    <i class="bi bi-search"></i>
+                    <input type="text" id="library-search" placeholder="搜索标题（中/英/原名）…">
+                </div>
+                <select class="v-select" id="library-type">
+                    <option value="">全部类型</option>
+                    <option value="movie">电影</option>
+                    <option value="tv">剧集</option>
+                </select>
+                <select class="v-select" id="library-sort">
+                    <option value="added_desc">最近加入</option>
+                    <option value="year_desc">年份新→旧</option>
+                    <option value="year_asc">年份旧→新</option>
+                    <option value="vote_desc">评分高→低</option>
+                    <option value="title_asc">按标题</option>
+                </select>
+                <input type="number" id="library-year-from" placeholder="年份起" class="v-select" style="width:90px;">
+                <input type="number" id="library-year-to" placeholder="年份止" class="v-select" style="width:90px;">
+                <span id="library-count" class="text-secondary" style="font-size:12px;"></span>
+            </div>
+
+            <div id="library-scroll">
+                <div id="library-grid"></div>
+
+                <div id="library-empty" class="empty-state text-center" style="display:none;">
+                    <i class="bi bi-collection-play" style="font-size:2.4rem;display:block;margin-bottom:12px;"></i>
+                    <div>没有匹配的媒体</div>
+                    <div class="text-secondary mt-2" style="font-size:12px;">先用顶部 <strong>扫库</strong> 扫描，让元数据进入 cache</div>
+                </div>
+
+                <div id="library-loadmore" class="text-center py-3" style="display:none;">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="loadMoreLibrary()">加载更多</button>
+                </div>
             </div>
         </div>
 
@@ -1196,6 +1341,69 @@
 </div>
 
 
+<!-- 全库扫描 modal -->
+<div class="modal fade" id="scanModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-radar me-2" style="color:var(--teal);"></i>全库后台扫描
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <!-- Step 1: setup（未启动时显示） -->
+                <div id="scan-setup">
+                    <p class="small text-secondary">
+                        递归扫描 NAS 路径下所有视频文件，自动 TMDB 识别并写入 cache。
+                        已识别且 mtime 未变的文件自动跳过（增量扫描）。
+                    </p>
+                    <div class="mb-2">
+                        <label class="form-label small text-secondary">扫描根路径</label>
+                        <input type="text" id="scan-base-path" class="form-control" placeholder="/share/CACHEDEV2_DATA">
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small text-secondary">
+                            目录递归深度: <span id="scan-depth-label">5</span>
+                        </label>
+                        <input type="range" id="scan-depth" class="form-range" min="1" max="10" value="5">
+                    </div>
+                    <div id="scan-recent" class="small text-secondary mt-3"></div>
+                </div>
+
+                <!-- Step 2: 进度（启动后显示） -->
+                <div id="scan-progress" style="display:none;">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span id="scan-status-label" class="small"></span>
+                        <span id="scan-counts" class="small text-secondary"></span>
+                    </div>
+                    <div class="progress mb-2" style="height:10px;background:var(--surface-2);">
+                        <div id="scan-progress-bar" class="progress-bar bg-info" role="progressbar" style="width:0%;"></div>
+                    </div>
+                    <div class="d-flex justify-content-between small text-secondary mb-2">
+                        <span id="scan-progress-text">0 / 0</span>
+                        <span id="scan-eta"></span>
+                    </div>
+                    <div class="small text-secondary">
+                        当前: <code id="scan-current-path" style="font-size:11px;">—</code>
+                    </div>
+                    <div id="scan-result" class="mt-3" style="display:none;"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="scan-start-btn" class="btn btn-primary" onclick="startFullScan()">
+                    <i class="bi bi-play-fill me-1"></i>开始扫描
+                </button>
+                <button id="scan-abort-btn" class="btn btn-outline-warning" onclick="abortFullScan()" style="display:none;">
+                    <i class="bi bi-stop-fill me-1"></i>中止
+                </button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
 <!-- AI 配置 modal（TMDB metadata + DeepSeek LLM） -->
 <div class="modal fade" id="aiConfigModal" tabindex="-1">
     <div class="modal-dialog">
@@ -1263,6 +1471,6 @@
 
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=2026-05-13c"></script>
 </body>
 </html>
