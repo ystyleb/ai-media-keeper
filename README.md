@@ -1,29 +1,42 @@
 # AI Media Keeper
 
-AI 原生的影视资源管理器（v0）。当前是 Web 版的 NAS 文件管理器，专为 **QNAP / Synology / 任意 Linux NAS** 设计，针对 **PT 玩家做硬链接 + qBittorrent 种子的联动删除**优化。
+AI 原生的影视资源管理器（Phase 2）。Web 版的 NAS 媒体库，专为 **QNAP / Synology / 任意 Linux NAS** 设计，针对 **PT 玩家做硬链接 + qBittorrent 种子的联动删除 + AI 自动识别媒体元数据**优化。
 
-> 路线图：把 NFO 元数据 + 文件浏览 + 联删能力作为基础设施，让 AI agent 能"住进"NAS 自动整理影视资源（识别重复、清理低质 release、按观看进度归档等）。当前版本是地基，AI 编排能力将逐步加入。
-
-> 解决的核心痛点：用 SMB / Samba 删一部已经在 qBittorrent 做种的剧时，种子会变成 errored 状态扣保种率；手动到 qBit 里再删一遍又麻烦。这个工具一次操作把硬盘文件 + 关联硬链接 + qBit 种子（含下载文件）一起干掉，磁盘空间真正释放。
+> **解决的痛点**：用 SMB / Samba 删一部已经在 qBittorrent 做种的剧时，种子会变成 errored 状态扣保种率；手动到 qBit 里再删一遍又麻烦。这个工具一次操作把硬盘文件 + 关联硬链接 + qBit 种子（含下载文件）一起干掉，磁盘空间真正释放。同时 AI 自动识别电影/剧集 → 海报 + 简介 + 评分 + 演员，按 TMDB 浏览整个媒体库。
 
 ## 核心功能
 
-- 📁 **文件浏览**：通过 SSH 列目录、查看磁盘用量
+### 媒体管理
+- 🎬 **AI 自动识别**：guessit 解析文件名 → TMDB 搜索候选 → DeepSeek V4 grounded select（**契约 #3：LLM 永远只从真实候选里选 ID，不生成 ID**）
+- 📚 **库视图**：按 TMDB 浏览整个媒体库 — 海报墙 + 标题 + 年份 + 评分；按 movie/tv/年份/评分筛选 + 标题搜索（中英文 + 文件名任一命中）
+- 🤖 **背景全库扫描**：threading 后台 worker，可中断恢复（scan_runs / scan_items 状态机），SQLite 缓存命中跳过未变动文件
+- 📝 **NFO 写回**：识别后一键回写 Emby/Jellyfin/Kodi 兼容 `.nfo` 给本地媒体服务器读
+
+### 文件浏览 + 联删
+- 📁 通过 SSH 列目录、查看磁盘用量
 - 🔗 **硬链接探测**：自动识别硬链接 + 反查同 inode 的所有路径
-- 🎬 **NFO 元数据解析**：识别 Emby/Jellyfin 的 .nfo（XML）→ 卡片化展示剧名 / 季集 / 剧情 / 演员；自动从同目录 `tvshow.nfo` 拉**中文剧名**
-- 🗑️ **联删**：选中目录 / 文件 → 预览**真实占用** + **关联硬链接** + **qBit 种子** + **将执行的 SSH 命令** → 一键执行
-- 🔒 **路径沙箱**：所有操作限制在 `NAS_BASE_PATH` 下，shell 元字符拦截 + `shlex.quote` 转义
-- 🪪 **API Token 认证**：所有 API 都需 Bearer token
+- 🗑️ **联删**：选中目录 / 文件 → 预览**真实占用** + **关联硬链接** + **qBit 种子** + **将执行的 SSH 命令** → signed token 一键执行
+- 🔒 **契约 #1 Destructive Action**：所有 mutating 操作走统一 `/api/action/preview` + `/api/action/confirm`（HMAC 签名 token + inode-anchored execute 防 TOCTOU）
+
+### 文件名陷阱处理
+- 🎭 **特典/花絮检测**：`Extras-NN` / `Featurette` / `Interview` / `Trailer` / `Sample` / `Deleted Scenes` / `Making Of` / `Behind The Scenes` / `Bloopers` → `media_type='extra'`，**不调 TMDB**（省 API + 避免 mismatch），库视图默认隐藏，主片详情聚合显示
+- 💿 **多盘分段**：`BD1` / `BD2` / `Disc1` / `CD2` / `DVD2` → BD1 当主片走 TMDB，BD2+ 标 `media_type='part'`（老电影长片分盘），库视图隐藏，主片详情聚合显示
+- 📖 **续集 "Part N"**：guessit 把 `The.Godfather.Part.II` 解析成 `title="The Godfather", part=2`，自动把 `Part N` 合并回 title 让 TMDB 搜到正确续集
+- 🚫 **BDMV/STREAM/CERTIFICATE/AUXDATA** 路径排除：扫描跳过蓝光镜像内部的 `.m2ts` 噪音文件
+- 📅 **Year mismatch penalty**：候选 year 跟 query year 不一致时 `-0.2`，避免 title-exact 旧片胜过 title-substring 新片
+
+### 安全
+- 🪪 **API Token 鉴权**：所有路由都需 `Authorization: Bearer <token>`，首次启动自动生成到 `config/.api_token`（chmod 600）
+- 🛡️ **路径沙箱**：所有 SSH 操作限制在 `NAS_BASE_PATH` 下，shell 元字符拦截 + `shlex.quote` 转义 + `_reject_base_path` 防整盘 `rm -rf`
+- 🔏 **HMAC signed token**：destructive 操作的 confirm 必须带签名 + 一次性消费 + 三段状态机（pending→running→succeeded/failed）
 
 ## 工作原理
 
-1. Flask 后端通过 SSH（含 `ControlMaster` 连接复用）执行 NAS 上的命令
+1. Flask 后端通过 SSH（`ControlMaster` 连接复用）执行 NAS 上的命令
 2. 路径匹配做 `readlink -f` 规范化（处理 QNAP `/share/<name>` → `/share/CACHEDEV*_DATA/<name>` symlink）
 3. qBittorrent 通过 WebUI API 联动（登录复用 cookie）
-
-## 截图
-
-> （部署后自己截图替换这里）
+4. SQLite WAL mode 缓存识别结果 + scan_runs/scan_items 任务队列 + destructive_actions 状态表
+5. TMDB v3 + DeepSeek V4（OpenAI-compatible SDK）通过 BYOK 配置；密钥落盘 `config/.tmdb_key` / `config/.deepseek_key`（chmod 600，不进 env）
 
 ## 快速开始
 
@@ -32,7 +45,6 @@ AI 原生的影视资源管理器（v0）。当前是 Web 版的 NAS 文件管�
 确保你能从开发机 SSH 免密登录 NAS：
 
 ```bash
-# 把你的公钥推到 NAS（替换实际 IP / 端口 / 用户）
 ssh-copy-id -p 22 admin@192.168.1.100
 ssh -p 22 admin@192.168.1.100 'echo OK'   # 应输出 OK 不要密码
 ```
@@ -44,103 +56,157 @@ ssh -p 22 admin@192.168.1.100 'echo OK'   # 应输出 OK 不要密码
 ```bash
 git clone https://github.com/ystyleb/ai-media-keeper.git
 cd ai-media-keeper
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. 配置环境变量
-
-```bash
-cp .env.example .env
-# 编辑 .env 填入你的 NAS_HOST / NAS_PORT / NAS_BASE_PATH / NAS_API_TOKEN
-# 启动前 source 进当前 shell（注意：app.py 不会自动读 .env）
-set -a; source .env; set +a
-```
-
-或者直接 export：
-
-```bash
-export NAS_HOST=192.168.1.100
-export NAS_PORT=22
-export NAS_USER=admin
-export NAS_BASE_PATH=/share/CACHEDEV1_DATA
-export NAS_API_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-```
-
-### 4. 启动
+### 3. 启动（零环境变量）
 
 ```bash
 python3 app.py
-# 浏览器打开 http://127.0.0.1:8080
-# 第一次会弹窗输入 API Token（即上面的 NAS_API_TOKEN）
 ```
 
-启动时如果 `NAS_API_TOKEN` 没设，应用会**直接退出**并打印生成命令——这是有意的，避免随机 token 进日志。设好之后启动会显示：
+首次启动会**自动生成 API token**并打印到 stderr，类似：
+
 ```
-INFO:__main__:API Token loaded (64 chars).
+============================================================
+  Generated new API token → config/.api_token
+  Token (copy into UI on first visit):
+
+    9a3a864effbac0d7447496dd1dfadc7db760688a7fdb179454643d2e528bb779
+
+  Persists across restarts. Delete the file to rotate.
+============================================================
 ```
 
-## 配置参考
+浏览器打开 http://127.0.0.1:8080，弹窗粘贴 token 即可。
 
-| 环境变量 | 默认值 | 说明 |
+### 4. UI 里配置（不再用 env）
+
+顶部右上角设置图标：
+- **NAS**：host / port / user / base_path（落 `config/nas.json`）
+- **qBit**：URL / user / password（user url 落 `config/qbit.json`；password 落 `config/.qbit_pass` chmod 600）
+- **TMDB API key**：免费申请 [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api)（落 `config/.tmdb_key`）
+- **DeepSeek API key**：免费 [platform.deepseek.com](https://platform.deepseek.com)（落 `config/.deepseek_key`）
+
+DeepSeek 用于 grounded LLM 候选选择，没配也能跑（fallback 到 heuristic），但识别准确率会降。
+
+### 5. 扫库
+
+库视图 → 右上"开始扫描" → worker 后台跑（可中断、断点续）→ 完成后整个媒体库以海报墙呈现。
+
+## 配置文件
+
+所有配置都在 `./config/` 目录（已 `.gitignore`），不用环境变量：
+
+| 文件 | 内容 | 权限 |
 |---|---|---|
-| `NAS_HOST` | `192.168.1.100` | NAS 内网 IP |
-| `NAS_PORT` | `22` | SSH 端口 |
-| `NAS_USER` | `admin` | SSH 用户 |
-| `NAS_BASE_PATH` | `/share/CACHEDEV1_DATA` | 受控根路径，所有操作限制在此目录下 |
-| `NAS_API_TOKEN` | **必填** | API 鉴权 token（≥16 字符），未设则启动退出 |
-| `QBIT_URL` | `http://192.168.1.100:8080` | qBit WebUI 地址（UI 里也可改） |
-| `QBIT_USER` | `admin` | qBit 用户名 |
-| `QBIT_PASS` | 空 | qBit 密码（推荐通过此 env 持久化，否则需 UI 输入） |
+| `config/.api_token` | API 鉴权 token（首次启动自动生成 64 hex） | 600 |
+| `config/.signing_key` | 契约 #1 HMAC 签名密钥（首次启动自动生成） | 600 |
+| `config/.tmdb_key` | TMDB API key（UI 配置） | 600 |
+| `config/.deepseek_key` | DeepSeek API key（UI 配置） | 600 |
+| `config/.qbit_pass` | qBit 密码（UI 配置） | 600 |
+| `config/qbit.json` | qBit url + user（明文） | 644 |
+| `config/nas.json` | NAS host / port / user / base_path（明文） | 644 |
+| `config/actions.db` | SQLite：destructive_actions / media_files / scan_runs / scan_items | 644 |
 
-### 关于 qBit 密码的安全策略
+### Env override（可选，CI / 多机部署用）
 
-**密码永远不会写到磁盘上**。
-
-- `config/qbit.json` 只存 `url` 和 `user`
-- 密码来源优先级：UI 里主动设置（运行时） → 文件里残留的老明文（**自动迁移到内存 + 立即从文件擦除** + log warning） → `QBIT_PASS` env var
-- 想跨重启持久化密码 → 设 `QBIT_PASS` 环境变量；不设则每次重启需要 UI 重新输入
-
-这样设计的原因：加密落盘需要 key，key 也要存某处；key 泄露就跟明文一样。**最强保证是不存** —— 攻击者拿到 `config/qbit.json` 也只看到 url+user。`config/` 目录本身也已加 `.gitignore`。
+| 环境变量 | 作用 |
+|---|---|
+| `NAS_API_TOKEN` | 强制 token，覆盖 `config/.api_token` |
+| `NAS_ACTION_SIGNING_KEY` | 强制签名密钥（多 gunicorn worker 必须设此环境变量，否则启动拒绝） |
+| `NAS_HOST` / `NAS_PORT` / `NAS_USER` / `NAS_BASE_PATH` | 强制 NAS 连接，覆盖 `config/nas.json` |
+| `QBIT_URL` / `QBIT_USER` / `QBIT_PASS` | 强制 qBit 配置 |
 
 ## API
 
-所有路由都需要 `Authorization: Bearer <NAS_API_TOKEN>`：
+所有路由都需要 `Authorization: Bearer <API_TOKEN>`：
 
+### 文件 + 联删
 | 路由 | 说明 |
 |---|---|
 | `GET /api/disk` | NAS 磁盘用量 |
 | `GET /api/files?path=...` | 列目录 |
-| `GET /api/hardlinks?path=...` | 当前目录硬链接扫描（不递归） |
+| `GET /api/hardlinks?path=...` | 当前目录硬链接扫描 |
 | `GET /api/inode/<inode>` | 反查同 inode 的所有路径 |
 | `GET /api/file-content?path=...` | 读取小型文本文件（含 .nfo 结构化解析） |
-| `POST /api/delete` | 纯文件删除（不动种子） |
-| `POST /api/delete-preview` | 联删预览（硬链接 + qBit 种子 + 真实大小 + 命令清单） |
-| `POST /api/delete-complete` | 联删执行 |
-| `GET/POST /api/config/qbit[/test]` | qBit 配置管理 |
+| `POST /api/action/preview` | 契约 #1 统一 preview（kind=`delete`/`nfo_write`） |
+| `POST /api/action/confirm` | 契约 #1 统一 confirm（带 signed token） |
+| `POST /api/delete-preview` | 旧路径 alias 到 `/api/action/preview` (kind='delete')，保留兼容 |
+
+### 元数据 / AI 识别
+| 路由 | 说明 |
+|---|---|
+| `POST /api/metadata/identify` | 单文件按需 TMDB 识别 + LLM grounded select |
+| `POST /api/metadata/preview-nfo-write` | 预览 NFO 写回 → signed token → `/api/action/confirm` |
+
+### 全库扫描
+| 路由 | 说明 |
+|---|---|
+| `POST /api/scan/start` | 开启 base_path 全库扫描 worker（已在跑则拒绝） |
+| `GET /api/scan/status?id=<run_id>` | 当前扫描进度（files_total/done/skipped/failed） |
+| `POST /api/scan/abort?id=<run_id>` | 中断当前扫描（worker 下次 loop 检查时退出） |
+| `GET /api/scan/runs` | 最近 N 次扫描历史 |
+| `GET /api/scan/failed?id=<run_id>` | 某次扫描里 failed 的 item 列表 |
+
+### 库视图
+| 路由 | 说明 |
+|---|---|
+| `GET /api/library/items` | 库主查询（media_type / year_from / year_to / q / sort / limit / offset） |
+| `GET /api/library/stats` | 库总览（总数 / by_media_type / by_decade / top_genres / vote 直方图） |
+| `GET /api/library/companions-in-dir?path=<main_path>` | main feature 同目录的附属：parts（多盘）+ extras（花絮） |
+
+### 配置
+| 路由 | 说明 |
+|---|---|
+| `GET/POST /api/config/{nas,qbit,tmdb,deepseek}` | 配置管理（落 `config/`） |
+| `POST /api/config/{qbit,tmdb,deepseek}/test` | 连接性测试 |
 
 ## 安全注意
 
 - `validate_path` 强制路径在 `NAS_BASE_PATH` 之内 + 拒绝路径遍历 + 拦截 shell 元字符
 - `_reject_base_path` 防止 `rm -rf` 整个根目录
+- 契约 #1 HMAC token + 一次性消费防 replay attack
+- 契约 #2 inode-anchored execute（`find -inum N -delete` 而非裸 `rm <path>`）防 TOCTOU
 - 默认绑定 `127.0.0.1:8080`，**不要直接暴露到公网**
 - 如需远程访问：放到 Tailscale / WireGuard / 反向代理 + auth 后面，不要简单 NAT 转发
 
 ## 开发
 
 ```bash
-# 推荐用 venv
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python3 app.py
 ```
 
-生产部署用 `gunicorn` 而非 `flask run`：
+测试：
+
+```bash
+.venv/bin/python -m pytest tests/unit/ -q
+# 66 passed
+```
+
+生产部署用 `gunicorn`（**多 worker 必须设 `NAS_ACTION_SIGNING_KEY` env**，否则启动拒绝）：
 
 ```bash
 pip install gunicorn
+export NAS_ACTION_SIGNING_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
 gunicorn -b 127.0.0.1:8080 -w 2 app:app
 ```
+
+## 路线图
+
+| Phase | 状态 | 内容 |
+|---|---|---|
+| **Phase 1** | ✅ | 文件管理 + 联删 + 契约 #1 destructive action 协议 |
+| **Phase 2** | ✅ | TMDB 元数据 + DeepSeek grounded select + 全库扫描 + 库视图 + NFO 写回 |
+| Phase 3 | 🚧 | 重复 release 检测 + 观看进度（Plex / Jellyfin）+ Archive 操作 |
+| Phase 4 | 🗓️ | MCP server（Claude Desktop / Code 直接管 NAS）+ 开源 onboarding |
+
+详见 [ROADMAP.md](ROADMAP.md)。
 
 ## License
 
