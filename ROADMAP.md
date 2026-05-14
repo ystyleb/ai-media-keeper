@@ -5,6 +5,20 @@
 
 ---
 
+## 已完成（截至 2026-05-14）
+
+### Phase 3: 重复检测 + Emby 观看进度 + Archive stub
+
+- **3.0 Schema migration**：media_files 加 10 字段（4 parse quality + 3 score cache + 3 tmdb id splits）；新表 `watched_items` / `watch_sync_runs` / `dedup_weights` / `dedup_weights_meta` / `media_file_hdr_profiles`。Pattern B 通过 CHECK constraint 强制 watched_items 的 movie/tv 互斥 + mapping_status 强制 join key。Partial unique index 保证 watch_sync_runs 同 provider 单飞
+- **3.1 Quality 字段提取**：FilenameParse 加 codec/color_depth/hdr_profiles/container/audio_codec；HDR 长 token 优先 + word-boundary 避子串误中 + HDR10+ implies HDR10 自动去重；codec fallback 解决 guessit AV1 限制；upsert 同步写 split tmdb ids + HDR 子表 DELETE+INSERT 同事务
+- **3.2 Dedup engine**：`/api/dedup/groups` 按 deletable bytes 倒排；`compute_quality_score(row, hdr_list, weights)`；Pattern A truth source = `dedup_weights` 表 + `current_hash`；bulk fetch 4-6 SQL 不随 group 数 scale；`update_weights` 拒绝 NaN/Inf/negative；`refresh_all_quality_scores` 500 行一 batch commit
+- **3.3 Strict snapshot delete**：`/api/action/preview` `kind=delete` 必传 `source`；`source='dedup'` 必走 `snapshot_mode='strict'`；strict 模式 candidate 必含 `expected_inode/size/mtime`；inode/size/mtime mismatch → 409 + mismatches[]（不产 token）；前端"重复"tab + 选中后双段 confirm
+- **3.4 Emby provider + watch_sync**：`X-Emby-Token` REST；Episode `ProviderIds.Tmdb` 是 episode id 不是 series（map 时通过 SeriesId 批查 series tmdb）；mapping_status `mapped`/`fallback_se`/`unmapped`；`claim_sync_run` 用 `BEGIN IMMEDIATE` + partial unique index 单飞；reaper 标 stuck runs 为 aborted
+- **3.5 Watched-stale + archive stub**：`/api/library/watched-stale` 用 3 分支 UNION（movie / tv-episode_id / tv-series-se-fallback），每支双侧 NOT NULL + media_type 等值；archive executor stub raise `ArchiveDisabledError` → `destructive_actions.status='failed' + error='ArchiveDisabledError: archive_kind_disabled_in_phase3'`，preview/confirm 仍走完整契约 #1
+- **284 unit tests**（189 → 284 = +95 新）+ 多轮 code-reviewer review 收敛
+
+---
+
 ## 已完成（截至 2026-05-12）
 
 ### Phase 1: Destructive Action 契约（基建）
@@ -59,19 +73,11 @@ UI 顶部显示 TMDB / DeepSeek 当前可用性（OK / auth_failed / not_configu
 
 **为什么这个时机做**：cache 已有，scan 只是"批量+持久化+进度追踪"的组合。没有这个，用户得逐目录手动按"批量识别"。
 
-### 4. 重复 release 检测（M-L，依赖：#3 全库扫描）
+### 4. ~~重复 release 检测~~ ✅ Phase 3.2/3.3 已完成
 
-Phase 3 杀手锏。SQL `GROUP BY tmdb_id, season_number, episode_number HAVING COUNT(*) > 1` 找出重复，按 quality_score（resolution / HDR / source / codec / release_group）推荐保留哪份。删除走契约 #1（preview → snapshot 重核 → confirm）。
+### 5. ~~观看进度集成~~ ✅ Phase 3.4 已完成（Emby；Plex/Jellyfin/Trakt 通过 WatchSourceProvider ABC 后续可加）
 
-**为什么这是杀手锏**：tinyMediaManager / Sonarr 都不做"找重复"。这是 PT 玩家最痛的点之一（误下不同压制版本占满硬盘）。
-
-### 5. 观看进度集成（M，依赖：#3）
-
-Plex / Jellyfin / Trakt 各一个 WatchSourceProvider，拉"已看完"列表入库。UI 新面板"已看完 + N 天未动 = 归档候选"。
-
-### 6. Archive 操作（M，依赖：#5）
-
-冷存储归档：copy → verify(hash) → mv → unlink 源文件。走契约 #1，kind=`archive`，三段状态机 + 失败恢复（`partial_state` 字段 + manual recovery 面板）。
+### 6. ~~Archive 操作~~ ⏸️ Phase 3.5 仅 stub（executor 不接 SSH 真执行）；用户选定"看完就删"派，schema 占位保留以备后续
 
 ### 7. MCP server（M，依赖：#1-#6 业务能力齐了）
 

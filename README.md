@@ -12,6 +12,13 @@ AI 原生的影视资源管理器（Phase 2）。Web 版的 NAS 媒体库，专�
 - 🤖 **背景全库扫描**：threading 后台 worker，可中断恢复（scan_runs / scan_items 状态机），SQLite 缓存命中跳过未变动文件
 - 📝 **NFO 写回**：识别后一键回写 Emby/Jellyfin/Kodi 兼容 `.nfo` 给本地媒体服务器读
 
+### 重复 release 检测 + 清理（Phase 3）
+- 🔍 **重复检测**：`GROUP BY tmdb_id, season, episode` 找出多份压制 → 按 quality_score（分辨率/HDR/source/codec/release_group 权重）推荐保留哪份
+- 🎯 **Quality scoring**：硬编码默认权重，UI 可调（`POST /api/dedup/weights` 写回 `dedup_weights` 表）；NaN/inf/negative 拒绝
+- 📺 **Emby 观看进度**：拉 IsPlayed 列表（Episode `ProviderIds.Tmdb` 是 episode id 不是 series id，自动通过 SeriesId 反查 series tmdb）；映射置信度 `mapped`/`fallback_se`/`unmapped`
+- 🗂️ **已看完归档候选**：已看 + 180+ 天没动的 → 列表展示供手动清理
+- 🔒 **Strict 删除契约**：dedup 来源删除强制 `snapshot_mode=strict`，每个 candidate 必须含 `expected_inode/size/mtime`；服务端 SSH 重读 + diff → 409 blocked 若 mismatch
+
 ### 文件浏览 + 联删
 - 📁 通过 SSH 列目录、查看磁盘用量
 - 🔗 **硬链接探测**：自动识别硬链接 + 反查同 inode 的所有路径
@@ -157,12 +164,30 @@ DeepSeek 用于 grounded LLM 候选选择，没配也能跑（fallback 到 heuri
 | `GET /api/library/items` | 库主查询（media_type / year_from / year_to / q / sort / limit / offset） |
 | `GET /api/library/stats` | 库总览（总数 / by_media_type / by_decade / top_genres / vote 直方图） |
 | `GET /api/library/companions-in-dir?path=<main_path>` | main feature 同目录的附属：parts（多盘）+ extras（花絮） |
+| `GET /api/library/watched-stale?days=N&limit&offset` | 已看完 + N 天没动的归档候选（3 分支 UNION：movie / tv-episode_id / tv-series+s+e） |
+
+### 重复检测（Phase 3）
+| 路由 | 说明 |
+|---|---|
+| `GET /api/dedup/groups?media_type&watched_only&limit&offset` | 重复 release 组（按 deletable bytes 倒序） |
+| `GET /api/dedup/weights` | 当前权重 + canonical hash |
+| `POST /api/dedup/weights` | 原子更新权重（拒绝 NaN/inf/negative）+ 重算 hash |
+| `POST /api/dedup/refresh` | 后台批量 recompute media_files.quality_score 缓存（500 行一 batch） |
+
+### 观看进度（Phase 3）
+| 路由 | 说明 |
+|---|---|
+| `GET/POST /api/config/emby` | url + user_id + api_key（key 落 `config/.emby_key` chmod 600） |
+| `POST /api/config/emby/test` | 临时验证连接 |
+| `POST /api/watch/sync` | 启动后台同步（partial unique index 保证同 provider 单飞） |
+| `GET /api/watch/sync/status?id=<run_id>` | 同步进度 + counters |
+| `GET /api/watch/status` | provider 状态（ok/not_configured/auth_failed/...) |
 
 ### 配置
 | 路由 | 说明 |
 |---|---|
-| `GET/POST /api/config/{nas,qbit,tmdb,deepseek}` | 配置管理（落 `config/`） |
-| `POST /api/config/{qbit,tmdb,deepseek}/test` | 连接性测试 |
+| `GET/POST /api/config/{nas,qbit,tmdb,deepseek,emby}` | 配置管理（落 `config/`） |
+| `POST /api/config/{qbit,tmdb,deepseek,emby}/test` | 连接性测试 |
 
 ## 安全注意
 
@@ -186,7 +211,7 @@ python3 app.py
 
 ```bash
 .venv/bin/python -m pytest tests/unit/ -q
-# 66 passed
+# 284 passed (Phase 3 complete)
 ```
 
 生产部署用 `gunicorn`（**多 worker 必须设 `NAS_ACTION_SIGNING_KEY` env**，否则启动拒绝）：
@@ -203,7 +228,7 @@ gunicorn -b 127.0.0.1:8080 -w 2 app:app
 |---|---|---|
 | **Phase 1** | ✅ | 文件管理 + 联删 + 契约 #1 destructive action 协议 |
 | **Phase 2** | ✅ | TMDB 元数据 + DeepSeek grounded select + 全库扫描 + 库视图 + NFO 写回 |
-| Phase 3 | 🚧 | 重复 release 检测 + 观看进度（Plex / Jellyfin）+ Archive 操作 |
+| **Phase 3** | ✅ | 重复 release 检测（quality scoring）+ Emby 观看进度 + 已看完归档候选；archive executor 仅 stub（不接 SSH 真执行） |
 | Phase 4 | 🗓️ | MCP server（Claude Desktop / Code 直接管 NAS）+ 开源 onboarding |
 
 详见 [ROADMAP.md](ROADMAP.md)。
