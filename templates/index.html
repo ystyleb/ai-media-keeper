@@ -287,6 +287,53 @@
             margin-bottom: 12px;
             background: var(--surface);
         }
+        .dedup-series {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin-bottom: 12px;
+            background: var(--surface);
+            overflow: hidden;
+        }
+        .dedup-series-header {
+            padding: 12px;
+            cursor: pointer;
+            user-select: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .dedup-series-header:hover { background: var(--bg); }
+        .dedup-series-header .caret {
+            display: inline-block;
+            width: 14px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            transition: transform 0.15s;
+        }
+        .dedup-series-header.open .caret { transform: rotate(90deg); }
+        .dedup-series-header .series-title { font-weight: 600; font-size: 15px; }
+        .dedup-series-header .series-meta {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-left: auto;
+        }
+        .dedup-series-body {
+            padding: 0 12px 12px 12px;
+            border-top: 1px dashed var(--border);
+            display: none;
+        }
+        .dedup-series-body.open { display: block; }
+        /* Inside series body, nested dedup-group needs no extra border */
+        .dedup-series-body .dedup-group {
+            border: none;
+            border-top: 1px solid var(--border);
+            border-radius: 0;
+            padding: 8px 0;
+            margin: 0;
+            background: transparent;
+        }
+        .dedup-series-body .dedup-group:first-child { border-top: none; padding-top: 12px; }
+        .dedup-series-body .dedup-group h4 { font-size: 13px; color: var(--text-secondary); }
         .dedup-group h4 {
             margin: 0 0 8px 0;
             font-size: 15px;
@@ -1672,6 +1719,6 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script src="/static/app.js?v=2026-05-14a"></script>
+<script src="/static/app.js?v=2026-05-14c"></script>
 </body>
 </html>

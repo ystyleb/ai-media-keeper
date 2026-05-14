@@ -2934,7 +2934,8 @@ async function loadDedupGroups() {
     const watchedOnly = document.getElementById("dedup-watched-only").checked;
     if (type) params.set("media_type", type);
     if (watchedOnly) params.set("watched_only", "1");
-    params.set("limit", "50");
+    // 大 limit 一次性拉完，前端按剧聚合（剧集多时 episode 级 group 容易刷屏）
+    params.set("limit", "500");
     params.set("offset", "0");
 
     const container = document.getElementById("dedup-groups");
@@ -2950,19 +2951,110 @@ async function loadDedupGroups() {
             return;
         }
         dedupState.groups = data.groups;
+        // 前端聚合：tv group 按 series_id 折叠成剧级卡片；movie 保持单卡片
+        const items = _aggregateBySeries(data.groups);
+        const movieCount = items.filter(it => it.type === "movie").length;
+        const seriesCount = items.filter(it => it.type === "series").length;
+        const tvEpisodes = data.groups.length - movieCount;
+        // 用前端实际可见的数字，不用后端 total_groups（含被 inode 合并消除的"假重复"）
+        // 真实可删字节按渲染出的 items 重算，跟卡片 sum 一致
+        const visibleDeletable = items.reduce((sum, it) => {
+            return sum + (it.type === "series" ? it.deletable_size : (it.group.deletable_size_bytes || 0));
+        }, 0);
+        const parts = [];
+        if (movieCount) parts.push(`${movieCount} 部电影`);
+        if (seriesCount) parts.push(`${seriesCount} 个剧 (${tvEpisodes} 集)`);
         document.getElementById("dedup-stats").textContent =
-            `${data.total_groups} 组重复，可释放约 ${humanSize(data.total_deletable_bytes || 0)}`;
+            `${items.length} 组重复：${parts.join(" + ") || "无"}，可释放约 ${humanSize(visibleDeletable)}`;
         document.getElementById("dedup-empty").style.display =
-            (data.groups.length === 0) ? "block" : "none";
+            (items.length === 0) ? "block" : "none";
         container.innerHTML = "";
-        data.groups.forEach(g => container.appendChild(_renderDedupGroup(g)));
+
+        items.forEach(item => {
+            if (item.type === "series") {
+                container.appendChild(_renderSeriesCard(item));
+            } else {
+                container.appendChild(_renderDedupGroup(item.group, { autoSelect: true }));
+            }
+        });
     } catch (e) {
         console.error("[loadDedupGroups] failed:", e);
         container.innerHTML = '<div class="text-danger py-3 text-center">加载异常</div>';
     }
 }
 
-function _renderDedupGroup(group) {
+function _aggregateBySeries(groups) {
+    // 输出 [{type:'movie', group}, {type:'series', tmdb_series_id, title, episodes:[...]}]
+    const out = [];
+    const seriesMap = new Map();
+    for (const g of groups) {
+        if (g.media_type === "movie") {
+            out.push({ type: "movie", group: g });
+            continue;
+        }
+        const sid = g.tmdb_series_id || "(unknown)";
+        let entry = seriesMap.get(sid);
+        if (!entry) {
+            entry = {
+                type: "series",
+                tmdb_series_id: sid,
+                title: g.title || sid,
+                year: g.year,
+                poster_url: g.poster_url,
+                episodes: [],
+                total_size: 0,
+                deletable_size: 0,
+            };
+            seriesMap.set(sid, entry);
+            out.push(entry);
+        }
+        entry.episodes.push(g);
+        entry.total_size += (g.total_size_bytes || 0);
+        entry.deletable_size += (g.deletable_size_bytes || 0);
+    }
+    // 同剧的集按 season/episode 排序
+    for (const e of seriesMap.values()) {
+        e.episodes.sort((a, b) => {
+            const sa = a.season_number || 0, sb = b.season_number || 0;
+            if (sa !== sb) return sa - sb;
+            return (a.episode_number || 0) - (b.episode_number || 0);
+        });
+    }
+    // 整体按 deletable_size 降序（剧 + 电影一起，ROI 高的在上）
+    out.sort((a, b) => {
+        const aBytes = a.type === "series" ? a.deletable_size : (a.group.deletable_size_bytes || 0);
+        const bBytes = b.type === "series" ? b.deletable_size : (b.group.deletable_size_bytes || 0);
+        return bBytes - aBytes;
+    });
+    return out;
+}
+
+function _renderSeriesCard(series) {
+    const wrap = createElement("div", { className: "dedup-series" });
+    const header = createElement("div", { className: "dedup-series-header" });
+    const yearSuffix = series.year ? ` (${series.year})` : "";
+    header.innerHTML = `
+        <span class="caret">▶</span>
+        <span class="series-title">${series.title}${yearSuffix}</span>
+        <span class="series-meta">${series.episodes.length} 集有重复 · 总 ${humanSize(series.total_size)} · 可删 ${humanSize(series.deletable_size)}</span>
+    `;
+    const body = createElement("div", { className: "dedup-series-body" });
+    // 默认折叠：autoSelect=false 让候选不自动加入 selectedFileIds
+    // 用户主动展开后再勾选，避免盲删一整个未审阅的剧
+    series.episodes.forEach(g => {
+        body.appendChild(_renderDedupGroup(g, { autoSelect: false }));
+    });
+    header.addEventListener("click", () => {
+        const isOpen = body.classList.toggle("open");
+        header.classList.toggle("open", isOpen);
+    });
+    wrap.appendChild(header);
+    wrap.appendChild(body);
+    return wrap;
+}
+
+function _renderDedupGroup(group, opts = {}) {
+    const autoSelect = opts.autoSelect !== false;   // default true
     const wrap = createElement("div", { className: "dedup-group" });
     const title = group.title || group.tmdb_movie_id || group.tmdb_series_id || "(未识别)";
     const heading = (group.media_type === "tv")
@@ -2978,12 +3070,12 @@ function _renderDedupGroup(group) {
         const row = createElement("div", {
             className: "dedup-candidate" + (c.keep_recommended ? " keep-recommended" : ""),
         });
+        const shouldAutoCheck = autoSelect && !c.keep_recommended;
         const chk = createElement("input", {
             type: "checkbox",
-            // 默认勾选非推荐保留的（用户最常想删的）
-            checked: !c.keep_recommended,
+            checked: shouldAutoCheck,
         });
-        if (!c.keep_recommended) {
+        if (shouldAutoCheck) {
             dedupState.selectedFileIds.add(c.media_file_id);
         }
         chk.dataset.fileId = String(c.media_file_id);
