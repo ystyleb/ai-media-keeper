@@ -2812,6 +2812,7 @@ def _cached_to_library_dict(c) -> dict:
     return {
         "path": c.path,
         "tmdb_id": c.tmdb_id,
+        "tmdb_series_id": c.tmdb_series_id,    # for frontend series aggregation
         "imdb_id": c.imdb_id,
         "media_type": c.media_type,
         "title": c.title,
@@ -2827,6 +2828,7 @@ def _cached_to_library_dict(c) -> dict:
         "cast": c.cast[:6],
         "runtime_minutes": c.runtime_minutes,
         "first_seen_at": c.first_seen_at,
+        "size_bytes": c.size_bytes,            # for series card total size
         "resolution": c.parse_resolution,
         "source": c.parse_source,
     }

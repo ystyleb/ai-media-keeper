@@ -31,6 +31,7 @@ class CachedMetadata:
     mtime: int | None
     # 媒体字段
     tmdb_id: str | None
+    tmdb_series_id: str | None      # Phase 3 split id; only tv rows have this
     imdb_id: str | None
     media_type: str | None
     title: str | None
@@ -334,6 +335,7 @@ def _row_to_cached(row: sqlite3.Row) -> CachedMetadata:
         size_bytes=row["size_bytes"],
         mtime=row["mtime"],
         tmdb_id=row["tmdb_id"],
+        tmdb_series_id=row["tmdb_series_id"],
         imdb_id=row["imdb_id"],
         media_type=row["media_type"],
         title=row["title"],

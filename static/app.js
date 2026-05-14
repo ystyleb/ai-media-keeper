@@ -2657,7 +2657,11 @@ async function testNASConnection() {
 let currentView = "files";              // 'files' | 'library'
 let libraryOffset = 0;
 let libraryHasMore = false;
-const LIBRARY_PAGE_SIZE = 60;
+// API 上限 500。前端按 tmdb_series_id 聚合后一页只会产出少量剧卡片，所以拉大一点
+// 让 reset 时一次能填满网格。
+const LIBRARY_PAGE_SIZE = 500;
+// reset 时连续自动加载，避免聚合后页面太空。库总 ~1.8k items → 最多 4 次 API call
+const LIBRARY_RESET_AUTO_FETCH_CAP = 8;
 
 function switchView(view) {
     console.log("[switchView] called with:", view);
@@ -2732,19 +2736,38 @@ async function loadLibrary(reset = false) {
         libraryOffset = 0;
         document.getElementById("library-grid").innerHTML = "";
     }
-    try {
+    const loadmoreBtn = document.getElementById("library-loadmore");
+
+    // 单次 fetch helper（保持 append 模式简单）
+    const fetchOnce = async (firstBatch) => {
         const res = await apiFetch(`${API_BASE}/api/library/items?${_libraryQueryParams()}`);
         const data = await res.json();
         if (!res.ok) {
             console.warn("library load failed", data);
-            return;
+            return null;
         }
-        renderLibraryGrid(data.items, !reset);
+        // 渐进 render：!reset 或 reset 后的后续批次都用 append=true
+        renderLibraryGrid(data.items, !firstBatch);
         libraryHasMore = data.has_more;
         libraryOffset += data.items.length;
         document.getElementById("library-count").textContent = `${data.total} 个媒体`;
         document.getElementById("library-empty").style.display = (data.total === 0) ? "block" : "none";
-        document.getElementById("library-loadmore").style.display = libraryHasMore ? "block" : "none";
+        return data;
+    };
+
+    try {
+        const first = await fetchOnce(reset);
+        if (!first) return;
+        // reset 模式下自动连续拉到 has_more=false（库 1.8k items / 每页 500 → 最多 4 次）
+        // 防止前端聚合后页面太空（同剧 N 集合并成 1 张卡，60 items 一页可能只产 5 张卡）
+        if (reset) {
+            let batch = 1;
+            while (libraryHasMore && batch < LIBRARY_RESET_AUTO_FETCH_CAP) {
+                await fetchOnce(false);    // append 模式追加
+                batch++;
+            }
+        }
+        loadmoreBtn.style.display = libraryHasMore ? "block" : "none";
     } catch (err) {
         console.error("library load error", err);
     }
@@ -2769,42 +2792,147 @@ async function loadLibraryStats() {
     }
 }
 
+// 全局库视图聚合状态：tmdb_series_id → {card DOM, items[], totalSize, count badge DOM}
+// reset 模式（filter 改变 / 切换 tab）会清空；append 模式（加载更多）复用现有 series card
+const libraryGridState = { seriesCards: {} };
+
 function renderLibraryGrid(items, append = false) {
     const grid = document.getElementById("library-grid");
-    if (!append) grid.innerHTML = "";
+    if (!append) {
+        grid.innerHTML = "";
+        libraryGridState.seriesCards = {};
+    }
     items.forEach(it => {
-        const card = createElement("div", { className: "lib-card" });
+        // TV 且有 series_id → 聚合到剧卡片（一卡 N 集），不再每集独立 card
+        if (it.media_type === "tv" && it.tmdb_series_id) {
+            _appendToSeriesCard(grid, it);
+        } else {
+            grid.appendChild(_createLibraryItemCard(it));
+        }
+    });
+}
+
+function _appendToSeriesCard(grid, item) {
+    const sid = item.tmdb_series_id;
+    let entry = libraryGridState.seriesCards[sid];
+    if (!entry) {
+        const card = createElement("div", { className: "lib-card lib-series-card" });
         const poster = createElement("div", { className: "lib-poster" });
-        if (it.poster_url) {
-            poster.style.backgroundImage = `url('${it.poster_url}')`;
+        if (item.poster_url) {
+            poster.style.backgroundImage = `url('${item.poster_url}')`;
         } else {
             poster.classList.add("no-poster");
-            poster.innerHTML = '<i class="bi bi-film"></i>';
+            poster.innerHTML = '<i class="bi bi-collection-play"></i>';
         }
-        if (it.media_type) {
-            const badge = createElement("div", { className: "lib-type-badge", textContent: it.media_type === "tv" ? "TV" : "电影" });
-            poster.appendChild(badge);
+        poster.appendChild(createElement("div", { className: "lib-type-badge", textContent: "TV" }));
+        if (item.vote_average) {
+            poster.appendChild(createElement("div", { className: "lib-rating", textContent: "⭐ " + item.vote_average.toFixed(1) }));
         }
-        if (it.vote_average) {
-            const rating = createElement("div", { className: "lib-rating", textContent: "⭐ " + it.vote_average.toFixed(1) });
-            poster.appendChild(rating);
-        }
+        const epCountBadge = createElement("div", { className: "lib-series-count", textContent: "1 集" });
+        poster.appendChild(epCountBadge);
         card.appendChild(poster);
 
         const meta = createElement("div", { className: "lib-meta" });
-        const titleText = it.title || "未命名";
-        const epSuffix = (it.season && it.episode)
-            ? ` S${String(it.season).padStart(2, "0")}E${String(it.episode).padStart(2, "0")}` : "";
-        meta.appendChild(createElement("div", { className: "lib-title", textContent: titleText + epSuffix }));
-        const subParts = [];
-        if (it.year) subParts.push(it.year);
-        if (it.resolution) subParts.push(it.resolution);
-        meta.appendChild(createElement("div", { className: "lib-sub", textContent: subParts.join(" · ") }));
+        meta.appendChild(createElement("div", { className: "lib-title", textContent: item.title || "未命名" }));
+        const sizeEl = createElement("div", { className: "lib-sub", textContent: "" });
+        meta.appendChild(sizeEl);
         card.appendChild(meta);
 
-        card.addEventListener("click", () => showLibraryItemDetail(it));
+        entry = { card, items: [], totalSize: 0, epCountBadge, sizeEl, repItem: item };
+        libraryGridState.seriesCards[sid] = entry;
+        card.addEventListener("click", () => _showSeriesEpisodes(entry));
         grid.appendChild(card);
+    }
+    entry.items.push(item);
+    entry.totalSize += (item.size_bytes || 0);
+    entry.epCountBadge.textContent = `${entry.items.length} 集`;
+    const yearStr = entry.repItem.year ? `${entry.repItem.year} · ` : "";
+    entry.sizeEl.textContent = `${yearStr}${humanSize(entry.totalSize)}`;
+}
+
+function _createLibraryItemCard(it) {
+    const card = createElement("div", { className: "lib-card" });
+    const poster = createElement("div", { className: "lib-poster" });
+    if (it.poster_url) {
+        poster.style.backgroundImage = `url('${it.poster_url}')`;
+    } else {
+        poster.classList.add("no-poster");
+        poster.innerHTML = '<i class="bi bi-film"></i>';
+    }
+    if (it.media_type) {
+        poster.appendChild(createElement("div", {
+            className: "lib-type-badge",
+            textContent: it.media_type === "tv" ? "TV" : "电影",
+        }));
+    }
+    if (it.vote_average) {
+        poster.appendChild(createElement("div", {
+            className: "lib-rating",
+            textContent: "⭐ " + it.vote_average.toFixed(1),
+        }));
+    }
+    card.appendChild(poster);
+
+    const meta = createElement("div", { className: "lib-meta" });
+    const titleText = it.title || "未命名";
+    const epSuffix = (it.season && it.episode)
+        ? ` S${String(it.season).padStart(2, "0")}E${String(it.episode).padStart(2, "0")}` : "";
+    meta.appendChild(createElement("div", { className: "lib-title", textContent: titleText + epSuffix }));
+    const subParts = [];
+    if (it.year) subParts.push(it.year);
+    if (it.resolution) subParts.push(it.resolution);
+    meta.appendChild(createElement("div", { className: "lib-sub", textContent: subParts.join(" · ") }));
+    card.appendChild(meta);
+
+    card.addEventListener("click", () => showLibraryItemDetail(it));
+    return card;
+}
+
+function _showSeriesEpisodes(entry) {
+    // 显示剧的集列表 — 复用 file-detail sidebar（右侧详情面板）
+    const panel = document.getElementById("file-detail");
+    const content = document.getElementById("file-detail-content");
+    panel.style.display = "block";
+    content.innerHTML = "";
+
+    const rep = entry.repItem;
+    content.appendChild(createElement("h6", { textContent: rep.title || "未命名" }));
+    if (rep.original_title && rep.original_title !== rep.title) {
+        content.appendChild(createElement("small", {
+            className: "text-secondary d-block mb-2", textContent: rep.original_title,
+        }));
+    }
+    content.appendChild(createElement("div", {
+        className: "small text-secondary mb-2",
+        textContent: `${entry.items.length} 集 · 总占用 ${humanSize(entry.totalSize)}`,
+    }));
+
+    // 按 S/E 排序展示
+    const sorted = [...entry.items].sort((a, b) => {
+        const sa = a.season || 0, sb = b.season || 0;
+        if (sa !== sb) return sa - sb;
+        return (a.episode || 0) - (b.episode || 0);
     });
+
+    const list = createElement("div", { className: "list-group list-group-flush" });
+    sorted.forEach(it => {
+        const seCode = (it.season && it.episode)
+            ? `S${String(it.season).padStart(2, "0")}E${String(it.episode).padStart(2, "0")}`
+            : "?";
+        const row = createElement("button", {
+            className: "list-group-item list-group-item-action d-flex justify-content-between align-items-center",
+        });
+        row.style.background = "transparent";
+        row.style.color = "var(--text)";
+        row.style.borderColor = "var(--border)";
+        row.innerHTML = `
+            <span><strong>${seCode}</strong>${it.episode_title ? " · " + it.episode_title : ""}</span>
+            <small class="text-secondary">${humanSize(it.size_bytes || 0)}${it.resolution ? " · " + it.resolution : ""}</small>
+        `;
+        row.addEventListener("click", () => showLibraryItemDetail(it));
+        list.appendChild(row);
+    });
+    content.appendChild(list);
 }
 
 function showLibraryItemDetail(item) {
