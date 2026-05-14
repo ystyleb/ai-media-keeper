@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import requests
 from flask import Flask, render_template, jsonify, request, abort, g
 
+from services import dedup
 from services import destructive_action
 from services import identify as identify_svc
 from services import llm
@@ -2665,6 +2666,106 @@ def library_companions_in_dir():
     })
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase 3.2: Dedup engine — 重复 release 检测
+# ─────────────────────────────────────────────────────────────
+
+
+@app.route("/api/dedup/groups", methods=["GET"])
+@require_token
+def dedup_groups():
+    """重复 release 组列表（按 ROI 降序）。
+
+    query params:
+      media_type:    'movie' | 'tv'      只看某类（None=两类都返）
+      watched_only:  '1' / 'true'        仅展示已看完组（用户决定先清这些）
+      limit:         default 50, max 200
+      offset:        default 0
+    """
+    args = request.args
+    media_type = args.get("media_type") or None
+    if media_type not in (None, "movie", "tv"):
+        return jsonify({"error": "media_type must be 'movie' or 'tv'"}), 400
+    watched_only = args.get("watched_only", "").strip().lower() in ("1", "true", "yes")
+    limit = max(1, min(200, args.get("limit", 50, type=int)))
+    offset = max(0, args.get("offset", 0, type=int))
+
+    groups, total = dedup.find_duplicate_groups(
+        get_db(),
+        media_type=media_type,
+        watched_only=watched_only,
+        limit=limit,
+        offset=offset,
+    )
+    total_deletable = sum(g.deletable_size_bytes for g in groups)
+    resp = jsonify({
+        "groups": [dedup.group_to_dict(g) for g in groups],
+        "total_groups": total,
+        "total_deletable_bytes": total_deletable,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(groups) < total,
+    })
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/dedup/weights", methods=["GET"])
+@require_token
+def dedup_weights_get():
+    rows = get_db().execute(
+        "SELECT key, weight, updated_at FROM dedup_weights ORDER BY key"
+    ).fetchall()
+    current_hash = dedup.get_current_hash(get_db())
+    return jsonify({
+        "weights": [dict(r) for r in rows],
+        "current_hash": current_hash,
+    })
+
+
+@app.route("/api/dedup/weights", methods=["POST"])
+@require_token
+def dedup_weights_post():
+    """Update 一个或多个 weight。 body: {weights: {key: number, ...}}.
+
+    返 {new_hash, rows_changed}; 调用方可立即触发 /api/dedup/refresh
+    在后台批量回写 quality_score 缓存。
+    """
+    data = request.json or {}
+    updates = data.get("weights") or {}
+    if not isinstance(updates, dict) or not updates:
+        return jsonify({"error": "body must contain {weights: {key: number}}"}), 400
+    # 验证：key 合法 + value 数字（NaN/inf/negative 在 dedup.update_weights 内部拒绝）
+    for k, v in updates.items():
+        if not isinstance(k, str) or not k.strip():
+            return jsonify({"error": f"invalid weight key: {k!r}"}), 400
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            return jsonify({"error": f"weight value must be number: {k}={v!r}"}), 400
+    try:
+        new_hash, changed = dedup.update_weights(get_db(), updates)
+    except dedup.InvalidWeightError as e:
+        # NaN / Inf / negative — 400 客户端错误（非服务端 bug）
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+    return jsonify({"new_hash": new_hash, "rows_changed": changed})
+
+
+@app.route("/api/dedup/refresh", methods=["POST"])
+@require_token
+def dedup_refresh():
+    """后台批量 recompute quality_score 缓存。
+
+    不强制——live queries 始终按当前 hash recompute。这只是把 stale 缓存写回
+    避免下次查询时多算一次。
+    """
+    try:
+        updated = dedup.refresh_all_quality_scores(get_db())
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+    return jsonify({"updated": updated})
 
 
 @app.route("/api/action/recovery", methods=["GET"])

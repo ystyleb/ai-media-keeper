@@ -53,6 +53,8 @@ DEFAULT_DEDUP_WEIGHTS: dict[str, float] = {
     "source.WEB-DL": 10,
     "source.WEBRip": 6,
     "source.HDTV": 3,
+    "source.DVDRip": 1,           # Phase 3.2 r2: dedup._normalize_source_key 映射 DVD/DVDRip 到此 key
+
     "codec.AV1": 18,
     "codec.H.265": 15,
     "codec.H.264": 5,
