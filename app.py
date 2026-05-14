@@ -2176,6 +2176,100 @@ def test_tmdb_config():
     return jsonify(result)
 
 
+# Providers status：聚合 TMDB / DeepSeek / Emby 当前可用性，60s TTL cache
+# state 枚举：ok / auth_failed / not_configured / unreachable
+_PROVIDERS_STATUS_CACHE: dict = {"data": None, "checked_at": 0.0}
+_PROVIDERS_STATUS_TTL = 60.0
+
+
+def _classify_provider_error(message: str) -> str:
+    """从下游 test_connection 的 message 推断 state。"""
+    m = (message or "").lower()
+    if any(s in m for s in ("401", "403", "auth", "invalid api key", "unauthor")):
+        return "auth_failed"
+    return "unreachable"
+
+
+def _probe_tmdb() -> dict:
+    key = load_tmdb_key()
+    if not key:
+        return {"state": "not_configured", "message": "TMDB key 未配置"}
+    try:
+        r = TMDBProvider(api_key=key).test_connection()
+    except Exception as e:  # noqa: BLE001
+        return {"state": _classify_provider_error(str(e)), "message": str(e)}
+    if r.get("ok"):
+        return {"state": "ok", "message": r.get("message") or "TMDB OK"}
+    return {"state": _classify_provider_error(r.get("message", "")), "message": r.get("message") or "unknown"}
+
+
+def _probe_deepseek() -> dict:
+    key = load_deepseek_key()
+    if not key:
+        return {"state": "not_configured", "message": "DeepSeek key 未配置"}
+    try:
+        import openai
+        client = openai.OpenAI(api_key=key, base_url=llm.DEFAULT_BASE_URL, timeout=10)
+        client.chat.completions.create(
+            model=llm.DEFAULT_MODEL,
+            max_tokens=5,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        return {"state": "ok", "message": f"DeepSeek OK ({llm.DEFAULT_MODEL})"}
+    except Exception as e:  # noqa: BLE001
+        msg = f"{type(e).__name__}: {e}"
+        return {"state": _classify_provider_error(msg), "message": msg}
+
+
+def _probe_emby() -> dict:
+    client = _emby_client()
+    if client is None:
+        return {"state": "not_configured", "message": "Emby 未配置"}
+    try:
+        r = client.test_connection()
+    except Exception as e:  # noqa: BLE001
+        return {"state": _classify_provider_error(str(e)), "message": str(e)}
+    if r.get("ok"):
+        return {"state": "ok", "message": r.get("message") or "Emby OK"}
+    code = (r.get("code") or "").lower()
+    if code == "auth_failed":
+        return {"state": "auth_failed", "message": r.get("message") or "auth failed"}
+    return {"state": _classify_provider_error(r.get("message", "")), "message": r.get("message") or "unknown"}
+
+
+def _compute_providers_status() -> dict:
+    now = time.time()
+    return {
+        "tmdb": {**_probe_tmdb(), "checked_at": now},
+        "deepseek": {**_probe_deepseek(), "checked_at": now},
+        "emby": {**_probe_emby(), "checked_at": now},
+    }
+
+
+@app.route("/api/providers/status", methods=["GET"])
+@require_token
+def providers_status():
+    """聚合 TMDB / DeepSeek / Emby 当前可用性。
+
+    query ?refresh=1 跳过 cache 强制 re-probe；否则 60s TTL cache。
+    每个 provider 真实跑一次 test_connection（TMDB /configuration、Emby
+    System/Info/Public 是免费的；DeepSeek 一次 5-token chat completion）。
+    """
+    force = request.args.get("refresh") in ("1", "true", "yes")
+    now = time.time()
+    cache = _PROVIDERS_STATUS_CACHE
+    age = now - cache["checked_at"]
+    if not force and cache["data"] is not None and age < _PROVIDERS_STATUS_TTL:
+        resp = jsonify({"providers": cache["data"], "cached": True, "age": round(age, 1)})
+    else:
+        data = _compute_providers_status()
+        cache["data"] = data
+        cache["checked_at"] = now
+        resp = jsonify({"providers": data, "cached": False, "age": 0.0})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 VIDEO_EXTS = ["mkv", "mp4", "avi", "mov", "ts", "m4v", "mpg", "wmv", "flv", "webm", "m2ts", "rmvb"]
 
 # 排除原盘镜像内部目录：BDMV (Blu-ray) 和 VIDEO_TS (DVD) 子树里的 .m2ts/.vob

@@ -49,7 +49,94 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     refreshDisk();
     loadFiles(currentPath);
+    loadProvidersStatus();   // 顶部 AI / Emby 按钮状态点 + 异常 banner
 });
+
+// Provider 状态聚合（AI 按钮 = TMDB + DeepSeek 合并；Emby 单独）
+// state 优先级（严重程度从高到低）：unreachable > auth_failed > not_configured > ok > unknown
+const _STATE_RANK = { unreachable: 4, auth_failed: 3, not_configured: 2, ok: 1, unknown: 0 };
+
+function _mergeState(states) {
+    let worst = "unknown";
+    for (const s of states) {
+        if ((_STATE_RANK[s] ?? 0) > (_STATE_RANK[worst] ?? 0)) worst = s;
+    }
+    return worst;
+}
+
+function _setDotState(btnId, state, tooltip) {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    const dot = btn.querySelector(".tb-state-dot");
+    if (!dot) return;
+    dot.setAttribute("data-state", state);
+    if (tooltip) dot.setAttribute("title", tooltip);
+}
+
+async function loadProvidersStatus(force = false) {
+    try {
+        const url = `${API_BASE}/api/providers/status${force ? "?refresh=1" : ""}`;
+        const res = await apiFetch(url);
+        if (!res.ok) return;
+        const body = await res.json();
+        const p = body.providers || {};
+
+        const tmdb = p.tmdb || {};
+        const deepseek = p.deepseek || {};
+        const emby = p.emby || {};
+
+        const aiState = _mergeState([tmdb.state, deepseek.state]);
+        const aiTip = `TMDB: ${tmdb.state || "?"} (${tmdb.message || ""})\n`
+                    + `DeepSeek: ${deepseek.state || "?"} (${deepseek.message || ""})`;
+        _setDotState("tb-ai", aiState, aiTip);
+
+        _setDotState("tb-emby", emby.state || "unknown",
+            `Emby: ${emby.state || "?"} (${emby.message || ""})`);
+
+        renderProviderBanner(p);
+    } catch (err) {
+        // 静默失败：状态点保持 unknown
+        console.warn("[providers/status] fetch failed:", err);
+    }
+}
+
+// 仅在 auth_failed / unreachable 时显示 banner；用户 dismiss 后本次会话不再显示
+let _providerBannerDismissed = false;
+
+const _PROVIDER_LABELS = { tmdb: "TMDB", deepseek: "DeepSeek", emby: "Emby" };
+const _STATE_LABELS = { auth_failed: "key 失效", unreachable: "无法连接" };
+
+function renderProviderBanner(providers) {
+    const banner = document.getElementById("provider-banner");
+    const textEl = document.getElementById("provider-banner-text");
+    if (!banner || !textEl) return;
+    if (_providerBannerDismissed) {
+        banner.style.display = "none";
+        return;
+    }
+    const bad = [];
+    let severe = false;
+    for (const key of ["tmdb", "deepseek", "emby"]) {
+        const p = providers[key] || {};
+        if (p.state === "auth_failed" || p.state === "unreachable") {
+            bad.push(`${_PROVIDER_LABELS[key]} ${_STATE_LABELS[p.state]}`);
+            if (p.state === "unreachable") severe = true;
+        }
+    }
+    if (bad.length === 0) {
+        banner.style.display = "none";
+        return;
+    }
+    textEl.textContent = `Provider 异常：${bad.join("；")}。识别 / 同步可能降级。`;
+    banner.classList.toggle("severe", severe);
+    banner.style.display = "flex";
+}
+
+function dismissProviderBanner() {
+    _providerBannerDismissed = true;
+    const banner = document.getElementById("provider-banner");
+    if (banner) banner.style.display = "none";
+}
 
 // API 请求封装
 async function apiFetch(url, options = {}) {
