@@ -2916,6 +2916,18 @@ async function deleteDedupSelection() {
             alert(`Confirm 失败: ${confirmData.error || confirmRes.status}`);
             return;
         }
+        // codex review IMPORTANT 1: confirm 可能返 HTTP 200 + status='target_already_changed'
+        // 当 preview→confirm 之间文件被改时，destructive_action 后端返三态字段。
+        // 必须显式检查 status，否则 UI 会把"目标已变化"误报成"删除完成"。
+        if (confirmData.status === "target_already_changed") {
+            alert(`目标已变化，请刷新后重试：${confirmData.hint || ""}`);
+            await loadDedupGroups();
+            return;
+        }
+        if (confirmData.status !== "succeeded") {
+            alert(`删除失败: ${confirmData.error || confirmData.detail || confirmData.status}`);
+            return;
+        }
         alert(`删除完成。${JSON.stringify(confirmData.result || {}, null, 2).slice(0, 300)}`);
         await loadDedupGroups();
     } catch (e) {

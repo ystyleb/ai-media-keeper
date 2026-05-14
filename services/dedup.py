@@ -338,18 +338,30 @@ def _find_tv_group_keys(
 ) -> tuple[list[tuple[str, int, int]], int]:
     """Return (paginated (series_id, season, episode) tuples, total count)."""
     if watched_only:
+        # codex r-final IMPORTANT 2: watched_only filter must also accept watched
+        # rows that have only tmdb_episode_id (no tmdb_series_id) — schema allows
+        # such mapped rows when series cache fails. We join media_files's
+        # tmdb_episode_id to that subset as a UNION ALL.
         base_sql = """
         WITH watched_episode_keys AS (
           SELECT DISTINCT tmdb_series_id, season_number, episode_number FROM watched_items
            WHERE media_type='tv' AND tmdb_series_id IS NOT NULL
              AND season_number IS NOT NULL AND episode_number IS NOT NULL
+        ),
+        watched_episode_ids AS (
+          SELECT DISTINCT tmdb_episode_id FROM watched_items
+           WHERE media_type='tv' AND tmdb_episode_id IS NOT NULL
         )
         SELECT tmdb_series_id, season_number, episode_number FROM media_files
          WHERE metadata_status='ok' AND media_type='tv'
            AND tmdb_series_id IS NOT NULL
            AND season_number IS NOT NULL AND episode_number IS NOT NULL
-           AND (tmdb_series_id, season_number, episode_number) IN
-               (SELECT tmdb_series_id, season_number, episode_number FROM watched_episode_keys)
+           AND (
+             (tmdb_series_id, season_number, episode_number) IN
+                 (SELECT tmdb_series_id, season_number, episode_number FROM watched_episode_keys)
+             OR (tmdb_episode_id IS NOT NULL AND tmdb_episode_id IN
+                 (SELECT tmdb_episode_id FROM watched_episode_ids))
+           )
          GROUP BY tmdb_series_id, season_number, episode_number
         HAVING COUNT(*) >= 2
         """
@@ -909,6 +921,10 @@ def find_watched_stale_media(
         "  SELECT 1 FROM watched_items w "
         "   WHERE w.media_type = 'tv' "
         "     AND w.tmdb_series_id IS NOT NULL "
+        # NIT: double-sided NOT NULL invariant (schema already enforces s/e
+        # not-null for tv watched rows, but written explicitly here for clarity)
+        "     AND w.season_number IS NOT NULL "
+        "     AND w.episode_number IS NOT NULL "
         "     AND w.tmdb_series_id = m.tmdb_series_id "
         "     AND w.season_number = m.season_number "
         "     AND w.episode_number = m.episode_number"

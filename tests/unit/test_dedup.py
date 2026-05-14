@@ -314,6 +314,35 @@ def test_find_groups_media_type_filter_movie_only(conn):
 # ── watched_only filter (CTE at group SQL layer) ───────────────
 
 
+def test_watched_only_tv_episode_id_only_row_still_filters_in(conn):
+    """codex r-final IMPORTANT 2: watched_only CTE must include tv watched rows
+    that have only tmdb_episode_id (no series_id) — schema allows this when
+    Emby series cache miss occurs.
+    """
+    # Group has 2 tv files with same series+s+e
+    _seed_tv(conn, path="/show.s01e01.4k.mkv", tmdb_series_id="1399",
+             season=1, episode=1, tmdb_episode_id="ep-99")
+    _seed_tv(conn, path="/show.s01e01.1080.mkv", tmdb_series_id="1399",
+             season=1, episode=1, tmdb_episode_id="ep-99")
+
+    # watched row: only episode_id, NO series_id (allowed by CHECK constraint
+    # because mapping_status='mapped' AND tmdb_episode_id IS NOT NULL)
+    conn.execute(
+        """
+        INSERT INTO watched_items(provider, provider_item_id, media_type,
+          tmdb_episode_id, season_number, episode_number,
+          watched_at, fetched_at, mapping_status, mapping_confidence, mapping_source)
+        VALUES ('emby', 'orphan-ep-1', 'tv', ?, 1, 1, ?, ?, 'mapped', 1.0, 'emby.provider_ids')
+        """,
+        ("ep-99", 1700000000, 1700000001),
+    )
+    conn.commit()
+
+    groups_w, total_w = dedup.find_duplicate_groups(conn, watched_only=True)
+    assert total_w == 1
+    assert groups_w[0].tmdb_series_id == "1399"
+
+
 def test_watched_only_filters_out_unwatched_movie_groups(conn):
     # Group A: watched
     _seed_movie(conn, path="/m_w1.mkv", tmdb_movie_id="100")

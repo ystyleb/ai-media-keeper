@@ -2036,7 +2036,8 @@ def _do_action_preview(kind: str, raw_data: dict):
             "snapshot": snapshot_stub,
             "warning": "archive_executor_disabled",
             "warning_message": (
-                "Archive 操作目前未启用，confirm 会返回 failed/disabled_kind。"
+                "Archive 操作目前未启用：confirm 会落 status='failed' + "
+                "error='ArchiveDisabledError: archive_kind_disabled_in_phase3: ...'"
             ),
         })
     return jsonify({"error": f"kind '{kind}' not supported in spike"}), 400
