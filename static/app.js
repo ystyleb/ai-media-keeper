@@ -2219,6 +2219,188 @@ async function saveAIConfig() {
 }
 
 
+// ==================== Emby 观看进度配置 ====================
+
+let embyConfigModal = null;
+const embySyncPoll = { runId: null, timer: null };
+
+async function showEmbyConfig() {
+    if (!embyConfigModal) {
+        embyConfigModal = new bootstrap.Modal(document.getElementById("embyConfigModal"));
+    }
+    // 拉现有 url / user_id + has_key + provider state
+    try {
+        const [cfgRes, statusRes] = await Promise.all([
+            apiFetch(`${API_BASE}/api/config/emby`),
+            apiFetch(`${API_BASE}/api/watch/status`),
+        ]);
+        const cfg = await cfgRes.json();
+        const status = await statusRes.json();
+        document.getElementById("emby-url-input").value = cfg.url || "";
+        document.getElementById("emby-user-input").value = cfg.user_id || "";
+        document.getElementById("emby-key-input").value = "";
+        _setKeyBadge("emby-key-badge", cfg.has_key);
+        _setEmbyStateBadge(status?.emby?.state || "not_configured", status?.emby?.message);
+    } catch (err) {
+        console.error("load emby config failed", err);
+    }
+    document.getElementById("emby-test-status").innerHTML = "";
+    document.getElementById("emby-sync-status").innerHTML = "";
+    document.getElementById("emby-sync-badge").textContent = "未同步";
+    document.getElementById("emby-sync-badge").className = "badge bg-secondary ms-1";
+    embyConfigModal.show();
+}
+
+function _setEmbyStateBadge(state, message) {
+    const el = document.getElementById("emby-state-badge");
+    if (!el) return;
+    const labels = {
+        ok: ["已连通", "bg-success"],
+        not_configured: ["未配置", "bg-secondary"],
+        auth_failed: ["鉴权失败", "bg-danger"],
+        error: ["错误", "bg-danger"],
+    };
+    const [text, cls] = labels[state] || [state, "bg-warning"];
+    el.textContent = text;
+    el.className = `badge ${cls} ms-1`;
+    if (message) el.title = message;
+}
+
+async function testEmbyConnection() {
+    const status = document.getElementById("emby-test-status");
+    status.innerHTML = '<span class="text-secondary">测试中...</span>';
+    const url = document.getElementById("emby-url-input").value.trim();
+    const user_id = document.getElementById("emby-user-input").value.trim();
+    const api_key = document.getElementById("emby-key-input").value.trim();
+    const body = {};
+    if (url) body.url = url;
+    if (user_id) body.user_id = user_id;
+    if (api_key) body.api_key = api_key;
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/emby/test`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (data.ok) {
+            status.innerHTML = `<span class="text-success">✓ 连通：${data.server_name || "Emby"}${data.message ? " · " + data.message : ""}</span>`;
+        } else {
+            status.innerHTML = `<span class="text-danger">✗ ${data.message || data.code || "未知错误"}</span>`;
+        }
+    } catch (err) {
+        status.innerHTML = `<span class="text-danger">网络错误: ${err.message}</span>`;
+    }
+}
+
+async function saveEmbyConfig() {
+    const url = document.getElementById("emby-url-input").value.trim();
+    const user_id = document.getElementById("emby-user-input").value.trim();
+    const api_key = document.getElementById("emby-key-input").value.trim();
+    if (!url || !user_id) {
+        alert("URL 和 User ID 必填。");
+        return;
+    }
+    try {
+        const body = { url, user_id };
+        if (api_key) body.api_key = api_key;
+        const res = await apiFetch(`${API_BASE}/api/config/emby`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!data.ok) {
+            alert("保存失败：" + (data.message || res.status));
+            return;
+        }
+        addLog("Emby 配置已保存", "success");
+        showEmbyConfig();   // refresh badges
+    } catch (err) {
+        alert(`网络错误: ${err.message}`);
+    }
+}
+
+async function triggerEmbySync() {
+    const btn = document.getElementById("btn-emby-sync");
+    const status = document.getElementById("emby-sync-status");
+    const badge = document.getElementById("emby-sync-badge");
+    btn.disabled = true;
+    badge.textContent = "启动中";
+    badge.className = "badge bg-info ms-1";
+    status.innerHTML = '<span class="text-secondary">提交同步请求...</span>';
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/watch/sync`, { method: "POST" });
+        const data = await res.json();
+        if (res.status === 409) {
+            badge.textContent = "并发拒绝";
+            badge.className = "badge bg-warning ms-1";
+            status.innerHTML = `<span class="text-warning">已有同步在跑：${data.detail || ""}</span>`;
+            btn.disabled = false;
+            return;
+        }
+        if (!res.ok) {
+            badge.textContent = "失败";
+            badge.className = "badge bg-danger ms-1";
+            status.innerHTML = `<span class="text-danger">${data.error || res.status}</span>`;
+            btn.disabled = false;
+            return;
+        }
+        embySyncPoll.runId = data.run_id;
+        badge.textContent = `运行中 #${data.run_id}`;
+        status.innerHTML = '<span class="text-info">同步进行中，每 2s 查询进度...</span>';
+        _startEmbySyncPolling(data.run_id);
+    } catch (err) {
+        badge.textContent = "失败";
+        badge.className = "badge bg-danger ms-1";
+        status.innerHTML = `<span class="text-danger">网络错误: ${err.message}</span>`;
+        btn.disabled = false;
+    }
+}
+
+function _startEmbySyncPolling(runId) {
+    if (embySyncPoll.timer) clearInterval(embySyncPoll.timer);
+    embySyncPoll.timer = setInterval(async () => {
+        try {
+            const res = await apiFetch(`${API_BASE}/api/watch/sync/status?id=${runId}`);
+            const data = await res.json();
+            const status = document.getElementById("emby-sync-status");
+            const badge = document.getElementById("emby-sync-badge");
+            const btn = document.getElementById("btn-emby-sync");
+            if (!res.ok) {
+                status.innerHTML = `<span class="text-danger">查询失败: ${data.error}</span>`;
+                clearInterval(embySyncPoll.timer);
+                btn.disabled = false;
+                return;
+            }
+            // 渲染当前状态
+            const counters = `fetched=${data.items_fetched} · inserted=${data.items_inserted} · updated=${data.items_updated} · skipped=${data.items_skipped}`;
+            if (data.status === "running") {
+                badge.textContent = `运行中 #${runId}`;
+                badge.className = "badge bg-info ms-1";
+                status.innerHTML = `<span class="text-info">${counters}</span>`;
+            } else if (data.status === "done") {
+                badge.textContent = "完成";
+                badge.className = "badge bg-success ms-1";
+                status.innerHTML = `<span class="text-success">✓ 同步完成 · ${counters}</span>`;
+                clearInterval(embySyncPoll.timer);
+                btn.disabled = false;
+                addLog(`Emby 同步完成: ${counters}`, "success");
+            } else {  // failed / aborted
+                badge.textContent = data.status;
+                badge.className = "badge bg-danger ms-1";
+                status.innerHTML = `<span class="text-danger">${data.status}: ${data.error || ""}</span>`;
+                clearInterval(embySyncPoll.timer);
+                btn.disabled = false;
+            }
+        } catch (err) {
+            console.error("[emby sync poll] failed:", err);
+        }
+    }, 2000);
+}
+
+
 // ==================== qBittorrent 配置 ====================
 
 let qbitConfigModal = null;
@@ -2821,11 +3003,21 @@ function _renderDedupGroup(group) {
         if (c.is_watched) {
             row.appendChild(createElement("span", { className: "watched-badge", textContent: "已看" }));
         }
+        if (c.is_hardlinked) {
+            row.appendChild(createElement("span", {
+                className: "hardlink-badge",
+                textContent: `🔗 硬链接 ${c.linked_paths.length} 路`,
+                title: "这些路径共享同一个 inode（实际只占一份盘）。\n删除会同时解除所有 path 的链接。",
+            }));
+        }
         const tags = [c.resolution, ...(c.hdr_profiles || []), c.source, c.codec, c.release_group]
             .filter(Boolean).join(" · ");
+        const pathsHtml = (c.linked_paths || [c.path])
+            .map(p => `<div>${p}</div>`)
+            .join("");
         row.appendChild(createElement("div", {
             className: "path",
-            innerHTML: `<strong>${humanSize(c.size_bytes || 0)}</strong> · ${tags || "?"}<br>${c.path}`,
+            innerHTML: `<strong>${humanSize(c.size_bytes || 0)}</strong> · ${tags || "?"}${pathsHtml}`,
         }));
         row.appendChild(createElement("span", {
             className: "score-badge",

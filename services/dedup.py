@@ -76,8 +76,8 @@ def _now() -> int:
 
 @dataclass(frozen=True)
 class DedupCandidate:
-    media_file_id: int          # stable id for LLM grounding (not path)
-    path: str
+    media_file_id: int          # stable id for LLM grounding (not path) — representative row id
+    path: str                   # representative path (lexicographically smallest of linked_paths)
     inode: int | None
     size_bytes: int | None
     mtime: int | None
@@ -90,6 +90,13 @@ class DedupCandidate:
     score_breakdown: dict[str, float]   # {'resolution.4K': 40, ...}
     is_watched: bool
     keep_recommended: bool      # set after group-level ranking
+    # Hardlink merge (Phase 3 post-ship fix): same-inode rows are merged into one
+    # candidate. linked_paths lists ALL paths sharing this inode (>=1; includes
+    # `path` itself). When len(linked_paths) >= 2, this candidate represents a
+    # hardlinked release — deleting it via the inode-anchored executor will
+    # unlink all paths.
+    linked_paths: list[str]
+    linked_media_file_ids: list[int]    # all media_files row ids sharing this inode
 
 
 @dataclass(frozen=True)
@@ -608,33 +615,66 @@ def _build_candidates(
 
     Pattern A truth: don't trust media_files.quality_score (may be stale if
     user just edited weights); recompute in memory from current weights.
+
+    Hardlink merge (Phase 3 post-ship fix): rows with the same non-null inode
+    are merged into a single candidate. The same inode means the rows point
+    at the same on-disk file (shared storage via hardlink) — counting them
+    as separate dedup candidates would (a) double-count disk usage and (b)
+    mislead users into "deleting the low-quality copy" when there is no
+    low-quality copy. Rows with inode=NULL cannot be safely merged, so each
+    is kept as its own candidate (conservative).
+
+    Representative row chosen as smallest media_file_id (deterministic; oldest
+    record). path = smallest path lexicographically.
     """
-    cands: list[DedupCandidate] = []
+    # ─── Step 1: bucket rows by inode (NULL inode → unique singleton bucket) ───
+    by_inode: dict[Any, list] = {}
+    null_buckets: list[list] = []
     for r in rows:
-        fid = r["id"]
+        ino = r["inode"]
+        if ino is None:
+            null_buckets.append([r])      # singleton — never merged with anything
+        else:
+            by_inode.setdefault(ino, []).append(r)
+
+    # Each bucket = one candidate (merged); preserve deterministic order by
+    # using smallest media_file_id of the bucket as representative.
+    buckets = list(by_inode.values()) + null_buckets
+
+    cands: list[DedupCandidate] = []
+    for bucket in buckets:
+        # Pick representative row = smallest media_file_id (oldest record).
+        rep = min(bucket, key=lambda r: r["id"])
+        # All paths in bucket, sorted lexicographically (path field shows smallest).
+        all_paths = sorted(r["path"] for r in bucket)
+        all_ids = sorted(r["id"] for r in bucket)
+
+        fid = rep["id"]
         hdr_profiles = hdr_by_file.get(fid, [])
         row_dict = {
-            "parse_resolution": r["parse_resolution"],
-            "parse_source": r["parse_source"],
-            "parse_codec": r["parse_codec"],
-            "parse_color_depth": r["parse_color_depth"],
+            "parse_resolution": rep["parse_resolution"],
+            "parse_source": rep["parse_source"],
+            "parse_codec": rep["parse_codec"],
+            "parse_color_depth": rep["parse_color_depth"],
         }
         score, breakdown = compute_quality_score(row_dict, hdr_profiles, weights)
         cands.append(DedupCandidate(
             media_file_id=fid,
-            path=r["path"],
-            inode=r["inode"],
-            size_bytes=r["size_bytes"],
-            mtime=r["mtime"],
-            parse_resolution=r["parse_resolution"],
-            parse_source=r["parse_source"],
-            parse_codec=r["parse_codec"],
+            path=all_paths[0],              # representative = lexicographically smallest
+            inode=rep["inode"],
+            size_bytes=rep["size_bytes"],   # same inode → same size, take any
+            mtime=rep["mtime"],
+            parse_resolution=rep["parse_resolution"],
+            parse_source=rep["parse_source"],
+            parse_codec=rep["parse_codec"],
             hdr_profiles=hdr_profiles,
-            parse_release_group=r["parse_release_group"],
+            parse_release_group=rep["parse_release_group"],
             quality_score=score,
             score_breakdown=breakdown,
             is_watched=is_watched,
             keep_recommended=False,         # set below after group ranking
+            linked_paths=all_paths,
+            linked_media_file_ids=all_ids,
         ))
     if not cands:
         return cands
@@ -860,6 +900,9 @@ def candidate_to_dict(c: DedupCandidate) -> dict:
         "score_breakdown": c.score_breakdown,
         "is_watched": c.is_watched,
         "keep_recommended": c.keep_recommended,
+        "linked_paths": c.linked_paths,
+        "linked_media_file_ids": c.linked_media_file_ids,
+        "is_hardlinked": len(c.linked_paths) >= 2,
     }
 
 

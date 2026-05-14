@@ -713,3 +713,141 @@ def test_group_to_dict_shape(conn):
     assert "quality_score" in c
     assert "score_breakdown" in c
     assert "hdr_profiles" in c
+
+
+# ─── Phase 3 post-ship: hardlink (same-inode) merging ────────────────────
+
+
+def _seed_movie_with_inode(
+    conn,
+    *,
+    path: str,
+    tmdb_movie_id: str,
+    inode: int | None,
+    size: int = 1_000_000_000,
+    mtime: int = 1000,
+    resolution: str = "1080p",
+    source: str = "BluRay",
+    codec: str = "H.265",
+) -> int:
+    """Like _seed_movie but with explicit inode (or NULL) — for hardlink tests."""
+    cur = conn.execute(
+        """
+        INSERT INTO media_files(
+          path, inode, size_bytes, mtime,
+          tmdb_id, tmdb_movie_id, media_type, title, year,
+          metadata_status, parse_resolution, parse_source, parse_codec,
+          parse_color_depth, parse_release_group,
+          first_seen_at, last_updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 'movie', 'M', 2020, 'ok', ?, ?, ?, '10-bit', 'G', ?, ?)
+        """,
+        (path, inode, size, mtime, tmdb_movie_id, tmdb_movie_id,
+         resolution, source, codec, mtime, mtime),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def test_hardlinked_same_inode_two_paths_merge_into_one_candidate(conn):
+    """Two media_files rows sharing the same inode → one DedupCandidate with
+    linked_paths=[both paths]. No spurious "duplicate" — they share storage."""
+    _seed_movie_with_inode(conn, path="/qbit/godfather.mkv",
+                           tmdb_movie_id="238", inode=12345)
+    _seed_movie_with_inode(conn, path="/media/Movies/Godfather.mkv",
+                           tmdb_movie_id="238", inode=12345)
+    # Add a real second release with different inode so the group survives the
+    # HAVING COUNT >= 2 SQL filter.
+    _seed_movie_with_inode(conn, path="/media/Movies/Godfather.1080.mkv",
+                           tmdb_movie_id="238", inode=99999, size=500_000_000)
+
+    groups, _ = dedup.find_duplicate_groups(conn)
+    assert len(groups) == 1
+    g = groups[0]
+    assert len(g.candidates) == 2, "hardlinked rows must merge into one candidate"
+    # Find the hardlinked candidate (the one with 2 paths)
+    hl = next(c for c in g.candidates if len(c.linked_paths) == 2)
+    assert hl.linked_paths == ["/media/Movies/Godfather.mkv", "/qbit/godfather.mkv"]
+    assert hl.path == "/media/Movies/Godfather.mkv"   # smallest lexicographically
+    assert len(hl.linked_media_file_ids) == 2
+    # Other candidate is the singleton independent file
+    solo = next(c for c in g.candidates if len(c.linked_paths) == 1)
+    assert solo.path == "/media/Movies/Godfather.1080.mkv"
+
+
+def test_hardlinked_all_same_inode_group_disappears(conn):
+    """If a group's only "duplicates" all share one inode, no real dedup
+    candidate exists — group must be skipped (< 2 unique candidates)."""
+    _seed_movie_with_inode(conn, path="/qbit/m.mkv",
+                           tmdb_movie_id="500", inode=77)
+    _seed_movie_with_inode(conn, path="/media/m.mkv",
+                           tmdb_movie_id="500", inode=77)
+    groups, _ = dedup.find_duplicate_groups(conn)
+    # SQL HAVING COUNT >= 2 matches (2 rows same tmdb_movie_id), but after
+    # inode merge there's only 1 candidate → group skipped by len(cands)<2 guard.
+    assert groups == []
+
+
+def test_hardlinked_size_counted_only_once(conn):
+    """Two paths sharing inode must not double-count disk usage."""
+    _seed_movie_with_inode(conn, path="/qbit/big.mkv",
+                           tmdb_movie_id="600", inode=42, size=10_000_000_000)
+    _seed_movie_with_inode(conn, path="/media/big.mkv",
+                           tmdb_movie_id="600", inode=42, size=10_000_000_000)
+    _seed_movie_with_inode(conn, path="/media/small.mkv",
+                           tmdb_movie_id="600", inode=43, size=2_000_000_000)
+    groups, _ = dedup.find_duplicate_groups(conn)
+    g = groups[0]
+    # total = 10G (hardlinked, counted once) + 2G (independent) = 12G
+    assert g.total_size_bytes == 12_000_000_000
+    # 2 candidates total (hardlinked merged + independent)
+    assert len(g.candidates) == 2
+
+
+def test_null_inode_rows_never_merged_conservative(conn):
+    """Rows with inode=NULL cannot be safely merged (we don't know if they
+    share storage). Each must be its own candidate."""
+    _seed_movie_with_inode(conn, path="/a.mkv", tmdb_movie_id="700", inode=None)
+    _seed_movie_with_inode(conn, path="/b.mkv", tmdb_movie_id="700", inode=None)
+    groups, _ = dedup.find_duplicate_groups(conn)
+    assert len(groups) == 1
+    assert len(groups[0].candidates) == 2
+    for c in groups[0].candidates:
+        assert c.inode is None
+        assert len(c.linked_paths) == 1
+
+
+def test_candidate_to_dict_is_hardlinked_flag(conn):
+    """is_hardlinked flag in serialized dict for UI consumption."""
+    _seed_movie_with_inode(conn, path="/qbit/a.mkv", tmdb_movie_id="800", inode=1)
+    _seed_movie_with_inode(conn, path="/media/a.mkv", tmdb_movie_id="800", inode=1)
+    _seed_movie_with_inode(conn, path="/media/b.mkv", tmdb_movie_id="800", inode=2, size=500_000_000)
+    groups, _ = dedup.find_duplicate_groups(conn)
+    serialized = [dedup.candidate_to_dict(c) for c in groups[0].candidates]
+    hardlinked = [s for s in serialized if s["is_hardlinked"]]
+    solos = [s for s in serialized if not s["is_hardlinked"]]
+    assert len(hardlinked) == 1
+    assert len(hardlinked[0]["linked_paths"]) == 2
+    assert len(solos) == 1
+    assert len(solos[0]["linked_paths"]) == 1
+
+
+def test_hardlinked_winner_keep_recommended(conn):
+    """keep_recommended must work correctly after inode merge: the merged
+    hardlinked candidate competes with other candidates on quality_score."""
+    # Hardlinked group (4K HDR DV) is highest quality
+    _seed_movie_with_inode(conn, path="/qbit/4k.mkv", tmdb_movie_id="900",
+                           inode=10, resolution="2160p")
+    _seed_movie_with_inode(conn, path="/media/4k.mkv", tmdb_movie_id="900",
+                           inode=10, resolution="2160p")
+    # Independent low-quality file
+    _seed_movie_with_inode(conn, path="/media/720.mkv", tmdb_movie_id="900",
+                           inode=20, resolution="720p", size=500_000_000)
+
+    groups, _ = dedup.find_duplicate_groups(conn)
+    g = groups[0]
+    keep = [c for c in g.candidates if c.keep_recommended]
+    assert len(keep) == 1
+    # Hardlinked 4K should win
+    assert len(keep[0].linked_paths) == 2
+    assert keep[0].parse_resolution == "2160p"
