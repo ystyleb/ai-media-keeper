@@ -19,10 +19,12 @@ SCHEMA_PATH = Path(__file__).resolve().parents[2] / "db" / "schema.sql"
 
 @pytest.fixture
 def db_path(tmp_path):
-    """fresh sqlite db with full schema."""
+    """fresh sqlite db with full schema + Phase 3 migration."""
     p = tmp_path / "t.db"
     conn = destructive_action.open_connection(p)
     destructive_action.init_schema(conn, SCHEMA_PATH)
+    from db import migrations
+    migrations.phase3_migrate(conn)
     conn.close()
     # Reset module-level guard between tests
     with scanner._active_lock:
@@ -57,7 +59,9 @@ def _identify_result(path: str, *, top: MediaCandidate | None = None) -> Identif
         raw_name=path.rsplit("/", 1)[-1], title="Show", year=2020,
         season=1, episode=1, episode_title=None,
         media_type="episode", resolution="1080p",
-        source="WEB-DL", release_group=None, raw={},
+        source="WEB-DL", release_group=None,
+        codec=None, color_depth=None, hdr_profiles=[], container=None, audio_codec=None,
+        raw={},
     )
     return IdentifyResult(
         parse=parse,

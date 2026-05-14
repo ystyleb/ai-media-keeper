@@ -289,7 +289,9 @@ def _parse(title, year=None, season=None, episode=None, media_type="episode"):
     return identify_svc.FilenameParse(
         raw_name="x.mkv", title=title, year=year, season=season,
         episode=episode, episode_title=None, media_type=media_type,
-        resolution=None, source=None, release_group=None, raw={},
+        resolution=None, source=None, release_group=None,
+        codec=None, color_depth=None, hdr_profiles=[], container=None, audio_codec=None,
+        raw={},
     )
 
 
@@ -460,3 +462,187 @@ def test_identify_no_llm_key_no_rescue():
         )
         mock_extract.assert_not_called()
     assert result.top_pick is None
+
+
+# ─── Phase 3.1: quality 字段抽取（plan 3.1 节 11 个 case） ───
+
+
+def test_parse_filename_extracts_codec_h265():
+    """h265/HEVC release 的 video_codec 应被抽出。"""
+    p = identify_svc.parse_filename(
+        "/share/Movies/Movie.2020.1080p.BluRay.x265.10bit-GROUP.mkv"
+    )
+    assert p.codec == "H.265"
+    assert p.color_depth == "10-bit"
+    assert p.container == "mkv"
+
+
+def test_parse_filename_extracts_codec_av1():
+    """AV1 是新一代 codec，guessit 应识别。"""
+    p = identify_svc.parse_filename(
+        "/share/Movies/Movie.2024.2160p.WEB-DL.AV1.10bit-GROUP.mkv"
+    )
+    assert p.codec == "AV1"
+
+
+def test_parse_filename_extracts_hdr10_only():
+    """HDR10 标记应抽出，不带 + 号。"""
+    p = identify_svc.parse_filename(
+        "/share/Movies/Movie.2020.2160p.BluRay.HDR10.x265-GROUP.mkv"
+    )
+    assert "HDR10" in p.hdr_profiles
+    assert "HDR10+" not in p.hdr_profiles
+    assert "DolbyVision" not in p.hdr_profiles
+
+
+def test_parse_filename_extracts_dolby_vision():
+    """Dolby Vision (with space) 应归一化到 'DolbyVision'。"""
+    p = identify_svc.parse_filename(
+        "/share/Movies/Movie.2020.2160p.BluRay.DV.HDR.x265-GROUP.mkv"
+    )
+    # guessit 把 'DV' 也识别成 Dolby Vision
+    assert "DolbyVision" in p.hdr_profiles
+
+
+def test_parse_filename_extracts_hdr10_plus_dolby_vision_combined():
+    """HDR10+ 和 DolbyVision 同时出现时都要抽出，且 HDR10+ 不被误吞为 HDR10。
+
+    r2 BLOCKER: HDR10+ implies HDR10，不应同时存在（dedup 会重复加分）。
+    """
+    p = identify_svc.parse_filename(
+        "/share/Movies/Movie.2024.2160p.BluRay.DV.HDR10+.x265-GROUP.mkv"
+    )
+    assert "DolbyVision" in p.hdr_profiles
+    assert "HDR10+" in p.hdr_profiles
+    # r2 修订：HDR10+ 已 imply HDR10，不该并存
+    assert "HDR10" not in p.hdr_profiles
+    # canonical sorted
+    assert p.hdr_profiles == sorted(p.hdr_profiles)
+
+
+def test_hdr_hdr10_plus_implies_no_plain_hdr10():
+    """直接 helper 层面：guessit 在 other 里给 HDR10 + raw filename 含 HDR10+
+    → hits set 应只剩 HDR10+，不带 HDR10。
+    """
+    profiles = identify_svc._extract_hdr_profiles(
+        other_field="HDR10",
+        fallback_text="Movie.HDR10+.x265.mkv",
+    )
+    assert "HDR10+" in profiles
+    assert "HDR10" not in profiles
+
+
+def test_parse_filename_extracts_container_mkv():
+    """容器字段应抽对。"""
+    p = identify_svc.parse_filename(
+        "/share/Movies/Movie.2020.1080p.BluRay.x264-GROUP.mp4"
+    )
+    assert p.container == "mp4"
+
+
+def test_parse_filename_no_hdr_returns_empty_list():
+    """无 HDR 标记时 hdr_profiles 是空 list（不是 None）。"""
+    p = identify_svc.parse_filename(
+        "/share/Movies/Movie.2020.1080p.BluRay.x264-GROUP.mkv"
+    )
+    assert p.hdr_profiles == []
+
+
+def test_parse_filename_color_depth_10bit():
+    p = identify_svc.parse_filename(
+        "/share/Movies/Movie.2020.2160p.BluRay.x265.10bit-GROUP.mkv"
+    )
+    assert p.color_depth == "10-bit"
+
+
+def test_parse_filename_audio_codec_truehd_atmos():
+    """guessit audio_codec 返 list 时取 first；str 时原样。"""
+    p = identify_svc.parse_filename(
+        "/share/Movies/Movie.2020.2160p.BluRay.TrueHD.Atmos.x265-GROUP.mkv"
+    )
+    # audio_codec 抽 first or str；只断言非空 + 含 truehd/atmos 任一关键词
+    assert p.audio_codec is not None
+    assert any(k in (p.audio_codec or "").lower() for k in ("truehd", "atmos", "dolby"))
+
+
+def test_extras_short_circuit_still_no_codec():
+    """Extras / featurette / trailer 路径下 codec/HDR 不抽（plan：附属不参与 dedup）。"""
+    p = identify_svc.parse_filename(
+        "/share/Movies/Lost.Highway.1997.Extras-01.BDRip.1080p.x264-GROUP.mkv"
+    )
+    assert p.media_type == "extra"
+    assert p.codec is None
+    assert p.hdr_profiles == []
+    assert p.container is None
+    assert p.audio_codec is None
+
+
+def test_part_filename_still_extracts_codec():
+    """多盘 BD2/CD2 即 media_type='part' 仍应抽 codec（plan：分盘有真实视频信息）。"""
+    p = identify_svc.parse_filename(
+        "/share/Movies/Judex.1916.BD2.BluRay.1080p.x265-GROUP.mkv"
+    )
+    assert p.media_type == "part"
+    assert p.codec == "H.265"
+    assert p.container == "mkv"
+
+
+# Bonus: HDR 长 token 优先匹配 — plan I4 已 fix in helper
+def test_hdr_long_token_priority_no_substring_collision():
+    """HDR10+ 在 HDR10 之前匹配；移除后不会再被 HDR10 二次匹配。"""
+    profiles = identify_svc._extract_hdr_profiles("HDR10+")
+    assert profiles == ["HDR10+"]
+
+
+def test_hdr_keyword_in_list_form():
+    """guessit 'other' 字段是 list[str] 时也要正确解析。"""
+    profiles = identify_svc._extract_hdr_profiles(["Dolby Vision", "HDR10"])
+    assert profiles == ["DolbyVision", "HDR10"]  # canonical sorted
+
+
+def test_hdr_fallback_does_not_match_substring_within_word():
+    """r1 IMPORTANT: 'NotHDR10Plus' 不该被识别为 HDR10+（word boundary 检查）。"""
+    profiles = identify_svc._extract_hdr_profiles(None, fallback_text="NotHDR10Plus.mkv")
+    assert "HDR10+" not in profiles
+    # 也不该把 NotHDR10Plus 退化匹配成 HDR10
+    assert "HDR10" not in profiles
+
+
+def test_hdr_fallback_does_not_match_HDR10_inside_word():
+    profiles = identify_svc._extract_hdr_profiles(None, fallback_text="someHDR10Stuff")
+    assert profiles == []
+
+
+def test_hdr_fallback_matches_HDR10Plus_with_dot_separator():
+    """PT 命名习惯 'Movie.HDR10Plus.x265' 应识别为 HDR10+。"""
+    profiles = identify_svc._extract_hdr_profiles(
+        None, fallback_text="Movie.2024.HDR10Plus.x265-GROUP.mkv"
+    )
+    assert "HDR10+" in profiles
+
+
+def test_codec_fallback_extracts_av1_from_raw_filename():
+    """guessit v3 不识别 AV1；fallback 用 raw filename regex 抽到。"""
+    codec = identify_svc._extract_codec(
+        None, fallback_text="Movie.2024.2160p.WEB-DL.AV1.10bit-GROUP.mkv"
+    )
+    assert codec == "AV1"
+
+
+def test_codec_fallback_normalizes_x265_to_h265():
+    codec = identify_svc._extract_codec(None, fallback_text="Movie.2020.x265-GROUP.mkv")
+    assert codec == "H.265"
+
+
+def test_codec_fallback_does_not_match_within_word():
+    """'AV1Plugin' 不该被识别为 AV1 codec。"""
+    codec = identify_svc._extract_codec(None, fallback_text="AV1Plugin.mkv")
+    assert codec is None
+
+
+def test_extracts_codec_av1_in_full_pipeline():
+    """完整 parse_filename 在 AV1 release 上能拿到 codec='AV1'。"""
+    p = identify_svc.parse_filename(
+        "/share/Movies/Movie.2024.2160p.WEB-DL.AV1.10bit-GROUP.mkv"
+    )
+    assert p.codec == "AV1"

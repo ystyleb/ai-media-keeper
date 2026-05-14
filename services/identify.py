@@ -30,10 +30,17 @@ class FilenameParse:
     season: int | None
     episode: int | None
     episode_title: str | None
-    media_type: str  # 'movie' | 'episode' | 'unknown'
+    media_type: str  # 'movie' | 'episode' | 'unknown' | 'extra' | 'part'
     resolution: str | None
     source: str | None
     release_group: str | None
+    # Phase 3.1: quality 字段（dedup engine 用）。extras 路径下 codec/HDR/container
+    # 全部 None / [] — 附属文件不参与 quality score，故省一次解析（plan 3.1）。
+    codec: str | None
+    color_depth: str | None
+    hdr_profiles: list[str]      # canonical sorted; 空 list 表示无 HDR
+    container: str | None
+    audio_codec: str | None
     raw: dict[str, Any]
 
 
@@ -64,6 +71,102 @@ _EXTRA_PATTERNS: list[tuple[re.Pattern, str]] = [
 # 老电影常分 2-3 盘发，每盘是主片的一段（不是花絮）。Part1/Pt1 太歧义不包含
 # （"Pirates of the Caribbean Part 1" 是片名而非分盘）。
 _DISC_PATTERN = re.compile(r"\b(BD|Disc|CD|DVD)[-_.\s]*(\d+)\b", re.I)
+
+
+# HDR keyword 长 token 优先匹配 + 移除已匹配段避免短 token 二次误中
+# 例：'HDR10+' 必须先匹配，否则会被 'HDR10' / 'HDR' 提前吃掉变 [HDR10, HDR]
+# 顺序：HDR10+ > Dolby Vision/DolbyVision > HDR10 > HLG。'HDR' 单独留空兜底
+# （只检测有 profile 的；'HDR' 这种笼统标签无法决定具体 profile，跳过）
+_HDR_KEYWORDS: list[tuple[str, str]] = [
+    ("HDR10+", "HDR10+"),
+    ("Dolby Vision", "DolbyVision"),
+    ("DolbyVision", "DolbyVision"),
+    ("HDR10", "HDR10"),
+    ("HLG", "HLG"),
+]
+
+
+def _extract_hdr_profiles(other_field: Any, fallback_text: str = "") -> list[str]:
+    """从 guessit['other'] + raw filename 抽 HDR profile 列表。
+
+    返 canonical sorted list[str]；空 list 表示无 HDR。
+
+    fallback_text：guessit 当前版本不识别 'HDR10+' / 'HDR10Plus'（'+' 当 noise 截断
+    成 'HDR10'）。PT 命名习惯 HDR10+ 普遍，所以同时扫 raw filename 作为兜底。
+    [code-enforced] 长 token 先匹配后**移除**, 防止 'HDR10+' 被后续 'HDR10' 二次匹配
+    """
+    items: list[str] = []
+    if other_field is not None:
+        items = other_field if isinstance(other_field, list) else [other_field]
+    remaining = " | ".join(str(x) for x in items)
+    if fallback_text:
+        # 用 separator 拼接避免子串跨界（如 "HDR10" 接 raw "+...")
+        remaining = remaining + " | " + fallback_text
+
+    hits: set[str] = set()
+    # 额外识别 'HDR10Plus' / 'HDR10+' 文本变体（guessit 默认不识别）
+    extra_keywords = [
+        ("HDR10Plus", "HDR10+"),
+        ("HDR10+", "HDR10+"),
+    ]
+    # [code-enforced] 用左/右边界正则避免子串误中（如 'NotHDR10Plus' 不应当 HDR10+）
+    # 不用 \b 因为 'HDR10+' 末尾的 '+' 不是 word char，\b 在 '+' 跟字母间不存在。
+    # 自己定义边界：左边界 = 行首或非字母数字，右边界 = 行尾或非字母数字。
+    for kw_in, kw_out in extra_keywords + _HDR_KEYWORDS:
+        pat = re.compile(rf"(?:^|[^A-Za-z0-9]){re.escape(kw_in)}(?:[^A-Za-z0-9]|$)",
+                         re.IGNORECASE)
+        if pat.search(remaining):
+            hits.add(kw_out)
+            remaining = pat.sub(" ", remaining)
+    # r2 BLOCKER 修订: HDR10+ implies HDR10。当 guessit 'other' 字段已包含 HDR10
+    # 又从 raw filename fallback 抽到 HDR10+ 时，两者会同时在 hits set —— dedup
+    # score 重复加分。移除冗余 HDR10。
+    if "HDR10+" in hits:
+        hits.discard("HDR10")
+    return sorted(hits)
+
+
+def _first_or_str(v: Any) -> str | None:
+    """guessit 部分字段（audio_codec）会返 list 或 str；取 first 或原值。"""
+    if v is None:
+        return None
+    if isinstance(v, list):
+        return str(v[0]) if v else None
+    return str(v) or None
+
+
+# Codec 检测 fallback：guessit 不识别 AV1（v3 stable），PT 命名常带 AV1/HEVC/x264 等
+# tokens。这里按 raw filename 兜底。优先级跟 _HDR_KEYWORDS 一样：长 token 优先 + 移除。
+_CODEC_PATTERNS: list[tuple[str, str]] = [
+    ("AV1", "AV1"),
+    ("HEVC", "H.265"),
+    ("H.265", "H.265"),
+    ("H265", "H.265"),
+    ("x265", "H.265"),
+    ("VP9", "VP9"),
+    ("H.264", "H.264"),
+    ("H264", "H.264"),
+    ("x264", "H.264"),
+]
+
+
+def _extract_codec(video_codec_field: Any, fallback_text: str = "") -> str | None:
+    """优先 guessit video_codec，缺时按 raw filename regex 兜底。
+
+    [accepted limitation] guessit v3 不识别 AV1，所以 fallback 必要。归一化映射：
+      AV1 → 'AV1'；HEVC/x265/H265 → 'H.265'；x264/H264 → 'H.264'。
+    """
+    if video_codec_field:
+        s = str(video_codec_field)
+        if s:
+            return s
+    if not fallback_text:
+        return None
+    text = fallback_text
+    for kw_in, kw_out in _CODEC_PATTERNS:
+        if re.search(rf"\b{re.escape(kw_in)}\b", text, re.IGNORECASE):
+            return kw_out
+    return None
 
 
 def _detect_part_index(name: str) -> int | None:
@@ -129,6 +232,7 @@ def parse_filename(path: str) -> FilenameParse:
     if extra_kind:
         # extras：title 取去掉 release tag 的 stem 给 UI 显示；不靠 guessit 推断 type
         # （不调 guessit 也能省一次解析，但 year 提取还有用，保留 guessit）
+        # codec/HDR/container 故意不抽：附属文件不参与 dedup quality score，省解析
         g = dict(guessit(name))
         year = _normalize_int(g.get("year"))
         return FilenameParse(
@@ -142,6 +246,11 @@ def parse_filename(path: str) -> FilenameParse:
             resolution=str(g.get("screen_size") or "") or None,
             source=str(g.get("source") or "") or None,
             release_group=str(g.get("release_group") or "") or None,
+            codec=None,                                 # 不抽（plan 3.1：附属文件省解析）
+            color_depth=None,
+            hdr_profiles=[],
+            container=None,
+            audio_codec=None,
             raw={**g, "_extra_kind": extra_kind},
         )
 
@@ -196,6 +305,13 @@ def parse_filename(path: str) -> FilenameParse:
         resolution=str(g.get("screen_size") or "") or None,
         source=str(g.get("source") or "") or None,
         release_group=str(g.get("release_group") or "") or None,
+        # Phase 3.1 quality 字段 — 即使 media_type='part'（BD2/CD2 分盘）也抽，
+        # 因为分盘文件本身有真实 codec/container/HDR 信息可供 dedup 引用
+        codec=_extract_codec(g.get("video_codec"), fallback_text=name),
+        color_depth=str(g.get("color_depth") or "") or None,
+        hdr_profiles=_extract_hdr_profiles(g.get("other"), fallback_text=name),
+        container=str(g.get("container") or "") or None,
+        audio_codec=_first_or_str(g.get("audio_codec")),
         raw={**g, "_part_index": part_index} if part_index is not None else g,
     )
 
@@ -301,6 +417,7 @@ def _llm_filename_rescue(
         )
 
     # 更新 parse：用 LLM 的 title / year / season / episode 替换（guessit 拿不到的部分）
+    # quality 字段沿用 guessit 抽出的结果（codec/HDR/container 不依赖 title 文本）
     new_parse = FilenameParse(
         raw_name=parse.raw_name,
         title=extraction.title,
@@ -312,6 +429,11 @@ def _llm_filename_rescue(
         resolution=parse.resolution,
         source=parse.source,
         release_group=parse.release_group,
+        codec=parse.codec,
+        color_depth=parse.color_depth,
+        hdr_profiles=parse.hdr_profiles,
+        container=parse.container,
+        audio_codec=parse.audio_codec,
         raw=parse.raw,
     )
     return new_parse, candidates, f"llm_rescue: title={extraction.title!r}"

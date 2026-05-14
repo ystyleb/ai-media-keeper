@@ -70,6 +70,29 @@ def _now() -> int:
     return int(time.time())
 
 
+def _split_tmdb_ids(
+    media_type: str | None, tmdb_id: str | None
+) -> tuple[str | None, str | None, str | None]:
+    """[code-enforced 互斥] 根据 media_type 把单一 tmdb_id 拆到对应 split id。
+
+    Movie row → 仅 tmdb_movie_id 有值；series/episode_id 必须 None
+    TV row → 仅 tmdb_series_id 有值；movie_id/episode_id 必须 None
+    extra / part / None → 全部 None（companion 不参与 dedup join）
+
+    这补偿 SQLite ALTER TABLE 不能事后给 media_files 加 CHECK 约束的限制。
+    任何下游 join 都用 split id，老 tmdb_id 字段保留兼容但 dedup 不用（plan 3.0 节）。
+
+    注意：tmdb_episode_id 来自 Emby provider_ids 而非 TMDB search 结果，所以
+    upsert_identification 永远写 None（不归这里管，watched_items 写入时填）。
+    """
+    if media_type == "movie":
+        return tmdb_id, None, None
+    if media_type == "tv":
+        return None, tmdb_id, None
+    # extra / part / None / unknown
+    return None, None, None
+
+
 def upsert_identification(
     conn: sqlite3.Connection,
     *,
@@ -83,6 +106,10 @@ def upsert_identification(
 
     使用 INSERT ... ON CONFLICT(path) DO UPDATE 保证 idempotent。
     needs_review / failed 的也写入，让"已尝试过"被记录（避免下次重复浪费 API）。
+
+    [code-enforced] (carry-over 3.0)：根据 media_type 拆 tmdb_id 到
+    tmdb_movie_id / tmdb_series_id（episode_id 仅 Emby sync 阶段写）；
+    HDR profile 在同事务 DELETE+INSERT media_file_hdr_profiles 子表。
     """
     parse = identify_result.parse
     top = identify_result.top_pick
@@ -120,8 +147,10 @@ def upsert_identification(
     episode_number = None if is_companion else parse.episode
     episode_title = None if is_companion else parse.episode_title
 
+    # 拆 tmdb id：movie 行只填 movie_id，tv 行只填 series_id；其他全 None
+    tmdb_movie_id, tmdb_series_id, tmdb_episode_id = _split_tmdb_ids(media_type, tmdb_id)
+
     # details 是可选的 — 从 IdentifyResult 拿不到，调用方如要可单独传
-    # spike 阶段先 None，前端命中 cache 后展示足够，详情可按需重新调 TMDB
     genres: list[str] = []
     cast: list[str] = []
     runtime_minutes: int | None = None
@@ -129,6 +158,18 @@ def upsert_identification(
     episode_overview: str | None = None
     episode_still_url: str | None = None
 
+    # quality 字段（Phase 3.1）—— quality_score / score_weights_hash / score_computed_at
+    # 在 3.2 dedup engine 里 compute；这里只写 parse_*。
+    parse_codec = getattr(parse, "codec", None)
+    parse_color_depth = getattr(parse, "color_depth", None)
+    parse_container = getattr(parse, "container", None)
+    parse_audio_codec = getattr(parse, "audio_codec", None)
+    hdr_profiles = list(getattr(parse, "hdr_profiles", []) or [])
+
+    # 同事务写：media_files row + media_file_hdr_profiles 子表
+    # 当前依赖 destructive_action.open_connection 的 isolation_level="DEFERRED" 隐式
+    # 事务：所有 conn.execute 累积到末尾的 conn.commit() 一次 flush。
+    # 注：[follow-up] 未来 conn 改 autocommit 后需显式 `with conn:` / BEGIN+COMMIT 块。
     conn.execute(
         """
         INSERT INTO media_files (
@@ -141,6 +182,8 @@ def upsert_identification(
           metadata_source, metadata_provider, metadata_fetched_at,
           metadata_status, metadata_confidence, metadata_pick_source, metadata_reasoning,
           parse_raw_name, parse_resolution, parse_source, parse_release_group,
+          parse_codec, parse_color_depth, parse_container, parse_audio_codec,
+          tmdb_movie_id, tmdb_series_id, tmdb_episode_id,
           first_seen_at, last_updated_at
         ) VALUES (
           ?, ?, ?, ?,
@@ -152,6 +195,8 @@ def upsert_identification(
           ?, ?, ?,
           ?, ?, ?, ?,
           ?, ?, ?, ?,
+          ?, ?, ?, ?,
+          ?, ?, ?,
           ?, ?
         )
         ON CONFLICT(path) DO UPDATE SET
@@ -187,6 +232,13 @@ def upsert_identification(
           parse_resolution     = excluded.parse_resolution,
           parse_source         = excluded.parse_source,
           parse_release_group  = excluded.parse_release_group,
+          parse_codec          = excluded.parse_codec,
+          parse_color_depth    = excluded.parse_color_depth,
+          parse_container      = excluded.parse_container,
+          parse_audio_codec    = excluded.parse_audio_codec,
+          tmdb_movie_id        = excluded.tmdb_movie_id,
+          tmdb_series_id       = excluded.tmdb_series_id,
+          tmdb_episode_id      = excluded.tmdb_episode_id,
           last_updated_at      = excluded.last_updated_at
         """,
         (
@@ -199,9 +251,27 @@ def upsert_identification(
             metadata_source, metadata_provider, now,
             status, identify_result.confidence, identify_result.pick_source, identify_result.reasoning,
             parse.raw_name, parse.resolution, parse.source, parse.release_group,
+            parse_codec, parse_color_depth, parse_container, parse_audio_codec,
+            tmdb_movie_id, tmdb_series_id, tmdb_episode_id,
             now, now,
         ),
     )
+
+    # HDR profile 子表：[code-enforced] DELETE 后 INSERT canonical sorted profiles
+    # 防止 re-identify（旧识别为 ['DolbyVision','HDR10']，新版只 HDR10）留下 stale profile
+    row = conn.execute("SELECT id FROM media_files WHERE path = ?", (path,)).fetchone()
+    if row is not None:
+        media_file_id = row[0]
+        conn.execute(
+            "DELETE FROM media_file_hdr_profiles WHERE media_file_id = ?",
+            (media_file_id,),
+        )
+        if hdr_profiles:
+            conn.executemany(
+                "INSERT INTO media_file_hdr_profiles(media_file_id, profile) VALUES (?, ?)",
+                [(media_file_id, p) for p in hdr_profiles],
+            )
+
     conn.commit()
 
 

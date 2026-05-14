@@ -21,6 +21,9 @@ def conn(tmp_path):
     db_file = tmp_path / "t.db"
     c = destructive_action.open_connection(db_file)
     destructive_action.init_schema(c, SCHEMA_PATH)
+    # Phase 3 migration (adds 10 media_files columns + new tables)
+    from db import migrations
+    migrations.phase3_migrate(c)
     yield c
     c.close()
 
@@ -30,7 +33,9 @@ def _make_parse(**overrides) -> FilenameParse:
         raw_name="Show.S06E02.mkv", title="Show", year=2022,
         season=6, episode=2, episode_title="Ep Name",
         media_type="episode", resolution="1080p",
-        source="WEB-DL", release_group="RG", raw={},
+        source="WEB-DL", release_group="RG",
+        codec=None, color_depth=None, hdr_profiles=[], container=None, audio_codec=None,
+        raw={},
     )
     defaults.update(overrides)
     return FilenameParse(**defaults)
@@ -436,3 +441,172 @@ def test_library_stats_ignores_needs_review(conn):
     )
     stats = metadata_cache.get_library_stats(conn)
     assert stats["total"] == 1
+
+
+# ─── Phase 3.1: split tmdb id + HDR 子表 + 互斥 enforcement (3.0 carry-over) ───
+
+
+def _make_movie_candidate(tmdb_id: str = "238") -> MediaCandidate:
+    return _make_candidate(
+        id=f"tmdb:movie:{tmdb_id}",
+        external_ids={"tmdb_id": tmdb_id, "imdb_id": "tt0068646"},
+        title="教父", original_title="The Godfather",
+        year=1972, media_type="movie",
+    )
+
+
+def test_upsert_movie_writes_tmdb_movie_id_not_series(conn):
+    res = _make_result(
+        parse=_make_parse(media_type="movie", season=None, episode=None),
+        top=_make_movie_candidate("238"),
+    )
+    metadata_cache.upsert_identification(
+        conn, path="/share/godfather.mkv",
+        stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
+        identify_result=res,
+    )
+    row = conn.execute(
+        "SELECT tmdb_movie_id, tmdb_series_id, tmdb_episode_id, tmdb_id FROM media_files WHERE path=?",
+        ("/share/godfather.mkv",),
+    ).fetchone()
+    assert row["tmdb_movie_id"] == "238"
+    assert row["tmdb_series_id"] is None        # 互斥
+    assert row["tmdb_episode_id"] is None       # episode_id 仅 watched_items 写
+    assert row["tmdb_id"] == "238"              # 老字段保留兼容
+
+
+def test_upsert_tv_writes_tmdb_series_id_not_movie(conn):
+    res = _make_result(top=_make_candidate())  # default candidate is tv (60625)
+    metadata_cache.upsert_identification(
+        conn, path="/share/rick.mkv",
+        stat={"inode": 2, "size_bytes": 100, "mtime": 1000},
+        identify_result=res,
+    )
+    row = conn.execute(
+        "SELECT tmdb_movie_id, tmdb_series_id, tmdb_episode_id FROM media_files WHERE path=?",
+        ("/share/rick.mkv",),
+    ).fetchone()
+    assert row["tmdb_movie_id"] is None
+    assert row["tmdb_series_id"] == "60625"
+    assert row["tmdb_episode_id"] is None
+
+
+def test_upsert_companion_extras_no_tmdb_ids(conn):
+    """Extras 路径 → 所有 tmdb_*_id 都该是 NULL（互斥 + 不参与 join）。"""
+    parse = _make_parse(media_type="extra", season=None, episode=None,
+                         hdr_profiles=[], codec=None)
+    res = _make_result(parse=parse, top=None)
+    metadata_cache.upsert_identification(
+        conn, path="/share/Movie/Extras.mkv",
+        stat={"inode": 3, "size_bytes": 100, "mtime": 1000},
+        identify_result=res,
+    )
+    row = conn.execute(
+        "SELECT media_type, tmdb_movie_id, tmdb_series_id, tmdb_episode_id "
+        "FROM media_files WHERE path=?",
+        ("/share/Movie/Extras.mkv",),
+    ).fetchone()
+    assert row["media_type"] == "extra"
+    assert row["tmdb_movie_id"] is None
+    assert row["tmdb_series_id"] is None
+    assert row["tmdb_episode_id"] is None
+
+
+def test_upsert_writes_parse_quality_fields(conn):
+    """parse_codec / parse_container / parse_color_depth / parse_audio_codec 应入库。"""
+    parse = _make_parse(
+        media_type="movie", season=None, episode=None,
+        codec="H.265", color_depth="10-bit",
+        container="mkv", audio_codec="Dolby TrueHD",
+        hdr_profiles=["DolbyVision", "HDR10"],
+    )
+    res = _make_result(parse=parse, top=_make_movie_candidate("238"))
+    metadata_cache.upsert_identification(
+        conn, path="/share/q.mkv",
+        stat={"inode": 4, "size_bytes": 100, "mtime": 1000},
+        identify_result=res,
+    )
+    row = conn.execute(
+        "SELECT parse_codec, parse_color_depth, parse_container, parse_audio_codec "
+        "FROM media_files WHERE path=?",
+        ("/share/q.mkv",),
+    ).fetchone()
+    assert row["parse_codec"] == "H.265"
+    assert row["parse_color_depth"] == "10-bit"
+    assert row["parse_container"] == "mkv"
+    assert row["parse_audio_codec"] == "Dolby TrueHD"
+
+
+def test_upsert_writes_hdr_profiles_to_subtable(conn):
+    parse = _make_parse(
+        media_type="movie", season=None, episode=None,
+        hdr_profiles=["DolbyVision", "HDR10"],
+    )
+    res = _make_result(parse=parse, top=_make_movie_candidate("238"))
+    metadata_cache.upsert_identification(
+        conn, path="/share/hdr.mkv",
+        stat={"inode": 5, "size_bytes": 100, "mtime": 1000},
+        identify_result=res,
+    )
+    fid = conn.execute(
+        "SELECT id FROM media_files WHERE path=?", ("/share/hdr.mkv",)
+    ).fetchone()["id"]
+    profiles = [
+        r["profile"]
+        for r in conn.execute(
+            "SELECT profile FROM media_file_hdr_profiles WHERE media_file_id=? ORDER BY profile",
+            (fid,),
+        )
+    ]
+    assert profiles == ["DolbyVision", "HDR10"]
+
+
+def test_upsert_clears_stale_hdr_profiles_on_reidentify(conn):
+    """Re-identify 后 HDR 子表先 DELETE 再 INSERT；旧 profile 不残留。"""
+    # 第一次：DolbyVision + HDR10
+    parse1 = _make_parse(media_type="movie", season=None, episode=None,
+                          hdr_profiles=["DolbyVision", "HDR10"])
+    metadata_cache.upsert_identification(
+        conn, path="/share/r.mkv",
+        stat={"inode": 6, "size_bytes": 100, "mtime": 1000},
+        identify_result=_make_result(parse=parse1, top=_make_movie_candidate("238")),
+    )
+    # 第二次：重剪版只 HDR10
+    parse2 = _make_parse(media_type="movie", season=None, episode=None,
+                          hdr_profiles=["HDR10"])
+    metadata_cache.upsert_identification(
+        conn, path="/share/r.mkv",
+        stat={"inode": 6, "size_bytes": 200, "mtime": 2000},
+        identify_result=_make_result(parse=parse2, top=_make_movie_candidate("238")),
+    )
+    fid = conn.execute(
+        "SELECT id FROM media_files WHERE path=?", ("/share/r.mkv",)
+    ).fetchone()["id"]
+    profiles = sorted(
+        r["profile"]
+        for r in conn.execute(
+            "SELECT profile FROM media_file_hdr_profiles WHERE media_file_id=?", (fid,)
+        )
+    )
+    assert profiles == ["HDR10"]  # DolbyVision 必须被清掉
+
+
+def test_upsert_empty_hdr_profiles_results_in_no_subtable_rows(conn):
+    parse = _make_parse(media_type="movie", season=None, episode=None, hdr_profiles=[])
+    metadata_cache.upsert_identification(
+        conn, path="/share/sdr.mkv",
+        stat={"inode": 7, "size_bytes": 100, "mtime": 1000},
+        identify_result=_make_result(parse=parse, top=_make_movie_candidate("238")),
+    )
+    cnt = conn.execute("SELECT COUNT(*) FROM media_file_hdr_profiles").fetchone()[0]
+    assert cnt == 0
+
+
+def test_split_tmdb_ids_helper_enforces_mutual_exclusion():
+    """_split_tmdb_ids 是 carry-over 互斥 enforce 的 helper。"""
+    assert metadata_cache._split_tmdb_ids("movie", "238") == ("238", None, None)
+    assert metadata_cache._split_tmdb_ids("tv", "60625") == (None, "60625", None)
+    assert metadata_cache._split_tmdb_ids("extra", "999") == (None, None, None)
+    assert metadata_cache._split_tmdb_ids("part", "999") == (None, None, None)
+    assert metadata_cache._split_tmdb_ids(None, "x") == (None, None, None)
+    assert metadata_cache._split_tmdb_ids("movie", None) == (None, None, None)
