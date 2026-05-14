@@ -851,6 +851,102 @@ def candidate_to_dict(c: DedupCandidate) -> dict:
     }
 
 
+def find_watched_stale_media(
+    conn: sqlite3.Connection,
+    *,
+    days: int = 180,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    """Find media files: watched + first_seen_at older than `days`.
+
+    [code-enforced Pattern B] Three explicit UNION branches:
+      1. movie: m.media_type='movie' AND m.tmdb_movie_id IS NOT NULL
+         watched join: w.media_type='movie' AND w.tmdb_movie_id IS NOT NULL
+      2. tv episode_id strong: m.media_type='tv' AND m.tmdb_episode_id IS NOT NULL
+         watched join: w.media_type='tv' AND w.tmdb_episode_id IS NOT NULL
+      3. tv series+s+e fallback: m.media_type='tv' AND m.tmdb_episode_id IS NULL
+         AND m.tmdb_series_id IS NOT NULL AND s/e NOT NULL
+         watched join: w.media_type='tv' AND w.tmdb_series_id IS NOT NULL
+                       AND s/e match
+    Each branch has double-sided NOT NULL on join keys + media_type equality.
+
+    Returns (rows, total). Each row is a dict of media_files columns plus
+    the resolved `days_since_first_seen` for UI display.
+    """
+    cutoff = _now() - days * 86400
+
+    where_movie = (
+        "m.first_seen_at < :cutoff "
+        "AND m.media_type = 'movie' "
+        "AND m.tmdb_movie_id IS NOT NULL "
+        "AND EXISTS ("
+        "  SELECT 1 FROM watched_items w "
+        "   WHERE w.media_type = 'movie' "
+        "     AND w.tmdb_movie_id IS NOT NULL "
+        "     AND w.tmdb_movie_id = m.tmdb_movie_id"
+        ")"
+    )
+    where_tv_episode_id = (
+        "m.first_seen_at < :cutoff "
+        "AND m.media_type = 'tv' "
+        "AND m.tmdb_episode_id IS NOT NULL "
+        "AND EXISTS ("
+        "  SELECT 1 FROM watched_items w "
+        "   WHERE w.media_type = 'tv' "
+        "     AND w.tmdb_episode_id IS NOT NULL "
+        "     AND w.tmdb_episode_id = m.tmdb_episode_id"
+        ")"
+    )
+    where_tv_se_fallback = (
+        "m.first_seen_at < :cutoff "
+        "AND m.media_type = 'tv' "
+        "AND m.tmdb_episode_id IS NULL "                # avoid double-match w/ branch 2
+        "AND m.tmdb_series_id IS NOT NULL "
+        "AND m.season_number IS NOT NULL "
+        "AND m.episode_number IS NOT NULL "
+        "AND EXISTS ("
+        "  SELECT 1 FROM watched_items w "
+        "   WHERE w.media_type = 'tv' "
+        "     AND w.tmdb_series_id IS NOT NULL "
+        "     AND w.tmdb_series_id = m.tmdb_series_id "
+        "     AND w.season_number = m.season_number "
+        "     AND w.episode_number = m.episode_number"
+        ")"
+    )
+    union_all_where = f"({where_movie}) OR ({where_tv_episode_id}) OR ({where_tv_se_fallback})"
+
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM media_files m WHERE {union_all_where}",
+        {"cutoff": cutoff},
+    ).fetchone()[0]
+
+    rows = conn.execute(
+        f"""
+        SELECT m.id, m.path, m.media_type, m.title, m.year,
+               m.tmdb_movie_id, m.tmdb_series_id, m.tmdb_episode_id,
+               m.season_number, m.episode_number,
+               m.size_bytes, m.mtime, m.first_seen_at, m.poster_url,
+               m.parse_resolution, m.parse_source
+          FROM media_files m
+         WHERE {union_all_where}
+         ORDER BY m.size_bytes DESC, m.id
+         LIMIT :limit OFFSET :offset
+        """,
+        {"cutoff": cutoff, "limit": limit, "offset": offset},
+    ).fetchall()
+
+    now = _now()
+    return [
+        {
+            **dict(r),
+            "days_since_first_seen": (now - r["first_seen_at"]) // 86400
+                if r["first_seen_at"] else None,
+        }
+        for r in rows
+    ], total
+
+
 def group_to_dict(g: DedupGroup) -> dict:
     return {
         "group_key": g.group_key,

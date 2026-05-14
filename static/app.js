@@ -2933,3 +2933,65 @@ function _bindDedupFilters() {
         }
     });
 }
+
+
+// Phase 3.5: 已看完归档候选 — 切换 dedup-groups 容器显示 watched-stale 列表
+async function loadWatchedStale() {
+    const container = document.getElementById("dedup-groups");
+    container.innerHTML = '<div class="text-secondary py-3 text-center">加载中…</div>';
+    document.getElementById("dedup-stats").textContent = "已看完候选";
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/library/watched-stale?days=180&limit=100`);
+        const data = await res.json();
+        if (!res.ok) {
+            container.innerHTML = `<div class="text-danger py-3 text-center">加载失败: ${data.error || res.status}</div>`;
+            return;
+        }
+        document.getElementById("dedup-stats").textContent =
+            `${data.total} 个候选，本页 ${humanSize(data.total_bytes_on_page || 0)}`;
+        if (data.items.length === 0) {
+            container.innerHTML =
+                '<div class="empty-state text-center"><i class="bi bi-emoji-smile" style="font-size:2rem;"></i><div>没有归档候选</div><small class="text-secondary">配置 Emby + 同步后才能看到</small></div>';
+            return;
+        }
+
+        container.innerHTML = "";
+        const banner = createElement("div", {
+            className: "dedup-group",
+            innerHTML: `<div class="text-secondary" style="font-size:12px;">这些文件你已看完且 180+ 天没动。本页占用 ${humanSize(data.total_bytes_on_page)}。点路径进入文件视图，从那里手动删除（走 file_browser 流程）。</div>`,
+        });
+        container.appendChild(banner);
+
+        data.items.forEach(it => {
+            const row = createElement("div", { className: "dedup-candidate" });
+            const tags = [it.parse_resolution, it.parse_source].filter(Boolean).join(" · ");
+            const dayLabel = (it.days_since_first_seen != null)
+                ? `${it.days_since_first_seen} 天未动`
+                : "—";
+            const title = it.title || it.tmdb_movie_id || "(未识别)";
+            const subtitle = (it.media_type === "tv")
+                ? `${title} (S${it.season_number}E${it.episode_number})`
+                : `${title}${it.year ? " (" + it.year + ")" : ""}`;
+            row.appendChild(createElement("div", {
+                className: "path",
+                innerHTML: `<strong>${subtitle}</strong> · ${humanSize(it.size_bytes || 0)} · ${tags || "?"} · ${dayLabel}<br>${it.path}`,
+            }));
+            const btn = createElement("button", {
+                className: "tb-btn",
+                innerHTML: '<i class="bi bi-folder2-open"></i>',
+                title: "在文件视图中打开",
+            });
+            btn.addEventListener("click", () => {
+                const dir = it.path.substring(0, it.path.lastIndexOf("/"));
+                switchView("files");
+                loadFiles(dir);
+            });
+            row.appendChild(btn);
+            container.appendChild(row);
+        });
+    } catch (e) {
+        console.error("[loadWatchedStale] failed:", e);
+        container.innerHTML = '<div class="text-danger py-3 text-center">加载异常</div>';
+    }
+}

@@ -1823,9 +1823,33 @@ def _nfo_write_executor(payload: dict) -> dict:
     }
 
 
+class ArchiveDisabledError(Exception):
+    """Sentinel: archive executor disabled in Phase 3, but still resolves through
+    the standard destructive-action confirm pipeline so MCP / automation clients
+    see a normal failure with a recognizable error message.
+    """
+
+
+def _archive_executor(payload: dict) -> dict:
+    """Phase 3.5 stub: archive kind 不接入 SSH copy/verify/unlink。
+
+    保留契约 #1 一致性 — preview 仍返 signed_token；confirm 走到此处会 raise，
+    destructive_action.confirm 把 exception 映射到 status='failed' +
+    error='ArchiveDisabledError: ...'。MCP / 自动化客户端可识别此模式。
+
+    [code-enforced] 不调任何 SSH / qBit / 文件操作。
+    """
+    raise ArchiveDisabledError(
+        "archive_kind_disabled_in_phase3: "
+        "Archive 操作未启用，Phase 3 不实施 SSH copy/verify/unlink。"
+    )
+
+
 def _route_executor_by_kind(payload: dict) -> dict:
-    """Spike 阶段支持 'delete' + 'nfo_write'。Phase 3 加 archive / purge_provider。"""
+    """Phase 3.5: 支持 'delete' + 'nfo_write' + 'archive' (stub)。"""
     kind = payload.get("kind")
+    if kind == "archive":
+        return _archive_executor(payload)
     if kind == "delete":
         return _delete_executor(payload)
     if kind == "nfo_write":
@@ -1965,6 +1989,55 @@ def _do_action_preview(kind: str, raw_data: dict):
             "total_size": sum(it["real_size"] for it in snapshot["items"]),
             "total_size_human": human_size(sum(it["real_size"] for it in snapshot["items"])),
             "total_hardlinks": sum(len(it["hardlinks"]) for it in snapshot["items"]),
+        })
+    if kind == "archive":
+        # Phase 3.5 stub: preview 仍走完整契约 #1（产 signed_token），但不 SSH stat。
+        # confirm 时 _archive_executor raise → destructive_action.confirm 落
+        # status='failed' + error='ArchiveDisabledError: ...'。
+        candidates_in = raw_data.get("candidates") or []
+        if not isinstance(candidates_in, list) or not candidates_in:
+            return jsonify({"error": "candidates required"}), 400
+        candidates = []
+        for c in candidates_in:
+            if isinstance(c, str):
+                candidates.append({"path": c})
+            elif isinstance(c, dict) and c.get("path"):
+                candidates.append({"path": c["path"]})
+            else:
+                return jsonify({"error": f"invalid candidate: {c!r}"}), 400
+        snapshot_stub = {
+            "captured_at": int(time.time()),
+            "mode": "stub",
+            "blocked": False,
+            "mismatches": [],
+            "items": [{"path": c["path"]} for c in candidates],
+            "all_to_delete": [],
+            "torrents": [],
+            "qbit_status": {"ok": True, "message": "(archive stub — no SSH performed)"},
+        }
+        payload = {
+            "kind": "archive",
+            "candidates": candidates,
+            "snapshot": snapshot_stub,
+            "options": raw_data.get("options") or {},
+        }
+        res = destructive_action.create_preview(
+            get_db(),
+            kind="archive",
+            payload=payload,
+            server_secret=SERVER_SECRET,
+            created_by="web_ui",
+        )
+        return jsonify({
+            "action_id": res.action_id,
+            "signed_token": res.signed_token,
+            "expires_at": res.expires_at,
+            "kind": "archive",
+            "snapshot": snapshot_stub,
+            "warning": "archive_executor_disabled",
+            "warning_message": (
+                "Archive 操作目前未启用，confirm 会返回 failed/disabled_kind。"
+            ),
         })
     return jsonify({"error": f"kind '{kind}' not supported in spike"}), 400
 
@@ -2803,6 +2876,38 @@ def library_stats():
     """库概览统计。"""
     stats = metadata_cache.get_library_stats(get_db())
     resp = jsonify(stats)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/library/watched-stale", methods=["GET"])
+@require_token
+def library_watched_stale():
+    """Phase 3.5: 已看完 + N 天未动的媒体（候选删除 / 归档）。
+
+    Query params:
+      days:    default 180; min 1
+      limit:   default 50, max 500
+      offset:  default 0
+    """
+    args = request.args
+    days = max(1, args.get("days", 180, type=int))
+    limit = max(1, min(500, args.get("limit", 50, type=int)))
+    offset = max(0, args.get("offset", 0, type=int))
+
+    items, total = dedup.find_watched_stale_media(
+        get_db(), days=days, limit=limit, offset=offset,
+    )
+    total_bytes = sum(it.get("size_bytes", 0) or 0 for it in items)
+    resp = jsonify({
+        "items": items,
+        "total": total,
+        "total_bytes_on_page": total_bytes,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(items) < total,
+        "days_threshold": days,
+    })
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
