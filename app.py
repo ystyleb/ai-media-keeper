@@ -1384,12 +1384,23 @@ def _ssh_stat_paths(paths: list[str]) -> dict[str, dict]:
     return result
 
 
-def _build_delete_snapshot(candidates: list[dict]) -> dict:
+def _build_delete_snapshot(
+    candidates: list[dict], *, mode: str = "lenient"
+) -> dict:
     """SSH 实时拉 ground truth + 硬链接 + qBit 匹配，生成 canonical snapshot。
 
-    candidates: [{"path": ...}, ...]，client 提交的原始候选——其他字段忽略。
+    candidates: [{"path": ...}, ...]，client 提交的原始候选——其他字段在 lenient 模式下忽略。
     Server-side authoritative：所有 inode/size/mtime/realpath 都重新算。
+
+    mode='strict' (Phase 3.3 dedup source):
+      - 每个 candidate 必须含 expected_inode + expected_size + expected_mtime
+      - SSH stat 后强制对比；任一不一致 → snapshot 含 mismatches[] + blocked=True
+      - 调用方应该看到 blocked=True 就 abort，不继续 create_preview
+    mode='lenient' (file_browser source):
+      - 不要求 expected_* 字段，纯 ground truth snapshot
     """
+    if mode not in ("strict", "lenient"):
+        raise ValueError(f"invalid snapshot mode: {mode!r}")
     paths = [validate_path(c["path"]) for c in candidates]
     _reject_base_path(paths)
 
@@ -1457,8 +1468,47 @@ def _build_delete_snapshot(candidates: list[dict]) -> dict:
             "hardlinks": [hp for hp in hl_info.get("all_paths", []) if hp != p],
         })
 
+    # Phase 3.3: strict mode 强制对比 expected_* 字段 → 任一不一致都生成 mismatches
+    mismatches: list[dict] = []
+    blocked = False
+    if mode == "strict":
+        # candidates 跟 paths 同序（validate_path 是纯路径规整，顺序保持）
+        for original, p in zip(candidates, paths):
+            stat = stat_map.get(p, {"exists": False})
+            diffs_for_path: list[str] = []
+            if not stat.get("exists"):
+                diffs_for_path.append("missing")
+            else:
+                if original.get("expected_inode") is not None and \
+                        original["expected_inode"] != stat.get("inode"):
+                    diffs_for_path.append("inode_changed")
+                if original.get("expected_size") is not None and \
+                        original["expected_size"] != stat.get("size_bytes"):
+                    diffs_for_path.append("size_changed")
+                if original.get("expected_mtime") is not None and \
+                        original["expected_mtime"] != stat.get("mtime"):
+                    diffs_for_path.append("mtime_changed")
+            if diffs_for_path:
+                mismatches.append({
+                    "path": p, "diffs": diffs_for_path,
+                    "expected": {
+                        "inode": original.get("expected_inode"),
+                        "size_bytes": original.get("expected_size"),
+                        "mtime": original.get("expected_mtime"),
+                    },
+                    "current": {
+                        "inode": stat.get("inode"),
+                        "size_bytes": stat.get("size_bytes"),
+                        "mtime": stat.get("mtime"),
+                    },
+                })
+        blocked = bool(mismatches)
+
     return {
         "captured_at": int(time.time()),
+        "mode": mode,
+        "blocked": blocked,
+        "mismatches": mismatches,
         "items": items,
         "all_to_delete": sorted({
             p for p in paths
@@ -1737,27 +1787,98 @@ def _route_executor_by_kind(payload: dict) -> dict:
 # ─────────────────────────────────────────────────────────────
 
 
+_VALID_DELETE_SOURCES = {"dedup", "file_browser"}
+
+
 def _do_action_preview(kind: str, raw_data: dict):
-    """Preview 阶段共用逻辑——/api/action/preview 和 /api/delete-preview alias 都调它。"""
+    """Preview 阶段共用逻辑——/api/action/preview 和 /api/delete-preview alias 都调它。
+
+    Phase 3.3: kind='delete' 加显式 source + snapshot_mode 字段，强制互锁:
+      - source='dedup' AND snapshot_mode != 'strict' → 400
+      - snapshot_mode='strict' 时每个 candidate 必须含 expected_inode/size/mtime
+    """
     if kind == "delete":
         candidates_in = raw_data.get("candidates") or raw_data.get("files") or []
         if not isinstance(candidates_in, list) or not candidates_in:
             return jsonify({"error": "candidates required (or legacy 'files')"}), 400
+
+        # source: 显式 field，legacy 调用方（旧 file-browser 前端）不传则 fallback
+        source = raw_data.get("source") or "file_browser"
+        if source not in _VALID_DELETE_SOURCES:
+            return jsonify({
+                "error": "source_invalid",
+                "detail": f"source must be one of {sorted(_VALID_DELETE_SOURCES)}, got {source!r}",
+            }), 400
+
+        # snapshot_mode: dedup 强制 strict；file_browser 默认 lenient
+        snapshot_mode = raw_data.get("snapshot_mode") or (
+            "strict" if source == "dedup" else "lenient"
+        )
+        if snapshot_mode not in ("strict", "lenient"):
+            return jsonify({"error": f"snapshot_mode must be strict|lenient, got {snapshot_mode!r}"}), 400
+
+        # 互锁：dedup 来源**不允许** lenient（强 enforcement，避免前端 bug 绕过）
+        if source == "dedup" and snapshot_mode != "strict":
+            return jsonify({
+                "error": "dedup_source_must_use_strict_mode",
+                "detail": "dedup-source delete must enforce strict expected_* snapshot",
+            }), 400
+
+        # Strict 模式必填 expected_inode + expected_size + expected_mtime
+        if snapshot_mode == "strict":
+            for i, c in enumerate(candidates_in):
+                if not isinstance(c, dict):
+                    return jsonify({
+                        "error": "strict_mode_requires_expected_fields",
+                        "candidate_index": i,
+                        "detail": "candidate must be object containing expected_inode/size/mtime",
+                    }), 400
+                for f in ("expected_inode", "expected_size", "expected_mtime"):
+                    if c.get(f) is None:
+                        return jsonify({
+                            "error": "strict_mode_requires_expected_fields",
+                            "candidate_index": i,
+                            "missing": f,
+                        }), 400
+
         # 兼容：candidates 可以是 [{path}, ...] 也可以是 [path, ...]
         candidates = []
         for c in candidates_in:
             if isinstance(c, str):
                 candidates.append({"path": c})
             elif isinstance(c, dict) and c.get("path"):
-                candidates.append({"path": c["path"]})
+                cand = {"path": c["path"]}
+                # strict mode 把 expected_* 也带进去给 _build_delete_snapshot 用
+                for f in ("expected_inode", "expected_size", "expected_mtime"):
+                    if c.get(f) is not None:
+                        cand[f] = c[f]
+                candidates.append(cand)
             else:
                 return jsonify({"error": f"invalid candidate: {c!r}"}), 400
+
         options = raw_data.get("options") or {}
         if "delete_torrents" in raw_data:  # legacy field 兼容
             options.setdefault("delete_torrents", raw_data["delete_torrents"])
-        snapshot = _build_delete_snapshot(candidates)
+
+        snapshot = _build_delete_snapshot(candidates, mode=snapshot_mode)
+
+        # strict mode 撞到 mismatch → 立刻返 blocked，不生成 signed_token
+        if snapshot.get("blocked"):
+            resp = jsonify({
+                "blocked": True,
+                "kind": "delete",
+                "source": source,
+                "snapshot_mode": snapshot_mode,
+                "mismatches": snapshot["mismatches"],
+                "message": "以下文件已变化，请刷新索引后重试",
+            })
+            resp.status_code = 409                      # Conflict: state diverged
+            return resp
+
         payload = {
             "kind": "delete",
+            "source": source,
+            "snapshot_mode": snapshot_mode,
             "candidates": candidates,
             "snapshot": snapshot,
             "options": options,
@@ -1783,6 +1904,8 @@ def _do_action_preview(kind: str, raw_data: dict):
             "signed_token": res.signed_token,
             "expires_at": res.expires_at,
             "kind": "delete",
+            "source": source,
+            "snapshot_mode": snapshot_mode,
             "snapshot": snapshot,
             # legacy-compatible preview shape
             "files": preview_files,

@@ -269,6 +269,76 @@
         /* ─── 库视图布局 ───────────────────────────────────────── */
         /* 用 absolute fill 避免 flex-within-flex 的 sizing 边角问题。
            .main-panel position:relative （见 .main-panel 那条规则下面） */
+        #dedup-panel {
+            display: none;
+            position: absolute;
+            inset: 0;
+            background: var(--bg);
+            z-index: 5;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        #dedup-panel.active { display: flex; }
+        #dedup-scroll { flex: 1; overflow: auto; padding: 12px; }
+        .dedup-group {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 12px;
+            background: var(--surface);
+        }
+        .dedup-group h4 {
+            margin: 0 0 8px 0;
+            font-size: 15px;
+        }
+        .dedup-group .group-stats {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+        .dedup-candidate {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            padding: 6px 8px;
+            border-top: 1px solid var(--border);
+            font-size: 13px;
+        }
+        .dedup-candidate:hover { background: var(--bg); }
+        .dedup-candidate .score-badge {
+            background: var(--accent);
+            color: #fff;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .dedup-candidate.keep-recommended {
+            background: rgba(34, 197, 94, 0.08);
+        }
+        .dedup-candidate .keep-badge {
+            background: #22c55e;
+            color: #fff;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+        .dedup-candidate .watched-badge {
+            background: #6366f1;
+            color: #fff;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+        .dedup-candidate .path {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-family: monospace;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
         #library-panel {
             position: absolute; inset: 0;
             display: none;
@@ -876,6 +946,10 @@
                 <i class="bi bi-collection-play"></i>
                 库
             </button>
+            <button id="view-tab-dedup" class="tb-btn view-tab" onclick="switchView('dedup')">
+                <i class="bi bi-files"></i>
+                重复
+            </button>
         </div>
     </div>
 </header>
@@ -1003,6 +1077,41 @@
 
                 <div id="library-loadmore" class="text-center py-3" style="display:none;">
                     <button class="btn btn-outline-secondary btn-sm" onclick="loadMoreLibrary()">加载更多</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── 重复检测视图（默认隐藏，view-toggle 切换，absolute fill main-panel） ── -->
+        <div id="dedup-panel">
+            <div class="bc-bar" style="gap:12px;">
+                <i class="bi bi-files bc-icon"></i>
+                <div style="font-weight:600;">重复 Release 检测</div>
+                <span id="dedup-stats" class="text-secondary" style="font-size:12px;margin-left:auto;">—</span>
+            </div>
+
+            <div class="filter-bar">
+                <select class="v-select" id="dedup-type">
+                    <option value="">全部类型</option>
+                    <option value="movie">电影</option>
+                    <option value="tv">剧集</option>
+                </select>
+                <label style="display:flex;align-items:center;gap:6px;font-size:13px;">
+                    <input type="checkbox" id="dedup-watched-only"> 仅已看完
+                </label>
+                <button class="tb-btn" onclick="loadDedupGroups()" style="margin-left:auto;">
+                    <i class="bi bi-arrow-clockwise"></i> 刷新
+                </button>
+                <button class="sb-btn sb-btn-danger" id="dedup-delete-btn" disabled onclick="deleteDedupSelection()">
+                    <i class="bi bi-trash3"></i> 删除选中
+                </button>
+            </div>
+
+            <div id="dedup-scroll">
+                <div id="dedup-groups"></div>
+                <div id="dedup-empty" class="empty-state text-center" style="display:none;">
+                    <i class="bi bi-emoji-smile" style="font-size:2.4rem;display:block;margin-bottom:12px;"></i>
+                    <div>没找到重复，干净！</div>
+                    <div class="text-secondary mt-2" style="font-size:12px;">如刚扫库，先确认库视图能看到媒体</div>
                 </div>
             </div>
         </div>

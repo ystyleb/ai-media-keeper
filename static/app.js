@@ -2482,23 +2482,26 @@ function switchView(view) {
     currentView = view;
     const fileTab = document.getElementById("view-tab-files");
     const libTab = document.getElementById("view-tab-library");
+    const dedupTab = document.getElementById("view-tab-dedup");
     const libPanel = document.getElementById("library-panel");
-    console.log("[switchView] elements:", {fileTab: !!fileTab, libTab: !!libTab, libPanel: !!libPanel});
+    const dedupPanel = document.getElementById("dedup-panel");
     if (!libPanel) {
         console.error("[switchView] #library-panel 不存在！HTML 没有加载新版本，请 hard reload");
         return;
     }
     fileTab.classList.toggle("active", view === "files");
     libTab.classList.toggle("active", view === "library");
+    if (dedupTab) dedupTab.classList.toggle("active", view === "dedup");
 
-    // 库视图用 absolute fill 覆盖在 main-panel 上（CSS: position:absolute inset:0）
-    // 切到 library 时 .active 让它显示，不动文件视图的元素—— file-container 之类
-    // 仍然在 DOM 但被 library-panel 完全盖住。切回 files 时 .active 移除即可。
-    document.getElementById("library-panel").classList.toggle("active", view === "library");
+    libPanel.classList.toggle("active", view === "library");
+    if (dedupPanel) dedupPanel.classList.toggle("active", view === "dedup");
 
     if (view === "library") {
         loadLibrary(true);
         loadLibraryStats();
+    } else if (view === "dedup") {
+        _bindDedupFilters();
+        loadDedupGroups();
     }
 }
 
@@ -2733,4 +2736,200 @@ async function loadExtrasForMain(mainPath, container) {
         // 加载失败静默 — 不影响主详情展示
         console.warn("[loadExtrasForMain] failed:", e);
     }
+}
+
+
+// ─── Phase 3.3: 重复检测视图 ────────────────────────────────────
+
+const dedupState = {
+    groups: [],
+    selectedFileIds: new Set(),
+};
+
+async function loadDedupGroups() {
+    const params = new URLSearchParams();
+    const type = document.getElementById("dedup-type").value;
+    const watchedOnly = document.getElementById("dedup-watched-only").checked;
+    if (type) params.set("media_type", type);
+    if (watchedOnly) params.set("watched_only", "1");
+    params.set("limit", "50");
+    params.set("offset", "0");
+
+    const container = document.getElementById("dedup-groups");
+    container.innerHTML = '<div class="text-secondary py-3 text-center">加载中…</div>';
+    dedupState.selectedFileIds.clear();
+    _updateDedupDeleteBtn();
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/dedup/groups?${params}`);
+        const data = await res.json();
+        if (!res.ok) {
+            container.innerHTML = `<div class="text-danger py-3 text-center">加载失败: ${data.error || res.status}</div>`;
+            return;
+        }
+        dedupState.groups = data.groups;
+        document.getElementById("dedup-stats").textContent =
+            `${data.total_groups} 组重复，可释放约 ${humanSize(data.total_deletable_bytes || 0)}`;
+        document.getElementById("dedup-empty").style.display =
+            (data.groups.length === 0) ? "block" : "none";
+        container.innerHTML = "";
+        data.groups.forEach(g => container.appendChild(_renderDedupGroup(g)));
+    } catch (e) {
+        console.error("[loadDedupGroups] failed:", e);
+        container.innerHTML = '<div class="text-danger py-3 text-center">加载异常</div>';
+    }
+}
+
+function _renderDedupGroup(group) {
+    const wrap = createElement("div", { className: "dedup-group" });
+    const title = group.title || group.tmdb_movie_id || group.tmdb_series_id || "(未识别)";
+    const heading = (group.media_type === "tv")
+        ? `${title} (S${group.season_number}E${group.episode_number})`
+        : `${title}${group.year ? " (" + group.year + ")" : ""}`;
+    wrap.appendChild(createElement("h4", { textContent: heading }));
+    wrap.appendChild(createElement("div", {
+        className: "group-stats",
+        textContent: `${group.candidates.length} 份 · 总占用 ${humanSize(group.total_size_bytes)} · 可删 ${humanSize(group.deletable_size_bytes)}`,
+    }));
+
+    group.candidates.forEach(c => {
+        const row = createElement("div", {
+            className: "dedup-candidate" + (c.keep_recommended ? " keep-recommended" : ""),
+        });
+        const chk = createElement("input", {
+            type: "checkbox",
+            // 默认勾选非推荐保留的（用户最常想删的）
+            checked: !c.keep_recommended,
+        });
+        if (!c.keep_recommended) {
+            dedupState.selectedFileIds.add(c.media_file_id);
+        }
+        chk.dataset.fileId = String(c.media_file_id);
+        chk.addEventListener("change", () => {
+            if (chk.checked) {
+                dedupState.selectedFileIds.add(c.media_file_id);
+            } else {
+                dedupState.selectedFileIds.delete(c.media_file_id);
+            }
+            _updateDedupDeleteBtn();
+        });
+        row.appendChild(chk);
+
+        if (c.keep_recommended) {
+            row.appendChild(createElement("span", { className: "keep-badge", textContent: "推荐保留" }));
+        }
+        if (c.is_watched) {
+            row.appendChild(createElement("span", { className: "watched-badge", textContent: "已看" }));
+        }
+        const tags = [c.resolution, ...(c.hdr_profiles || []), c.source, c.codec, c.release_group]
+            .filter(Boolean).join(" · ");
+        row.appendChild(createElement("div", {
+            className: "path",
+            innerHTML: `<strong>${humanSize(c.size_bytes || 0)}</strong> · ${tags || "?"}<br>${c.path}`,
+        }));
+        row.appendChild(createElement("span", {
+            className: "score-badge",
+            textContent: c.quality_score.toFixed(0),
+            title: JSON.stringify(c.score_breakdown, null, 2),
+        }));
+        wrap.appendChild(row);
+    });
+    _updateDedupDeleteBtn();
+    return wrap;
+}
+
+function _updateDedupDeleteBtn() {
+    const btn = document.getElementById("dedup-delete-btn");
+    if (!btn) return;
+    const n = dedupState.selectedFileIds.size;
+    btn.disabled = n === 0;
+    btn.innerHTML = n === 0
+        ? '<i class="bi bi-trash3"></i> 删除选中'
+        : `<i class="bi bi-trash3"></i> 删除选中 (${n})`;
+}
+
+async function deleteDedupSelection() {
+    if (dedupState.selectedFileIds.size === 0) return;
+    // 收集所有选中候选的 candidate 对象（含 expected_*）
+    const candidates = [];
+    for (const g of dedupState.groups) {
+        for (const c of g.candidates) {
+            if (dedupState.selectedFileIds.has(c.media_file_id)) {
+                candidates.push({
+                    path: c.path,
+                    expected_inode: c.inode,
+                    expected_size: c.size_bytes,
+                    expected_mtime: c.mtime,
+                });
+            }
+        }
+    }
+    if (!confirm(`确认删除 ${candidates.length} 个文件？\n\n会按 strict 模式校验，文件期间被修改将阻止删除。`)) {
+        return;
+    }
+
+    try {
+        const previewRes = await apiFetch(`${API_BASE}/api/action/preview`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                kind: "delete",
+                source: "dedup",
+                snapshot_mode: "strict",
+                candidates,
+                options: { delete_torrents: true },
+            }),
+        });
+        const data = await previewRes.json();
+
+        if (previewRes.status === 409) {
+            const summary = (data.mismatches || []).map(m =>
+                `${m.path}: ${m.diffs.join(", ")}`
+            ).join("\n");
+            alert(`以下文件已变化，请刷新后重试：\n\n${summary}`);
+            await loadDedupGroups();
+            return;
+        }
+        if (!previewRes.ok) {
+            alert(`Preview 失败: ${data.error || previewRes.status}\n${data.detail || ""}`);
+            return;
+        }
+
+        // 显示 preview 摘要 + 第二次 confirm
+        const sizeFreed = data.total_size_human;
+        const nFiles = data.files.length;
+        const nTorrents = (data.torrents || []).length;
+        const nHardlinks = data.total_hardlinks;
+        const msg = `Preview:\n  ${nFiles} 个文件 (${sizeFreed})\n  关联 ${nTorrents} 个种子\n  关联 ${nHardlinks} 个硬链接\n\nconfirm 后将立即执行删除（含 qBit 种子）。`;
+        if (!confirm(msg)) return;
+
+        const confirmRes = await apiFetch(`${API_BASE}/api/action/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                action_id: data.action_id,
+                signed_token: data.signed_token,
+            }),
+        });
+        const confirmData = await confirmRes.json();
+        if (!confirmRes.ok) {
+            alert(`Confirm 失败: ${confirmData.error || confirmRes.status}`);
+            return;
+        }
+        alert(`删除完成。${JSON.stringify(confirmData.result || {}, null, 2).slice(0, 300)}`);
+        await loadDedupGroups();
+    } catch (e) {
+        console.error("[deleteDedupSelection] failed:", e);
+        alert(`操作失败: ${e.message || e}`);
+    }
+}
+
+function _bindDedupFilters() {
+    ["dedup-type", "dedup-watched-only"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el && !el.__bound) {
+            el.addEventListener("change", () => loadDedupGroups());
+            el.__bound = true;
+        }
+    });
 }
