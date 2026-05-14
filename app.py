@@ -158,8 +158,10 @@ try:
     destructive_action.init_schema(_init_conn, SCHEMA_PATH)
     from db import migrations as _migrations
     phase3_summary = _migrations.phase3_migrate(_init_conn)
+    phase4_summary = _migrations.phase4_migrate(_init_conn)
     logger.info(
-        f"DB ready at {DB_PATH}; phase3 migration: {phase3_summary}"
+        f"DB ready at {DB_PATH}; phase3 migration: {phase3_summary}; "
+        f"phase4 migration: {phase4_summary}"
     )
 finally:
     _init_conn.close()
@@ -191,6 +193,7 @@ TMDB_KEY_FILE = CONFIG_DIR / ".tmdb_key"
 DEEPSEEK_KEY_FILE = CONFIG_DIR / ".deepseek_key"
 EMBY_KEY_FILE = CONFIG_DIR / ".emby_key"
 EMBY_CONFIG_FILE = CONFIG_DIR / "emby.json"
+ORGANIZE_CONFIG_FILE = CONFIG_DIR / "organize.json"
 
 
 def load_tmdb_key() -> str:
@@ -288,6 +291,31 @@ def _emby_client():
         return None
     from clients.watch.emby import EmbyClient
     return EmbyClient(base_url=cfg["url"], user_id=cfg["user_id"], api_key=key)
+
+
+# ─── Organize config (Phase 4A) ─────────────────────────────────
+
+
+def load_organize_config() -> dict:
+    """Phase 4A: 媒体库 hardlink 目标根配置。返回 {movies_root, tv_root} or {}."""
+    if ORGANIZE_CONFIG_FILE.exists():
+        try:
+            return json.loads(ORGANIZE_CONFIG_FILE.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def save_organize_config(cfg: dict) -> None:
+    """落盘 config/organize.json。仅保留 movies_root / tv_root 两字段。"""
+    payload = {
+        "movies_root": (cfg.get("movies_root") or "").strip(),
+        "tv_root": (cfg.get("tv_root") or "").strip(),
+    }
+    ORGANIZE_CONFIG_FILE.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 class QBitClient:

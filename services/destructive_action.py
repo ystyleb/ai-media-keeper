@@ -33,6 +33,7 @@ TTL_BY_KIND: dict[str, int] = {
     "nfo_write": 1800,
     "archive": 1800,
     "purge_provider": 600,
+    "organize": 600,
 }
 
 # crash recovery 阈值：running 持续超过此值视为 crash
@@ -41,6 +42,7 @@ RUNNING_TIMEOUT_BY_KIND: dict[str, int] = {
     "nfo_write": 120,
     "archive": 1800,
     "purge_provider": 120,
+    "organize": 60,
 }
 
 

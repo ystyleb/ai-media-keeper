@@ -10,7 +10,7 @@ PRAGMA synchronous = NORMAL;
 
 CREATE TABLE IF NOT EXISTS destructive_actions (
   action_id      TEXT PRIMARY KEY,
-  kind           TEXT NOT NULL CHECK (kind IN ('delete', 'nfo_write', 'archive', 'purge_provider')),
+  kind           TEXT NOT NULL CHECK (kind IN ('delete', 'nfo_write', 'archive', 'purge_provider', 'organize')),
   payload_hash   TEXT NOT NULL,
   payload_json   TEXT NOT NULL,
   expires_at     INTEGER NOT NULL,

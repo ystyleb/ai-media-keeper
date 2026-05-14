@@ -8,6 +8,7 @@ Each migration function is idempotent: safe to run on a brand-new DB or
 on an already-migrated DB. Apply order in app.py:
     init_schema(conn, schema_path)   # Phase 1/2 tables + indices
     phase3_migrate(conn)             # Phase 3 columns/tables/indices/data
+    phase4_migrate(conn)              # Phase 4 organize kind (table rebuild)
 """
 
 from __future__ import annotations
@@ -292,3 +293,72 @@ def phase3_migrate(conn: sqlite3.Connection) -> dict:
 
     conn.commit()
     return summary
+
+
+def phase4_migrate(conn: sqlite3.Connection) -> dict:
+    """Apply Phase 4 schema changes. Idempotent.
+
+    Phase 4 adds the 'organize' kind to destructive_actions. SQLite has no
+    ALTER CHECK CONSTRAINT, so the table must be rebuilt when the existing
+    CREATE TABLE statement does not yet include 'organize'. Brand-new DBs
+    get the updated CHECK from db/schema.sql directly and skip this rebuild.
+
+    Returns summary {rebuilt: bool, rows_moved: int, reason?: str}.
+    """
+    summary: dict = {"rebuilt": False, "rows_moved": 0}
+
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='destructive_actions'"
+    ).fetchone()
+    if row is None:
+        summary["reason"] = "table_missing"
+        return summary
+    current_sql = row[0] if not isinstance(row, sqlite3.Row) else row["sql"]
+    if "'organize'" in (current_sql or ""):
+        summary["reason"] = "already_has_organize"
+        return summary
+
+    # `with conn:` 自动 BEGIN/COMMIT/ROLLBACK，避开 Python sqlite3 已隐式开启事务的冲突
+    try:
+        with conn:
+            conn.execute(
+                """
+                CREATE TABLE destructive_actions_new (
+                  action_id      TEXT PRIMARY KEY,
+                  kind           TEXT NOT NULL CHECK (kind IN
+                                  ('delete', 'nfo_write', 'archive', 'purge_provider', 'organize')),
+                  payload_hash   TEXT NOT NULL,
+                  payload_json   TEXT NOT NULL,
+                  expires_at     INTEGER NOT NULL,
+                  status         TEXT NOT NULL DEFAULT 'pending'
+                                  CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'needs_manual_recovery')),
+                  consumed_at    INTEGER,
+                  started_at     INTEGER,
+                  completed_at   INTEGER,
+                  error          TEXT,
+                  result_json    TEXT,
+                  recovery_hint  TEXT,
+                  created_by     TEXT NOT NULL CHECK (created_by IN ('web_ui', 'mcp', 'cron')),
+                  created_at     INTEGER NOT NULL
+                )
+                """
+            )
+            cur = conn.execute(
+                "INSERT INTO destructive_actions_new SELECT * FROM destructive_actions"
+            )
+            moved = cur.rowcount or 0
+            conn.execute("DROP TABLE destructive_actions")
+            conn.execute(
+                "ALTER TABLE destructive_actions_new RENAME TO destructive_actions"
+            )
+            conn.execute(
+                "CREATE INDEX idx_actions_expires ON destructive_actions(expires_at, status)"
+            )
+            conn.execute(
+                "CREATE INDEX idx_actions_recovery ON destructive_actions(status, started_at)"
+            )
+        summary["rebuilt"] = True
+        summary["rows_moved"] = moved
+        return summary
+    except Exception:
+        raise

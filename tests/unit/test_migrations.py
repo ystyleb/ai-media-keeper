@@ -517,3 +517,131 @@ def test_phase3_migrate_meta_hash_matches_db_readback_not_source_dict(fresh_conn
         "SELECT current_hash FROM dedup_weights_meta WHERE id=1"
     ).fetchone()[0]
     assert meta_hash == runtime_hash
+
+
+# ── Phase 4 migration ──────────────────────────────────────────
+
+
+def _force_old_check_constraint(conn: sqlite3.Connection) -> None:
+    """模拟「老 DB」：把 destructive_actions 重建成不含 'organize' 的 CHECK。"""
+    conn.execute("DROP TABLE IF EXISTS destructive_actions")
+    conn.executescript(
+        """
+        CREATE TABLE destructive_actions (
+          action_id      TEXT PRIMARY KEY,
+          kind           TEXT NOT NULL CHECK (kind IN
+                          ('delete', 'nfo_write', 'archive', 'purge_provider')),
+          payload_hash   TEXT NOT NULL,
+          payload_json   TEXT NOT NULL,
+          expires_at     INTEGER NOT NULL,
+          status         TEXT NOT NULL DEFAULT 'pending'
+                          CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'needs_manual_recovery')),
+          consumed_at    INTEGER, started_at INTEGER, completed_at INTEGER,
+          error          TEXT, result_json TEXT, recovery_hint TEXT,
+          created_by     TEXT NOT NULL CHECK (created_by IN ('web_ui', 'mcp', 'cron')),
+          created_at     INTEGER NOT NULL
+        );
+        CREATE INDEX idx_actions_expires ON destructive_actions(expires_at, status);
+        CREATE INDEX idx_actions_recovery ON destructive_actions(status, started_at);
+        """
+    )
+    conn.commit()
+
+
+def test_phase4_migration_rebuilds_kind_check_constraint(fresh_conn):
+    """老 schema 没 'organize' → phase4_migrate 重建表，新 CHECK 含 'organize'。"""
+    _force_old_check_constraint(fresh_conn)
+    # 验证老约束：INSERT 'organize' 必失败
+    with pytest.raises(sqlite3.IntegrityError):
+        fresh_conn.execute(
+            "INSERT INTO destructive_actions"
+            "(action_id, kind, payload_hash, payload_json, expires_at, created_by, created_at)"
+            " VALUES ('a1', 'organize', 'h', '{}', 1000, 'web_ui', 999)"
+        )
+        fresh_conn.commit()
+    # 跑 phase4
+    summary = migrations.phase4_migrate(fresh_conn)
+    assert summary["rebuilt"] is True
+    # 重建后 INSERT 'organize' 应成功
+    fresh_conn.execute(
+        "INSERT INTO destructive_actions"
+        "(action_id, kind, payload_hash, payload_json, expires_at, created_by, created_at)"
+        " VALUES ('a2', 'organize', 'h', '{}', 1000, 'web_ui', 999)"
+    )
+    fresh_conn.commit()
+    row = fresh_conn.execute(
+        "SELECT kind FROM destructive_actions WHERE action_id='a2'"
+    ).fetchone()
+    assert row[0] == "organize"
+
+
+def test_phase4_migration_preserves_existing_rows(fresh_conn):
+    """老表的所有 row 在重建后必须仍存在，且字段值一致。"""
+    _force_old_check_constraint(fresh_conn)
+    fresh_conn.executemany(
+        "INSERT INTO destructive_actions"
+        "(action_id, kind, payload_hash, payload_json, expires_at, status, created_by, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("old-1", "delete", "h1", '{"k":1}', 9999, "succeeded", "web_ui", 100),
+            ("old-2", "nfo_write", "h2", '{"k":2}', 9999, "pending", "web_ui", 200),
+            ("old-3", "archive", "h3", '{"k":3}', 9999, "failed", "mcp", 300),
+        ],
+    )
+    fresh_conn.commit()
+
+    summary = migrations.phase4_migrate(fresh_conn)
+    assert summary["rebuilt"] is True
+    assert summary["rows_moved"] == 3
+
+    rows = fresh_conn.execute(
+        "SELECT action_id, kind, status, created_by FROM destructive_actions ORDER BY action_id"
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [
+        ("old-1", "delete", "succeeded", "web_ui"),
+        ("old-2", "nfo_write", "pending", "web_ui"),
+        ("old-3", "archive", "failed", "mcp"),
+    ]
+
+
+def test_phase4_migration_idempotent_second_run_is_noop(fresh_conn):
+    """第二次跑应 short-circuit (already_has_organize)，不动数据。"""
+    _force_old_check_constraint(fresh_conn)
+    fresh_conn.execute(
+        "INSERT INTO destructive_actions"
+        "(action_id, kind, payload_hash, payload_json, expires_at, created_by, created_at)"
+        " VALUES ('keep-me', 'delete', 'h', '{}', 1000, 'web_ui', 1)"
+    )
+    fresh_conn.commit()
+
+    s1 = migrations.phase4_migrate(fresh_conn)
+    s2 = migrations.phase4_migrate(fresh_conn)
+    assert s1["rebuilt"] is True
+    assert s1["rows_moved"] == 1
+    assert s2["rebuilt"] is False
+    assert s2.get("reason") == "already_has_organize"
+    # 数据仍在
+    cnt = fresh_conn.execute("SELECT COUNT(*) FROM destructive_actions").fetchone()[0]
+    assert cnt == 1
+
+
+def test_phase4_migration_indices_rebuilt(fresh_conn):
+    """重建表后两个 index（expires/recovery）必须重新创建。"""
+    _force_old_check_constraint(fresh_conn)
+    migrations.phase4_migrate(fresh_conn)
+    idx_names = {
+        row[0] for row in fresh_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND tbl_name='destructive_actions'"
+        ).fetchall()
+    }
+    assert "idx_actions_expires" in idx_names
+    assert "idx_actions_recovery" in idx_names
+
+
+def test_phase4_migration_skips_when_brand_new_schema_already_has_organize(fresh_conn):
+    """新 DB（schema.sql 已含 'organize'）→ phase4 检测到不重建。"""
+    # fresh_conn 已经走过最新 schema.sql，CHECK 含 'organize'
+    summary = migrations.phase4_migrate(fresh_conn)
+    assert summary["rebuilt"] is False
+    assert summary.get("reason") == "already_has_organize"
