@@ -154,7 +154,11 @@ SCHEMA_PATH = Path(__file__).parent / "db" / "schema.sql"
 _init_conn = destructive_action.open_connection(DB_PATH)
 try:
     destructive_action.init_schema(_init_conn, SCHEMA_PATH)
-    logger.info(f"Destructive action DB ready at {DB_PATH}")
+    from db import migrations as _migrations
+    phase3_summary = _migrations.phase3_migrate(_init_conn)
+    logger.info(
+        f"DB ready at {DB_PATH}; phase3 migration: {phase3_summary}"
+    )
 finally:
     _init_conn.close()
 
