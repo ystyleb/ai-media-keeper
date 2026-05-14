@@ -23,6 +23,7 @@ from services import llm
 from services import metadata_cache
 from services import nfo_writer
 from services import scanner
+from services import watch_sync
 from services.metadata.tmdb import TMDBProvider
 
 # 配置日志
@@ -188,6 +189,8 @@ DEFAULT_QBIT_CONFIG = {
 QBIT_PASS_FILE = CONFIG_DIR / ".qbit_pass"
 TMDB_KEY_FILE = CONFIG_DIR / ".tmdb_key"
 DEEPSEEK_KEY_FILE = CONFIG_DIR / ".deepseek_key"
+EMBY_KEY_FILE = CONFIG_DIR / ".emby_key"
+EMBY_CONFIG_FILE = CONFIG_DIR / "emby.json"
 
 
 def load_tmdb_key() -> str:
@@ -237,6 +240,54 @@ def save_deepseek_key(key: str) -> None:
         os.chmod(DEEPSEEK_KEY_FILE, 0o600)
     except OSError as e:
         logger.warning(f"could not chmod 600 {DEEPSEEK_KEY_FILE}: {e}")
+
+
+# ─── Emby config ────────────────────────────────────────────────
+
+
+def load_emby_config() -> dict:
+    if EMBY_CONFIG_FILE.exists():
+        try:
+            return json.loads(EMBY_CONFIG_FILE.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def save_emby_config(url: str, user_id: str) -> None:
+    EMBY_CONFIG_FILE.write_text(
+        json.dumps({"url": url.strip(), "user_id": user_id.strip()}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def load_emby_key() -> str:
+    if EMBY_KEY_FILE.exists():
+        return EMBY_KEY_FILE.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def save_emby_key(key: str) -> None:
+    key = key.strip()
+    if not key:
+        if EMBY_KEY_FILE.exists():
+            EMBY_KEY_FILE.unlink()
+        return
+    EMBY_KEY_FILE.write_text(key, encoding="utf-8")
+    try:
+        os.chmod(EMBY_KEY_FILE, 0o600)
+    except OSError as e:
+        logger.warning(f"could not chmod 600 {EMBY_KEY_FILE}: {e}")
+
+
+def _emby_client():
+    """Return EmbyClient or None if not configured. Lazy import for test isolation."""
+    cfg = load_emby_config()
+    key = load_emby_key()
+    if not (cfg.get("url") and cfg.get("user_id") and key):
+        return None
+    from clients.watch.emby import EmbyClient
+    return EmbyClient(base_url=cfg["url"], user_id=cfg["user_id"], api_key=key)
 
 
 class QBitClient:
@@ -2889,6 +2940,121 @@ def dedup_refresh():
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
     return jsonify({"updated": updated})
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase 3.4: Emby watch-source integration
+# ─────────────────────────────────────────────────────────────
+
+
+@app.route("/api/config/emby", methods=["GET"])
+@require_token
+def get_emby_config():
+    cfg = load_emby_config()
+    return jsonify({
+        "url": cfg.get("url", ""),
+        "user_id": cfg.get("user_id", ""),
+        "has_key": bool(load_emby_key()),
+    })
+
+
+@app.route("/api/config/emby", methods=["POST"])
+@require_token
+def set_emby_config():
+    data = request.json or {}
+    url = (data.get("url") or "").strip()
+    user_id = (data.get("user_id") or "").strip()
+    api_key = (data.get("api_key") or "").strip()
+    if not url or not user_id:
+        return jsonify({"ok": False, "message": "url and user_id required"}), 400
+    save_emby_config(url, user_id)
+    if api_key:
+        save_emby_key(api_key)
+    return jsonify({"ok": True, "has_key": bool(load_emby_key())})
+
+
+@app.route("/api/config/emby/test", methods=["POST"])
+@require_token
+def test_emby_config():
+    """临时验证 emby key：body 可传 url/user_id/api_key 直接测，不落盘。"""
+    data = request.json or {}
+    cfg = load_emby_config()
+    url = (data.get("url") or "").strip() or cfg.get("url", "")
+    user_id = (data.get("user_id") or "").strip() or cfg.get("user_id", "")
+    api_key = (data.get("api_key") or "").strip() or load_emby_key()
+    if not (url and user_id and api_key):
+        return jsonify({"ok": False, "message": "url, user_id, api_key all required"}), 400
+    try:
+        from clients.watch.emby import EmbyClient
+        result = EmbyClient(base_url=url, user_id=user_id, api_key=api_key).test_connection()
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"ok": False, "message": f"{type(e).__name__}: {e}"}), 200
+    return jsonify(result)
+
+
+def _open_db_conn():
+    """Mint a fresh sqlite3 connection for background workers (not request-scoped)."""
+    return destructive_action.open_connection(DB_PATH)
+
+
+@app.route("/api/watch/sync", methods=["POST"])
+@require_token
+def watch_sync_start():
+    """Start an Emby sync run. Returns run_id; client polls /api/watch/sync/status."""
+    client = _emby_client()
+    if client is None:
+        return jsonify({
+            "error": "emby_not_configured",
+            "detail": "configure /api/config/emby first (url + user_id + api_key)",
+        }), 400
+
+    try:
+        run_id = watch_sync.sync_emby(
+            open_conn=_open_db_conn,
+            emby_client=client,
+            since_iso=None,
+        )
+    except watch_sync.ConcurrentSyncError as e:
+        return jsonify({"error": "concurrent_sync", "detail": str(e)}), 409
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+    return jsonify({"run_id": run_id})
+
+
+@app.route("/api/watch/sync/status", methods=["GET"])
+@require_token
+def watch_sync_status():
+    run_id = request.args.get("id", "").strip()
+    if not run_id.isdigit():
+        return jsonify({"error": "id required (integer)"}), 400
+    info = watch_sync.get_sync_status(get_db(), int(run_id))
+    if info is None:
+        return jsonify({"error": "not_found"}), 404
+    resp = jsonify(info)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/watch/status", methods=["GET"])
+@require_token
+def watch_provider_status():
+    """Overall provider readiness: configured? connection healthy?"""
+    cfg = load_emby_config()
+    has_key = bool(load_emby_key())
+    configured = bool(cfg.get("url") and cfg.get("user_id") and has_key)
+    if not configured:
+        return jsonify({"emby": {"state": "not_configured"}})
+    client = _emby_client()
+    try:
+        result = client.test_connection()
+        state = "ok" if result.get("ok") else (result.get("code") or "error")
+        return jsonify({"emby": {
+            "state": state,
+            "message": result.get("message"),
+            "server_name": result.get("server_name"),
+        }})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"emby": {"state": "error", "message": str(e)}})
 
 
 @app.route("/api/action/recovery", methods=["GET"])
