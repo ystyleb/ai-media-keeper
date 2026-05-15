@@ -1022,7 +1022,11 @@ def test_ssh_ln_detects_race_ln_into_dir_and_cleans_up(monkeypatch):
 
 
 def test_ssh_ln_shell_cmd_includes_dir_check_and_post_stat(monkeypatch):
-    """codex r5 BLOCKER 2: shell 命令必须含 [ -d ] pre-check + [ -f ] post-stat + cleanup."""
+    """codex r5 BLOCKER 2 + r6: shell 命令必须含 [ -d ] pre-check + [ -f ] post-stat。
+
+    r6: cleanup path 用 Python 端预算的 basename（不在 shell 用 $(basename)），
+    避免 src 含空格时 word-split。所以 shell cmd 不再含 'basename' 字面，
+    而是含 quoted full cleanup path '<dst>/<src_basename>'."""
     captured = []
     def fake_ssh_exec(cmd, timeout=10):
         captured.append(cmd)
@@ -1035,7 +1039,32 @@ def test_ssh_ln_shell_cmd_includes_dir_check_and_post_stat(monkeypatch):
     assert "ln " in cmd
     assert "[ ! -f " in cmd, f"missing post-stat: {cmd}"
     assert "DST_NOT_REGULAR" in cmd
-    assert "basename" in cmd, "missing cleanup of <dst>/<basename(src)>"
+    # r6: cleanup path 是 Python 端预算的 <dst>/<basename(src)>
+    assert "/dst/y.mkv/x.mkv" in cmd, f"missing pre-computed cleanup path: {cmd}"
+
+
+def test_ssh_ln_cleanup_path_safe_with_space_in_src_filename(monkeypatch):
+    """codex r6 BLOCKER: src 含空格时 cleanup path 不能在 shell word-split.
+
+    之前 `rm -f <dst>/$(basename '<path with space>')` 会让 basename 输出的
+    『My Movie.mkv』在 shell 里 split 成 ['<dst>/My', 'Movie.mkv'] 两个 arg，
+    rm -f 调用时可能误删 CWD 同名文件。
+    """
+    captured = []
+    def fake_ssh_exec(cmd, timeout=10):
+        captured.append(cmd)
+        return (0, "", "")
+    monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
+    app_module._ssh_ln("/dl/My Movie.mkv", "/media/My Show (2024)")
+    cmd = captured[0]
+    # cleanup path 必须是单 token shlex.quote 的字符串
+    assert "'/media/My Show (2024)/My Movie.mkv'" in cmd, (
+        f"cleanup path must be pre-quoted single token: {cmd}"
+    )
+    # 不能含 `$(basename ...)` 实时展开
+    assert "$(basename" not in cmd, (
+        f"must not use shell $(basename ...) — word-split risk: {cmd}"
+    )
 
 
 def test_ssh_create_nfo_if_absent_detects_race_ln_into_dir(monkeypatch):
@@ -1060,6 +1089,8 @@ def test_ssh_create_nfo_if_absent_shell_cmd_includes_post_stat(monkeypatch):
     cmd = captured[0]
     assert "[ ! -f " in cmd
     assert "NFO_TARGET_NOT_REGULAR" in cmd
+    # codex r6: cleanup path 不能用 shell $(basename ...) 避免 word-split
+    assert "$(basename" not in cmd, f"must not use shell basename: {cmd}"
 
 
 def test_executor_rejects_incomplete_metadata_snapshot(monkeypatch):

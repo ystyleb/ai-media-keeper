@@ -1477,6 +1477,10 @@ def _ssh_ln(src: str, dst: str) -> tuple[int, str, str]:
     防 silent ln-into-dir race。BusyBox 不支持 `-T` flag，所以走 shell
     控制流而非 GNU 专属 option。
 
+    codex r6: cleanup path 在 Python 端 os.path.join + shlex.quote，避免
+    `$(basename '<src with space>')` 在 shell 里 word-split 成多个 token
+    被 `rm -f` 当多 arg 处理（可能误删 CWD 同名 file）。
+
     stdout marker:
       DST_IS_DIR    — pre-check 命中：dst 已是目录（exit 99）
       DST_NOT_REGULAR — ln 后 dst 不是 regular file（race ln-into-dir，
@@ -1485,12 +1489,14 @@ def _ssh_ln(src: str, dst: str) -> tuple[int, str, str]:
     """
     safe_src = shlex.quote(src)
     safe_dst = shlex.quote(dst)
+    # Python 端预算 basename 一次性 shlex.quote — 避免 shell word-split
+    cleanup_in_dir = shlex.quote(f"{dst.rstrip('/')}/{os.path.basename(src)}")
     cmd = (
         f"if [ -d {safe_dst} ]; then echo DST_IS_DIR; exit 99; fi; "
         f"ln {safe_src} {safe_dst}; LN_RC=$?; "
         f"if [ $LN_RC -ne 0 ]; then exit $LN_RC; fi; "
         f"if [ ! -f {safe_dst} ]; then "
-        f"  [ -d {safe_dst} ] && rm -f {safe_dst}/$(basename {safe_src}) 2>/dev/null; "
+        f"  [ -d {safe_dst} ] && rm -f {cleanup_in_dir} 2>/dev/null; "
         f"  echo DST_NOT_REGULAR; exit 98; "
         f"fi"
     )
@@ -1929,9 +1935,13 @@ def _ssh_create_nfo_if_absent(
     try:
         import uuid
         xml_b64 = base64.b64encode(xml.encode("utf-8")).decode("ascii")
-        tmp_path = f"{nfo_path}.tmp.{uuid.uuid4().hex[:12]}"
+        tmp_basename = f"{os.path.basename(nfo_path)}.tmp.{uuid.uuid4().hex[:12]}"
+        nfo_dir = os.path.dirname(nfo_path)
+        tmp_path = f"{nfo_dir}/{tmp_basename}" if nfo_dir else tmp_basename
         safe_nfo = shlex.quote(nfo_path)
         safe_tmp = shlex.quote(tmp_path)
+        # codex r6: cleanup path Python 端预算避免 $(basename '<space>') word-split
+        cleanup_in_dir = shlex.quote(f"{nfo_path.rstrip('/')}/{tmp_basename}")
         # codex r4 NIT: grep -c 在 count=0 时 rc=1 让整个 shell rc!=0 进 create_failed 分支，
         # 误归类。用 `|| echo 0` 兜底保证 rc=0，count 由 stdout 决定。
         verify_step = f"; grep -c 'tmdb' {safe_nfo} || echo 0" if verify_tmdb else ""
@@ -1954,7 +1964,7 @@ def _ssh_create_nfo_if_absent(
             f"  exit $LN_RC; "
             f"fi; "
             f"if [ ! -f {safe_nfo} ]; then "
-            f"  [ -d {safe_nfo} ] && rm -f {safe_nfo}/$(basename {safe_tmp}) 2>/dev/null; "
+            f"  [ -d {safe_nfo} ] && rm -f {cleanup_in_dir} 2>/dev/null; "
             f"  echo NFO_TARGET_NOT_REGULAR; exit 98; "
             f"fi{verify_step}"
         )
