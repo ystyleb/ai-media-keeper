@@ -4840,12 +4840,117 @@ def _cron_reap_stuck():
         logger.error(f"[cron] reap failed: {e}")
 
 
+def _cron_qbit_auto_organize():
+    """Phase 4C.4: 定时扫 qBit completed torrents + 触发自动 organize.
+
+    每周期执行：
+      1. reconcile：同步上周期 organizing → terminal（基于 destructive_actions 状态）
+      2. load config — disabled 直接返回
+      3. 调 qbit.get_torrents() → list_completed_torrents(whitelist)
+      4. filter_unprocessed_hashes → 跳过 terminal/organizing
+      5. for each unprocessed hash → dispatch_one (callback = _build_and_start_auto_organize)
+      6. organize_runner module-level lock 同时只允许 1 个 organize 跑：
+         dispatch_one 内部 build_and_start_organize_fn 返 locked → 留 pending 让下周期重试
+
+    任何单个 torrent 失败都不阻塞其余（catch per-torrent）.
+    """
+    try:
+        conn = destructive_action.open_connection(DB_PATH)
+        try:
+            # 1. reconcile 上周期 organizing → terminal（独立 reconcile，dispatch 失败也跑）
+            synced = qbit_auto.reconcile_organizing_rows(conn)
+            if synced:
+                logger.info(f"[auto-organize] reconciled {len(synced)} organizing rows: "
+                            f"{[r['synced_to'] for r in synced]}")
+
+            cfg = load_qbit_auto_organize_config()
+            if not cfg.get("enabled"):
+                return
+            whitelist = cfg.get("categories", [])
+            if not whitelist:
+                logger.warning("[auto-organize] enabled=True 但 categories 白名单空，不触发任何种子")
+                return
+
+            # 2. 拉 qBit completed torrents
+            try:
+                torrents = qbit.get_torrents()
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"[auto-organize] qbit.get_torrents failed: {e}")
+                return
+            completed = qbit_auto.list_completed_torrents(torrents, whitelist)
+            if not completed:
+                return
+
+            # 3. 跳过已处理 hash
+            all_hashes = [t["hash"] for t in completed]
+            unprocessed = qbit_auto.filter_unprocessed_hashes(conn, all_hashes)
+            todo = [t for t in completed if t["hash"] in unprocessed]
+            if not todo:
+                return
+
+            logger.info(
+                f"[auto-organize] cycle: {len(completed)} completed in whitelist "
+                f"{whitelist}, {len(todo)} to dispatch"
+            )
+
+            # 4. dispatch each
+            stats: dict[str, int] = {}
+            threshold = cfg.get("confidence_threshold", 0.85)
+            for t in todo:
+                try:
+                    out = qbit_auto.dispatch_one(
+                        conn, t,
+                        list_video_paths_fn=lambda cp: _list_video_paths(
+                            cp, max_depth=3, limit=MAX_ORGANIZE_BATCH_ITEMS,
+                        ),
+                        confidence_threshold=threshold,
+                        build_and_start_organize_fn=_build_and_start_auto_organize,
+                    )
+                    action = out.get("action", "unknown")
+                    stats[action] = stats.get(action, 0) + 1
+                    if action in ("started", "skipped", "errored", "locked"):
+                        logger.info(
+                            f"[auto-organize] hash={t['hash'][:8]} name={t.get('name')!r} "
+                            f"action={action} status={out.get('status')} "
+                            f"action_id={out.get('action_id')} reason={out.get('reason')}"
+                        )
+                    # locked → 不会再 dispatch 别的 torrent，break 让 organize 跑完再说
+                    if action == "locked":
+                        logger.info("[auto-organize] organize_runner locked，本周期剩余 torrents 推迟下周期")
+                        break
+                except Exception as e:  # noqa: BLE001
+                    logger.exception(
+                        f"[auto-organize] dispatch failed for {t['hash'][:8]}: {e}"
+                    )
+                    stats["exception"] = stats.get("exception", 0) + 1
+            logger.info(f"[auto-organize] cycle done: {stats}")
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[auto-organize] cron job crashed: {e}", exc_info=True)
+
+
 def _start_scheduler():
     from apscheduler.schedulers.background import BackgroundScheduler
     sched = BackgroundScheduler(daemon=True)
-    sched.add_job(_cron_reap_stuck, "interval", minutes=1, id="reap_stuck", max_instances=1)
+    sched.add_job(_cron_reap_stuck, "interval", minutes=1,
+                  id="reap_stuck", max_instances=1)
+    # Phase 4C.4: qBit auto-organize cron — interval 从配置读，最低 1min
+    qbit_auto_cfg = load_qbit_auto_organize_config()
+    poll_minutes = qbit_auto_cfg.get("poll_interval_minutes", 5)
+    sched.add_job(
+        _cron_qbit_auto_organize, "interval", minutes=poll_minutes,
+        id="qbit_auto_organize", max_instances=1,
+        # coalesce=True: 多个 missed run 合并成一个执行（防 backlog）
+        coalesce=True,
+        # next_run_time 让 cron 启动后立刻跑一次 (而非等 poll_minutes 才第一次)
+        # 不写 next_run_time → 默认下一周期才跑（可能 5min 后），调试不便
+    )
     sched.start()
-    logger.info("[cron] BackgroundScheduler started (reap interval=1min)")
+    logger.info(
+        f"[cron] BackgroundScheduler started (reap=1min, "
+        f"qbit_auto_organize={poll_minutes}min enabled={qbit_auto_cfg.get('enabled')})"
+    )
     return sched
 
 

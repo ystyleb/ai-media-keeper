@@ -207,3 +207,165 @@ def test_build_drifted_cache_returns_error(client, monkeypatch):
     assert out["status"] == "error"
     assert "no plans computed" in out["error"]
     assert "src_missing" in out["error"]
+
+
+# ── 4C.4 _cron_qbit_auto_organize ───
+# 单测直接调函数（不起 APScheduler），mock qbit + config + dispatch_one.
+
+
+def test_cron_disabled_returns_early(client, monkeypatch):
+    """enabled=False → 不调 qbit.get_torrents。"""
+    monkeypatch.setattr(
+        app_module, "load_qbit_auto_organize_config",
+        lambda: {**app_module.QBIT_AUTO_ORGANIZE_DEFAULTS, "enabled": False},
+    )
+    called = MagicMock()
+    monkeypatch.setattr(app_module.qbit, "get_torrents", called)
+    app_module._cron_qbit_auto_organize()
+    called.assert_not_called()
+
+
+def test_cron_empty_whitelist_skips_dispatch(client, monkeypatch):
+    """enabled=True 但 categories=[] → 不调 qbit (whitelist 空 = 不触发)."""
+    monkeypatch.setattr(
+        app_module, "load_qbit_auto_organize_config",
+        lambda: {**app_module.QBIT_AUTO_ORGANIZE_DEFAULTS,
+                 "enabled": True, "categories": []},
+    )
+    called = MagicMock()
+    monkeypatch.setattr(app_module.qbit, "get_torrents", called)
+    app_module._cron_qbit_auto_organize()
+    called.assert_not_called()
+
+
+def test_cron_qbit_api_failure_logs_and_continues(client, monkeypatch, caplog):
+    """qbit.get_torrents() 抛异常 → log error 但不 propagate（不让单次 API 故障杀 cron）."""
+    monkeypatch.setattr(
+        app_module, "load_qbit_auto_organize_config",
+        lambda: {**app_module.QBIT_AUTO_ORGANIZE_DEFAULTS,
+                 "enabled": True, "categories": ["Movies"]},
+    )
+
+    def boom():
+        raise RuntimeError("qbit down")
+
+    monkeypatch.setattr(app_module.qbit, "get_torrents", boom)
+    # 不抛异常（cron job 不能 die）
+    app_module._cron_qbit_auto_organize()
+
+
+def test_cron_dispatches_unprocessed_torrents(client, monkeypatch):
+    """完整 happy path：扫 → filter → dispatch_one 被调一次每未处理 hash."""
+    monkeypatch.setattr(
+        app_module, "load_qbit_auto_organize_config",
+        lambda: {**app_module.QBIT_AUTO_ORGANIZE_DEFAULTS,
+                 "enabled": True, "categories": ["Movies"]},
+    )
+    monkeypatch.setattr(
+        app_module.qbit, "get_torrents",
+        lambda: [
+            {"hash": "h1", "name": "M1", "category": "Movies",
+             "state": "seeding", "progress": 1.0, "content_path": "/d/M1.mkv"},
+            {"hash": "h2", "name": "M2", "category": "Movies",
+             "state": "seeding", "progress": 1.0, "content_path": "/d/M2.mkv"},
+            {"hash": "h3", "name": "M3", "category": "Music",  # not in whitelist
+             "state": "seeding", "progress": 1.0, "content_path": "/d/M3.mkv"},
+        ],
+    )
+
+    dispatched: list[str] = []
+
+    def fake_dispatch(conn, torrent, **kw):
+        dispatched.append(torrent["hash"])
+        return {"action": "started", "qbit_hash": torrent["hash"], "action_id": "act-x"}
+
+    monkeypatch.setattr(app_module.qbit_auto, "dispatch_one", fake_dispatch)
+    app_module._cron_qbit_auto_organize()
+    # h3 不在白名单 → 不 dispatch; h1, h2 dispatch
+    assert sorted(dispatched) == ["h1", "h2"]
+
+
+def test_cron_locked_breaks_remaining_torrents(client, monkeypatch):
+    """dispatch_one 返 locked → break，剩余 torrents 推迟下周期不再 dispatch."""
+    monkeypatch.setattr(
+        app_module, "load_qbit_auto_organize_config",
+        lambda: {**app_module.QBIT_AUTO_ORGANIZE_DEFAULTS,
+                 "enabled": True, "categories": ["Movies"]},
+    )
+    monkeypatch.setattr(
+        app_module.qbit, "get_torrents",
+        lambda: [
+            {"hash": "h1", "name": "M1", "category": "Movies",
+             "state": "seeding", "progress": 1.0, "content_path": "/d/M1.mkv"},
+            {"hash": "h2", "name": "M2", "category": "Movies",
+             "state": "seeding", "progress": 1.0, "content_path": "/d/M2.mkv"},
+        ],
+    )
+    dispatched: list[str] = []
+
+    def fake_dispatch(conn, torrent, **kw):
+        dispatched.append(torrent["hash"])
+        return {"action": "locked", "qbit_hash": torrent["hash"]}
+
+    monkeypatch.setattr(app_module.qbit_auto, "dispatch_one", fake_dispatch)
+    app_module._cron_qbit_auto_organize()
+    # 第一个 locked 后 break，第二个不被 dispatch
+    assert dispatched == ["h1"]
+
+
+def test_cron_skips_already_processed_hashes(client, monkeypatch):
+    """auto_organize_runs 已有 succeeded row → filter 跳过该 hash."""
+    # 预先标记 h1 succeeded
+    with app_module.app.test_request_context():
+        c = app_module.get_db()
+        import time as _t
+        c.execute(
+            "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,attempts,"
+            "created_at,completed_at) VALUES(?,?,?,?,?,?)",
+            ("h1-already-done", "/x", "succeeded", 1, int(_t.time()),
+             int(_t.time())),
+        )
+        c.commit()
+
+    monkeypatch.setattr(
+        app_module, "load_qbit_auto_organize_config",
+        lambda: {**app_module.QBIT_AUTO_ORGANIZE_DEFAULTS,
+                 "enabled": True, "categories": ["Movies"]},
+    )
+    monkeypatch.setattr(
+        app_module.qbit, "get_torrents",
+        lambda: [
+            {"hash": "h1-already-done", "name": "M1", "category": "Movies",
+             "state": "seeding", "progress": 1.0, "content_path": "/d/M1.mkv"},
+            {"hash": "h2-new", "name": "M2", "category": "Movies",
+             "state": "seeding", "progress": 1.0, "content_path": "/d/M2.mkv"},
+        ],
+    )
+    dispatched = []
+    monkeypatch.setattr(
+        app_module.qbit_auto, "dispatch_one",
+        lambda conn, t, **kw: dispatched.append(t["hash"])
+        or {"action": "started", "qbit_hash": t["hash"], "action_id": "x"},
+    )
+    app_module._cron_qbit_auto_organize()
+    assert dispatched == ["h2-new"]
+    # 清理（避免影响其他测试）
+    with app_module.app.test_request_context():
+        c = app_module.get_db()
+        c.execute("DELETE FROM auto_organize_runs WHERE qbit_hash IN (?,?)",
+                  ("h1-already-done", "h2-new"))
+        c.commit()
+
+
+def test_cron_calls_reconcile_before_dispatch(client, monkeypatch):
+    """reconcile_organizing_rows 总是先调（独立于 enabled）."""
+    monkeypatch.setattr(
+        app_module, "load_qbit_auto_organize_config",
+        lambda: {**app_module.QBIT_AUTO_ORGANIZE_DEFAULTS, "enabled": False},
+    )
+    reconcile_called = MagicMock(return_value=[])
+    monkeypatch.setattr(
+        app_module.qbit_auto, "reconcile_organizing_rows", reconcile_called,
+    )
+    app_module._cron_qbit_auto_organize()
+    reconcile_called.assert_called_once()
