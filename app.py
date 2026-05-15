@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
-from flask import Flask, render_template, jsonify, request, abort, g
+from flask import Flask, render_template, jsonify, request, abort, g, make_response
 
 from services import dedup
 from services import destructive_action
@@ -201,24 +201,35 @@ _check_gunicorn_args()
 # Layer 3: fcntl.flock 跨进程文件锁 — fork-mode ground truth
 # 标准 gunicorn (无 --preload) 下每个 worker fork 后重新 import → 再次 import-time
 # 抢同一 .worker.lock → 第二个 worker 必失败。
+# 测试 / dev pytest 场景跳过（让 pytest 跟 dev server 能共存；测试不真启 worker thread）
 _WORKER_LOCK_FILE = CONFIG_DIR / ".worker.lock"
-try:
-    _worker_lock_fd = os.open(
-        str(_WORKER_LOCK_FILE),
-        os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600,
-    )
-    _fcntl.flock(_worker_lock_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-    os.write(_worker_lock_fd, f"{os.getpid()}\n".encode())
-    # fd 故意泄漏：进程退出时 OS 释放 flock，下一次启动可再 acquire
-except BlockingIOError:
-    sys.stderr.write(
-        f"ERROR: another NAS Vault worker holds {_WORKER_LOCK_FILE}.\n"
-        f"   NAS Vault requires single worker.\n"
-        f"   If you see this with gunicorn, you ran with -w >1 — \n"
-        f"   organize_runner / scanner are not safe under multiple workers.\n"
-        f"   Use gunicorn -w 1 (Phase 4C will add SQLite lease for multi-worker).\n"
-    )
-    sys.exit(1)
+_is_test_env = (
+    any("pytest" in arg for arg in sys.argv)
+    or "pytest" in sys.modules
+    or os.environ.get("PYTEST_CURRENT_TEST")
+    or os.environ.get("NAS_SKIP_WORKER_LOCK") == "1"
+)
+_worker_lock_fd: int | None = None
+if not _is_test_env:
+    try:
+        _worker_lock_fd = os.open(
+            str(_WORKER_LOCK_FILE),
+            os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600,
+        )
+        _fcntl.flock(_worker_lock_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        os.write(_worker_lock_fd, f"{os.getpid()}\n".encode())
+        # fd 故意泄漏：进程退出时 OS 释放 flock，下一次启动可再 acquire
+    except BlockingIOError:
+        sys.stderr.write(
+            f"ERROR: another NAS Vault worker holds {_WORKER_LOCK_FILE}.\n"
+            f"   NAS Vault requires single worker.\n"
+            f"   If you see this with gunicorn, you ran with -w >1 — \n"
+            f"   organize_runner / scanner are not safe under multiple workers.\n"
+            f"   Use gunicorn -w 1 (Phase 4C will add SQLite lease for multi-worker).\n"
+            f"   (If you're running tests while a dev server is up, set "
+            f"NAS_SKIP_WORKER_LOCK=1)\n"
+        )
+        sys.exit(1)
 
 
 # Layer 4: register_at_fork callback — preload 模式 ground truth (r6 BLOCKER)
@@ -229,10 +240,11 @@ except BlockingIOError:
 # 只在 gunicorn 上下文下注册（pytest / flask dev 不触发，避免测试干扰）。
 def _enforce_singleton_after_fork() -> None:
     global _worker_lock_fd
-    try:
-        os.close(_worker_lock_fd)
-    except OSError:
-        pass
+    if _worker_lock_fd is not None:
+        try:
+            os.close(_worker_lock_fd)
+        except OSError:
+            pass
     try:
         new_fd = os.open(
             str(_WORKER_LOCK_FILE),
@@ -768,7 +780,12 @@ def human_size(size_bytes: int) -> str:
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    # frontend-ui.md lesson: HTML 加 no-store，否则浏览器缓存老模板 + 新 JS 不匹配
+    # （cache_bust URL 是 templates 渲染的，浏览器缓存 HTML 时 URL 也被冻结，
+    # 但 /static/app.js 仍走 304 拉新内容 → 老 HTML + 新 JS 跑炸 bootstrap 找不到元素）
+    resp = make_response(render_template("index.html"))
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/api/config/app")
