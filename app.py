@@ -2061,6 +2061,12 @@ def _write_organize_nfo(
         return "created"
     if reason == "nfo_exists":
         return "skipped: nfo_exists"
+    # codex r8 IMPORTANT: race-into-dir 时给 orphan hint 让 user SSH 手工查
+    if reason == "nfo_target_not_regular_race":
+        return (
+            f"failed: {reason}; orphan tmp possibly at "
+            f"{target_nfo_path.rstrip('/')}/{os.path.basename(target_nfo_path)}.tmp.<uuid>"
+        )
     return f"failed: {reason}"
 
 

@@ -1010,9 +1010,12 @@ def test_ssh_ln_rejects_directory_dst(monkeypatch):
     assert "DST_IS_DIR" in out
 
 
-def test_ssh_ln_detects_race_ln_into_dir_and_cleans_up(monkeypatch):
-    """codex r5 BLOCKER 2: pre-check 后 race-created dir 让 ln-into-dir →
-    post-stat [ -f dst ] 抓到 + cleanup `<dst>/<basename(src)>` + exit 98."""
+def test_ssh_ln_detects_race_ln_into_dir(monkeypatch):
+    """codex r5 BLOCKER 2 + r7: pre-check 后 race-created dir 让 ln-into-dir →
+    post-stat [ -f dst ] 抓到 + exit 98 with DST_NOT_REGULAR marker.
+
+    r7 修订：不自动 cleanup（ownership 无法 path-based 证明），返 marker 让
+    调用方告知 user 手工查 orphan."""
     def fake_ssh_exec(cmd, timeout=10):
         return (98, "DST_NOT_REGULAR\n", "")
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
