@@ -132,7 +132,7 @@ DeepSeek 用于 grounded LLM 候选选择，没配也能跑（fallback 到 heuri
 | 环境变量 | 作用 |
 |---|---|
 | `NAS_API_TOKEN` | 强制 token，覆盖 `config/.api_token` |
-| `NAS_ACTION_SIGNING_KEY` | 强制签名密钥（多 gunicorn worker 必须设此环境变量，否则启动拒绝） |
+| `NAS_ACTION_SIGNING_KEY` | （可选）显式签名密钥；不设则首次启动自动生成并落 `config/.signing_key` chmod 600 |
 | `NAS_HOST` / `NAS_PORT` / `NAS_USER` / `NAS_BASE_PATH` | 强制 NAS 连接，覆盖 `config/nas.json` |
 | `QBIT_URL` / `QBIT_USER` / `QBIT_PASS` | 强制 qBit 配置 |
 
@@ -228,12 +228,15 @@ python3 app.py
 
 ```bash
 pip install gunicorn
-export NAS_ACTION_SIGNING_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-# IMPORTANT: -w 1 + 同步 WEB_CONCURRENCY=1（默认值，显式写防遗漏）
-# 真要 -w N，app.py 启动会 sys.exit(1) 拒启动；多 worker 需要 Phase 4C 改用
-# SQLite lease 跨进程互斥
-WEB_CONCURRENCY=1 gunicorn -b 127.0.0.1:8080 -w 1 app:app
+# 单 worker 是硬要求 — 即使你忘了 -w 1，第二个 worker fork 后 fcntl.flock
+# 抢 config/.worker.lock 失败会立刻 sys.exit(1)，避免静默并发。
+gunicorn -b 127.0.0.1:8080 -w 1 app:app
 ```
+
+如果要多 worker（不推荐，Phase 4B 阶段不支持），需要等 Phase 4C 升级到
+SQLite lease 跨进程互斥。**当前 hard guard**：
+- `app.py` 启动期检查 `WEB_CONCURRENCY != 1` 拒启动
+- `fcntl.flock(config/.worker.lock)` 跨进程抢锁，第二个 worker fork 必失败
 
 ## 路线图
 

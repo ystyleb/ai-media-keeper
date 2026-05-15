@@ -141,10 +141,15 @@ API_TOKEN = _load_api_token()
 logger.info(f"API Token loaded ({len(API_TOKEN)} chars).")
 
 # 契约 #1: server_secret 加载 + SQLite schema 初始化
-# WEB_CONCURRENCY 是 gunicorn 约定 env；未设视为单 worker（dev / flask run）
+# Phase 4B codex r2 BLOCKER + r4 BLOCKER: organize_runner + scanner 用 module-level
+# lock + abort flag，**必须**单 worker。两层 enforcement:
+#   1. WEB_CONCURRENCY env check（user 显式声明的 worker 数；gunicorn 设 -w N 但
+#      不必同步 env，所以单这一层会被绕过）
+#   2. fcntl.flock 跨进程文件锁（hard 锁，gunicorn -w 2 第二个 worker fork 后
+#      open 同一文件 acquire LOCK_EX | LOCK_NB → BlockingIOError → sys.exit）
+# 两层缺一不可：fcntl 是 ground truth；env 是早期友好提示。
+import fcntl as _fcntl
 WORKER_COUNT = int(os.environ.get("WEB_CONCURRENCY", "1"))
-# Phase 4B codex r2 BLOCKER: organize_runner + scanner 都依赖 module-level lock /
-# abort flag，要求单 worker。硬 enforce，多 worker 直接拒启动。
 if WORKER_COUNT != 1:
     sys.stderr.write(
         f"ERROR: NAS Vault requires single worker (WEB_CONCURRENCY=1). "
@@ -153,6 +158,29 @@ if WORKER_COUNT != 1:
         f"   which cannot span workers. Run gunicorn with -w 1 or use flask dev.\n"
     )
     sys.exit(1)
+
+# 跨进程 ground-truth lock: fcntl.flock 不依赖 env，第二个 worker fork 后 open
+# 同一 .worker.lock 文件 acquire 失败 → 立刻退出。POSIX (Linux/macOS) only；
+# Windows 不支持 fcntl，但项目目标平台是 NAS server (Linux)。
+_WORKER_LOCK_FILE = CONFIG_DIR / ".worker.lock"
+try:
+    _worker_lock_fd = os.open(
+        str(_WORKER_LOCK_FILE),
+        os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600,
+    )
+    _fcntl.flock(_worker_lock_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+    os.write(_worker_lock_fd, f"{os.getpid()}\n".encode())
+    # fd 故意泄漏：进程退出时 OS 释放 flock，下一次启动可再 acquire
+except BlockingIOError:
+    sys.stderr.write(
+        f"ERROR: another NAS Vault worker holds {_WORKER_LOCK_FILE}.\n"
+        f"   NAS Vault requires single worker.\n"
+        f"   If you see this with gunicorn, you ran with -w >1 — "
+        f"   organize_runner / scanner are not safe under multiple workers.\n"
+        f"   Use gunicorn -w 1 (Phase 4C will add SQLite lease for multi-worker).\n"
+    )
+    sys.exit(1)
+
 SIGNING_KEY_FILE = CONFIG_DIR / ".signing_key"
 try:
     SERVER_SECRET = destructive_action.load_server_secret(
