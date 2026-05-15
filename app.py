@@ -1896,12 +1896,18 @@ def _ssh_atomic_write_nfo(
     existing=True 时把旧 nfo cp 到 .bak（覆盖之前的 .bak）。
     verify_tmdb=True 时 grep 'tmdb' 验证 NFO 含 uniqueid（payload 不含 tmdb_id 时
     传 False 跳过此 check，否则会假阴性）。
+
+    tmp 文件名带 uuid 后缀防并发互踩（同 nfo_path 多个 action 同时写时 .tmp 不会冲突；
+    `mv` 是原子的，最后到达 nfo_path 的是 last-writer-wins）。
+
     返回 (success, reason_or_empty)。
     """
     try:
+        import uuid
         xml_b64 = base64.b64encode(xml.encode("utf-8")).decode("ascii")
+        tmp_path = f"{nfo_path}.tmp.{uuid.uuid4().hex[:12]}"
         safe_nfo = shlex.quote(nfo_path)
-        safe_tmp = shlex.quote(nfo_path + ".tmp")
+        safe_tmp = shlex.quote(tmp_path)
         safe_bak = shlex.quote(nfo_path + ".bak")
         backup_step = (
             f"[ -e {safe_nfo} ] && cp -p {safe_nfo} {safe_bak}; "
@@ -1915,6 +1921,8 @@ def _ssh_atomic_write_nfo(
         )
         rc, out, err = ssh_exec(cmd, timeout=30)
         if rc != 0:
+            # 清理 tmp（best-effort，独占 uuid 后缀所以安全）
+            ssh_exec(f"rm -f {safe_tmp}", timeout=5)
             return False, f"write_failed: {err.strip()[:200]}"
         if verify_tmdb:
             count = int(out.strip().splitlines()[-1]) if out.strip() else 0
@@ -1938,6 +1946,7 @@ def _build_nfo_payload_for_organize(cached, nfo_kind: str):
         plot=cached.overview,
         tmdb_id=cached.tmdb_id,
         imdb_id=cached.imdb_id,
+        tvdb_id=None,                                   # cache 不存 tvdb_id
         rating=cached.vote_average,
         genres=cached.genres or [],
         cast=cached.cast or [],
@@ -1952,15 +1961,42 @@ def _build_nfo_payload_for_organize(cached, nfo_kind: str):
     )
 
 
-def _write_organize_nfo(src_path: str, target_nfo_path: str, nfo_kind: str) -> str:
-    """读 cache → 构造 NFOPayload → build_nfo → atomic write。
+def _write_organize_nfo(
+    src_path: str,
+    target_nfo_path: str,
+    nfo_kind: str,
+    *,
+    target_exists: bool = False,
+    expected_metadata: dict | None = None,
+) -> str:
+    """读 cache → 验证 + 构造 NFOPayload → build_nfo → atomic write。
 
-    返回 status string: 'created' / 'failed: <reason>' / 'no_cache'。
+    target_exists=True 时 skip 不覆盖（已有 NFO 保留 — 大概率是用户手工 / 别的工具写的，
+    organize 是 first-time integration 不该破坏）。
+
+    expected_metadata: preview 阶段签进 payload 的 {tmdb_id,title,year,season_number,
+    episode_number}；confirm 用 cache 重读后比对，不一致 → skipped (cache 已漂移，
+    不写 NFO 避免跟 hardlink 后的目录位置不一致)。
+
+    返回 status string:
+      'created' / 'skipped: nfo_exists' / 'skipped: cache_drift' /
+      'failed: no_cache' / 'failed: <reason>'。
     Pattern D: 失败不抛 — 调用方根据 status 决定要不要告知用户「文件已整理但 NFO 失败」。
     """
+    if target_exists:
+        return "skipped: nfo_exists"
+
     cached, _ = metadata_cache.get_by_path(get_db(), src_path)
     if cached is None:
-        return "no_cache"
+        return "failed: no_cache"
+
+    # 防 cache 漂移：preview 跟 confirm 之间 metadata 被改了 → 不写 NFO（避免目录跟 NFO 不一致）
+    if expected_metadata is not None:
+        for key, expected in expected_metadata.items():
+            actual = getattr(cached, key, None)
+            if expected != actual:
+                return f"skipped: cache_drift ({key} {expected!r}→{actual!r})"
+
     try:
         payload = _build_nfo_payload_for_organize(cached, nfo_kind)
         xml = nfo_writer.build_nfo(payload)
@@ -1980,13 +2016,17 @@ def _organize_executor(payload: dict) -> dict:
     流程：
       1. Re-stat src（防 mv 偷换）— src inode 锚 #1
       2. Check dst（已存在 + inode 同 → already_linked；已存在 + inode 异 → failed）
-      3. mkdir -p dst_dir
+      3. mkdir -p dst_dir（已存在不抛错）
       4. ln src dst
       5. Verify dst inode == src inode — Pattern C 锚 #2（保证真 hardlink 不是 cp）
       6. 写 episode/movie NFO + tvshow.nfo（仅 tv 且未存在）
 
-    失败回滚：mkdir 后失败 + dst_dir 是空目录 → rmdir 释放；
-              ln verify 失败 → rm dst + rmdir 空目录。
+    Cleanup 策略（codex r1 修订）：
+      - ln 失败：**不动** dst_dir（mkdir -p 不保证目录是本 action 创建的，rmdir 可能
+        删除别人留下的空目录或刚被并发 process 写入的目录）
+      - ln verify inode mismatch：**不动** dst_path（verify 失败说明 dst_path 已不是
+        预期 inode，rm 会删别人的文件）。返 failed + 提示 user 排查
+      - 已有 NFO：skip 不覆盖（status='skipped: nfo_exists'）
     """
     items = payload["items"]
     results: list[dict] = []
@@ -1996,6 +2036,11 @@ def _organize_executor(payload: dict) -> dict:
         plan = it["computed_plan"]
         media_type = it["media_type"]
         src_snap_pre = it["src_snapshot"]
+        # codex I1: preview 阶段签进 payload 的 metadata 快照，confirm 用 cache 重读对比
+        expected_metadata = it.get("metadata_snapshot") or {}
+        # codex B1: preview 阶段 dst NFO 是否已存在（已存在 → executor skip 不覆盖）
+        nfo_existed_pre = bool(it.get("dst_status", {}).get("nfo_path_exists"))
+        tvshow_nfo_existed_pre = bool(it.get("dst_status", {}).get("tvshow_nfo_exists"))
 
         src_now = _ssh_stat_paths([src_path]).get(src_path, {"exists": False})
         if not src_now.get("exists"):
@@ -2043,11 +2088,9 @@ def _organize_executor(payload: dict) -> dict:
             })
             continue
 
-        # 2. ln src dst
+        # 2. ln src dst (失败时不动 dst_dir — 详见 cleanup 策略 docstring)
         rc, _, err = _ssh_ln(src_path, dst_path)
         if rc != 0:
-            # 回滚：dst_dir 如果是空目录，best-effort rmdir 释放
-            ssh_exec(f"rmdir {shlex.quote(plan['dst_dir'])} 2>/dev/null", timeout=5)
             results.append({
                 "src_path": src_path, "status": "failed",
                 "reason": f"ln_failed: {err.strip()[:200]}",
@@ -2055,33 +2098,36 @@ def _organize_executor(payload: dict) -> dict:
             continue
 
         # 3. Pattern C 锚 #2: verify dst inode == src inode
+        # (失败时不动 dst_path — 详见 cleanup 策略 docstring)
         verify = _ssh_stat_paths([dst_path]).get(dst_path, {"exists": False})
         if not verify.get("exists") or verify.get("inode") != src_now.get("inode"):
-            # 不该发生：unlink dst + rmdir 空目录
-            ssh_exec(f"rm -f {shlex.quote(dst_path)}", timeout=5)
-            ssh_exec(f"rmdir {shlex.quote(plan['dst_dir'])} 2>/dev/null", timeout=5)
             results.append({
                 "src_path": src_path, "status": "failed",
                 "reason": "ln_verify_failed_inode_mismatch",
                 "expected_inode": src_now.get("inode"),
                 "actual_inode": verify.get("inode"),
+                "hint": "dst_path 已不是预期 inode；可能并发 process 改了它。请 SSH 手工检查后再决定。",
             })
             continue
 
-        # 4. 写 NFO（Pattern D：失败不回滚 hardlink）
+        # 4. 写 NFO（Pattern D：失败不回滚 hardlink；codex B1: 已有 NFO 不覆盖）
         nfo_kind = "episode" if media_type == "tv" else "movie"
-        nfo_status = _write_organize_nfo(src_path, plan["nfo_path"], nfo_kind)
+        nfo_status = _write_organize_nfo(
+            src_path, plan["nfo_path"], nfo_kind,
+            target_exists=nfo_existed_pre,
+            expected_metadata=expected_metadata,
+        )
 
         tvshow_nfo_status = "skipped"
         if media_type == "tv" and plan.get("tvshow_nfo_path"):
-            tvshow_stat = _ssh_stat_paths([plan["tvshow_nfo_path"]]).get(
-                plan["tvshow_nfo_path"], {"exists": False}
-            )
-            if tvshow_stat.get("exists"):
+            # tvshow.nfo: 用 preview 阶段的 exists flag；不重读（保 confirm 行为 deterministic）
+            if tvshow_nfo_existed_pre:
                 tvshow_nfo_status = "already_exists"
             else:
                 tvshow_nfo_status = _write_organize_nfo(
                     src_path, plan["tvshow_nfo_path"], "tvshow",
+                    target_exists=False,
+                    expected_metadata=expected_metadata,
                 )
 
         results.append({
@@ -2392,6 +2438,19 @@ def _do_action_preview(kind: str, raw_data: dict):
                     "dst_path": plan.dst_path,
                     "nfo_path": plan.nfo_path,
                     "tvshow_nfo_path": plan.tvshow_nfo_path,
+                },
+                # codex I1: NFO 内容应该按 preview 时的 metadata 写。preview→confirm
+                # 之间 cache 可能被 re-identify 改了（不同 tmdb_id / 不同剧），但
+                # hardlink 已落在按旧 metadata 算的目录里——如果 NFO 用新 metadata 写
+                # 就会跟目录位置不一致。confirm 用此 snapshot 跟 cache 重读对比，
+                # 不一致 → skip NFO (status='skipped: cache_drift')。
+                "metadata_snapshot": {
+                    "tmdb_id": plan.tmdb_id,
+                    "title": plan.title,
+                    "year": plan.year,
+                    "media_type": plan.media_type,
+                    "season_number": plan.season_number,
+                    "episode_number": plan.episode_number,
                 },
                 "dst_status": {
                     "dst_dir_exists": dst_stat.get(plan.dst_dir, {}).get("exists", False),

@@ -420,7 +420,7 @@ def test_confirm_movie_happy_path_inode_shared(client, token, monkeypatch):
     monkeypatch.setattr(app_module, "_ssh_ln", lambda s, d: (0, "", ""))
     monkeypatch.setattr(
         app_module, "_write_organize_nfo",
-        lambda src_path, nfo, kind: "created",
+        lambda src_path, nfo, kind, **kw: "created",
     )
 
     resp = client.post(
@@ -472,7 +472,7 @@ def test_confirm_tv_writes_episode_and_tvshow_nfo(client, token, monkeypatch):
     nfo_calls = []
     monkeypatch.setattr(
         app_module, "_write_organize_nfo",
-        lambda src_path, nfo, kind: nfo_calls.append((nfo, kind)) or "created",
+        lambda src_path, nfo, kind, **kw: nfo_calls.append((nfo, kind)) or "created",
     )
 
     resp = client.post(
@@ -554,8 +554,9 @@ def test_confirm_mkdir_fails_no_dst_dir_leaked(client, token, monkeypatch):
     assert ln_called == []  # mkdir 失败后不该调 ln
 
 
-def test_confirm_ln_fails_rmdir_empty_dst_dir(client, token, monkeypatch):
-    """ln 失败 → best-effort rmdir 空的 dst_dir。"""
+def test_confirm_ln_fails_does_not_touch_dst_dir(client, token, monkeypatch):
+    """codex r1 B3: ln 失败时**不动** dst_dir（mkdir -p 不保证目录是本 action 创建的，
+    rmdir 可能误删别人的空目录）。"""
     _patch_organize_config(monkeypatch)
     _patch_cache(monkeypatch, _full_cached_movie())
 
@@ -569,10 +570,13 @@ def test_confirm_ln_fails_rmdir_empty_dst_dir(client, token, monkeypatch):
     monkeypatch.setattr(app_module, "_ssh_ln", lambda s, d: (1, "", "EXDEV: cross-device link"))
 
     rmdir_calls = []
+    rm_calls = []
 
     def fake_ssh_exec(cmd, timeout=30):
         if "rmdir" in cmd:
             rmdir_calls.append(cmd)
+        if "rm -f" in cmd:
+            rm_calls.append(cmd)
         return (0, "", "")
 
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
@@ -586,12 +590,16 @@ def test_confirm_ln_fails_rmdir_empty_dst_dir(client, token, monkeypatch):
     assert item["status"] == "failed"
     assert "ln_failed" in item["reason"]
     assert "EXDEV" in item["reason"]
-    # rmdir best-effort 被调
-    assert any("rmdir" in c for c in rmdir_calls)
+    # B3 修订：executor 不应该调 rmdir / rm -f cleanup（race-unsafe）
+    assert rmdir_calls == []
+    assert rm_calls == []
 
 
-def test_confirm_ln_verify_inode_mismatch_unlinks_dst(client, token, monkeypatch):
-    """ln 成功但 verify 时 dst inode 不匹配 src → unlink dst + rmdir + failed."""
+def test_confirm_ln_verify_inode_mismatch_does_not_unlink_dst(client, token, monkeypatch):
+    """codex r1 B2: ln 成功但 verify 时 dst inode 不匹配 src → 不动 dst（rm 会删别人的文件）。
+
+    verify mismatch 本身已经说明当前 dst_path 不是我们刚创建的 link（race condition
+    或 fs 异常），rm 可能删别的 process 刚放进来的文件。"""
     _patch_organize_config(monkeypatch)
     _patch_cache(monkeypatch, _full_cached_movie())
 
@@ -623,10 +631,14 @@ def test_confirm_ln_verify_inode_mismatch_unlinks_dst(client, token, monkeypatch
     monkeypatch.setattr(app_module, "_ssh_mkdir_p", lambda p: (0, "", ""))
     monkeypatch.setattr(app_module, "_ssh_ln", lambda s, d: (0, "", ""))
 
-    cleanup_calls = []
+    rm_calls = []
+    rmdir_calls = []
 
     def fake_ssh_exec(cmd, timeout=30):
-        cleanup_calls.append(cmd)
+        if "rm -f" in cmd:
+            rm_calls.append(cmd)
+        if "rmdir" in cmd:
+            rmdir_calls.append(cmd)
         return (0, "", "")
 
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
@@ -641,9 +653,11 @@ def test_confirm_ln_verify_inode_mismatch_unlinks_dst(client, token, monkeypatch
     assert item["reason"] == "ln_verify_failed_inode_mismatch"
     assert item["expected_inode"] == 100
     assert item["actual_inode"] == 999
-    # 必须有 rm -f dst + rmdir 清理
-    assert any("rm -f" in c and dst_path in c for c in cleanup_calls)
-    assert any("rmdir" in c for c in cleanup_calls)
+    # B2 修订：executor 不应 rm -f dst（dst 已不是预期 inode，rm 可能删别人的文件）
+    assert rm_calls == []
+    assert rmdir_calls == []
+    # 必须给用户 hint
+    assert "hint" in item
 
 
 def test_confirm_nfo_failure_does_not_rollback_hardlink(client, token, monkeypatch):
@@ -678,7 +692,7 @@ def test_confirm_nfo_failure_does_not_rollback_hardlink(client, token, monkeypat
     # NFO 写失败
     monkeypatch.setattr(
         app_module, "_write_organize_nfo",
-        lambda src_path, nfo, kind: "failed: write_failed: permission",
+        lambda src_path, nfo, kind, **kw: "failed: write_failed: permission",
     )
 
     # 不期望任何 rm -f 调用（hardlink 不该回滚）
@@ -703,3 +717,182 @@ def test_confirm_nfo_failure_does_not_rollback_hardlink(client, token, monkeypat
     assert item["nfo_status"].startswith("failed: ")
     # 关键：hardlink 不该被 rm 掉
     assert rm_calls == []
+
+
+# ── codex r1 BLOCKER 修复对应 tests ─────────────────────────────
+
+
+def test_confirm_existing_nfo_not_overwritten(client, token, monkeypatch):
+    """codex r1 B1: preview 时 nfo_path_exists=True → executor skip 不覆盖."""
+    _patch_organize_config(monkeypatch)
+    _patch_cache(monkeypatch, _full_cached_movie())
+
+    src = "/dl/movie.mkv"
+    src_stat = {"exists": True, "inode": 50, "size_bytes": 1, "mtime": 1}
+    dst_path = "/media/movies/The Movie (2024)/movie.mkv"
+    nfo_path = "/media/movies/The Movie (2024)/movie.nfo"
+
+    # preview: src 存在 + nfo 已存在
+    def preview_stat(paths):
+        result = {}
+        for p in paths:
+            if p == src:
+                result[p] = src_stat
+            elif p == nfo_path:
+                result[p] = {"exists": True, "inode": 88, "size_bytes": 100, "mtime": 1}
+            else:
+                result[p] = {"exists": False}
+        return result
+
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", preview_stat)
+    action_id, signed = _do_preview_and_get_token(client, token, src)
+
+    # confirm
+    call_n = {"n": 0}
+
+    def confirm_stat(paths):
+        call_n["n"] += 1
+        result = {}
+        for p in paths:
+            if p == src:
+                result[p] = src_stat
+            elif p == dst_path and call_n["n"] >= 3:
+                result[p] = src_stat
+            else:
+                result[p] = {"exists": False}
+        return result
+
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", confirm_stat)
+    monkeypatch.setattr(app_module, "_ssh_mkdir_p", lambda p: (0, "", ""))
+    monkeypatch.setattr(app_module, "_ssh_ln", lambda s, d: (0, "", ""))
+
+    write_calls = []
+
+    def fake_write(src_p, nfo, kind, *, target_exists=False, **kw):
+        write_calls.append((nfo, kind, target_exists))
+        # target_exists=True 时 helper 自己返 skipped；这里模拟之
+        return "skipped: nfo_exists" if target_exists else "created"
+
+    monkeypatch.setattr(app_module, "_write_organize_nfo", fake_write)
+
+    resp = client.post(
+        "/api/action/confirm",
+        json={"action_id": action_id, "signed_token": signed},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    item = resp.get_json()["result"]["items"][0]
+    assert item["status"] == "succeeded"
+    # 关键：write helper 收到 target_exists=True
+    assert any(call[2] is True for call in write_calls), f"calls={write_calls}"
+    assert item["nfo_status"] == "skipped: nfo_exists"
+
+
+def test_write_organize_nfo_target_exists_returns_skipped(monkeypatch):
+    """codex r1 B1 单测：_write_organize_nfo target_exists=True → 直接返 skipped。"""
+    write_called = []
+    monkeypatch.setattr(
+        app_module, "_ssh_atomic_write_nfo",
+        lambda *a, **kw: write_called.append(a) or (True, ""),
+    )
+    out = app_module._write_organize_nfo(
+        "/dl/x.mkv", "/m/X (2024)/x.nfo", "movie", target_exists=True,
+    )
+    assert out == "skipped: nfo_exists"
+    assert write_called == []   # 必须 short-circuit，没真 SSH 写
+
+
+def test_write_organize_nfo_no_cache_returns_failed(monkeypatch):
+    """codex r1 B5: cache miss → 'failed: no_cache'（而不是 'no_cache'）。"""
+    monkeypatch.setattr(app_module, "get_db", lambda: None)
+    monkeypatch.setattr(
+        app_module.metadata_cache, "get_by_path",
+        lambda conn, path, **kw: (None, "miss"),
+    )
+    out = app_module._write_organize_nfo("/dl/x.mkv", "/m/x.nfo", "movie")
+    assert out.startswith("failed: "), f"expected 'failed: ...' got {out!r}"
+    assert "no_cache" in out
+
+
+def test_write_organize_nfo_real_build_succeeds_for_movie(monkeypatch):
+    """codex r1 B4: 不 mock _write_organize_nfo，验证 NFOPayload 含 tvdb_id=None 不抛 TypeError。"""
+    cached = _CachedStub(title="X", media_type="movie", year=2024, tmdb_id="1")
+    # 补 NFOPayload 用到的所有字段
+    for attr in ("original_title", "imdb_id", "overview", "vote_average",
+                 "genres", "cast", "runtime_minutes", "poster_url",
+                 "episode_title", "episode_overview", "episode_air_date",
+                 "episode_still_url"):
+        if not hasattr(cached, attr):
+            setattr(cached, attr, None)
+    monkeypatch.setattr(app_module, "get_db", lambda: None)
+    monkeypatch.setattr(
+        app_module.metadata_cache, "get_by_path",
+        lambda conn, path, **kw: (cached, "hit"),
+    )
+    captured = []
+    monkeypatch.setattr(
+        app_module, "_ssh_atomic_write_nfo",
+        lambda nfo, xml, **kw: captured.append(xml) or (True, ""),
+    )
+    out = app_module._write_organize_nfo("/dl/movie.mkv", "/m/X (2024)/movie.nfo", "movie")
+    assert out == "created"
+    assert len(captured) == 1
+    assert "<movie>" in captured[0]
+    assert "X" in captured[0]
+
+
+def test_write_organize_nfo_cache_drift_skipped(monkeypatch):
+    """codex r1 I1: preview 抓 tmdb_id='1' 但 confirm 时 cache 变成 tmdb_id='2' → skipped."""
+    cached = _CachedStub(title="X", media_type="movie", year=2024, tmdb_id="2")
+    for attr in ("original_title", "imdb_id", "overview", "vote_average",
+                 "genres", "cast", "runtime_minutes", "poster_url",
+                 "episode_title", "episode_overview", "episode_air_date",
+                 "episode_still_url"):
+        if not hasattr(cached, attr):
+            setattr(cached, attr, None)
+    monkeypatch.setattr(app_module, "get_db", lambda: None)
+    monkeypatch.setattr(
+        app_module.metadata_cache, "get_by_path",
+        lambda conn, path, **kw: (cached, "hit"),
+    )
+    write_called = []
+    monkeypatch.setattr(
+        app_module, "_ssh_atomic_write_nfo",
+        lambda *a, **kw: write_called.append(a) or (True, ""),
+    )
+    expected_pre = {
+        "tmdb_id": "1",                # preview 时
+        "title": "X",
+        "year": 2024,
+        "media_type": "movie",
+        "season_number": None,
+        "episode_number": None,
+    }
+    out = app_module._write_organize_nfo(
+        "/dl/x.mkv", "/m/X (2024)/x.nfo", "movie",
+        expected_metadata=expected_pre,
+    )
+    assert out.startswith("skipped: cache_drift")
+    assert "tmdb_id" in out
+    assert write_called == []   # cache drift 必须 short-circuit
+
+
+def test_ssh_atomic_write_nfo_tmp_filename_has_unique_suffix(monkeypatch):
+    """codex r1 I2: 同 nfo_path 并发写时 tmp 文件名必须 unique（不能用固定 .tmp）。"""
+    captured_cmds = []
+
+    def fake_ssh_exec(cmd, timeout=30):
+        captured_cmds.append(cmd)
+        return (0, "1\n", "")
+
+    monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
+    ok1, _ = app_module._ssh_atomic_write_nfo("/m/x.nfo", "<movie>x</movie>", verify_tmdb=False)
+    ok2, _ = app_module._ssh_atomic_write_nfo("/m/x.nfo", "<movie>y</movie>", verify_tmdb=False)
+    assert ok1 and ok2
+    # 两次 atomic_write 用了不同 tmp 后缀
+    tmp1 = [c for c in captured_cmds if ".tmp." in c][0]
+    tmp2 = [c for c in captured_cmds if ".tmp." in c][-1]
+    # 两次的 tmp 后缀（uuid hex）应不同
+    assert tmp1 != tmp2
+
+    # 确认 tmp 后缀格式：含 .tmp. 而不是 .tmp 结尾
+    assert all(".tmp." in c for c in captured_cmds if "mv " in c and "base64" not in c)
