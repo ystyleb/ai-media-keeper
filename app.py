@@ -1888,19 +1888,20 @@ def _archive_executor(payload: dict) -> dict:
     )
 
 
-def _ssh_atomic_write_nfo(
-    nfo_path: str, xml: str, *, existing: bool = False, verify_tmdb: bool = True
+def _ssh_create_nfo_if_absent(
+    nfo_path: str, xml: str, *, verify_tmdb: bool = True
 ) -> tuple[bool, str]:
-    """SSH 原子写 NFO：base64 over SSH → 写 .tmp → mv 覆盖 → grep verify。
+    """Atomic create-only NFO write：写 tmp → ln tmp final → rm tmp。
 
-    existing=True 时把旧 nfo cp 到 .bak（覆盖之前的 .bak）。
-    verify_tmdb=True 时 grep 'tmdb' 验证 NFO 含 uniqueid（payload 不含 tmdb_id 时
-    传 False 跳过此 check，否则会假阴性）。
+    与 `_ssh_atomic_write_nfo`（overwrite-via-mv）的关键区别 — 用 `ln` 而非 `mv`，
+    dst 已存在时 ln 失败（hardlink 创建只在 final 不存在时成功），返
+    (False, 'nfo_exists') 让调用方转 'skipped: nfo_exists'。
 
-    tmp 文件名带 uuid 后缀防并发互踩（同 nfo_path 多个 action 同时写时 .tmp 不会冲突；
-    `mv` 是原子的，最后到达 nfo_path 的是 last-writer-wins）。
+    这是 codex r3 BLOCKER 修法：把「不覆盖已有 NFO」做成 write-boundary atomic
+    contract，而不是依赖 stat→mv 之间无 race 的预 check。
 
-    返回 (success, reason_or_empty)。
+    tmp 文件名带 uuid12 后缀防并发互踩。verify_tmdb=False 时跳过 grep readback
+    （payload 没 tmdb_id 时不该 false-positive）。
     """
     try:
         import uuid
@@ -1908,24 +1909,30 @@ def _ssh_atomic_write_nfo(
         tmp_path = f"{nfo_path}.tmp.{uuid.uuid4().hex[:12]}"
         safe_nfo = shlex.quote(nfo_path)
         safe_tmp = shlex.quote(tmp_path)
-        safe_bak = shlex.quote(nfo_path + ".bak")
-        backup_step = (
-            f"[ -e {safe_nfo} ] && cp -p {safe_nfo} {safe_bak}; "
-            if existing else ""
-        )
         verify_step = f" && grep -c 'tmdb' {safe_nfo}" if verify_tmdb else ""
+        # 1. 写 tmp（同 dir 不跨 fs，保证 ln 不会 EXDEV）
+        # 2. ln tmp final（dst 已存在则 ln 失败，atomic create-only）
+        # 3. 无论 ln 成败 rm tmp（成功后 final 是 tmp 的 hardlink；rm tmp 不影响 final）
+        # 4. 若 ln 失败 + dst 已存在 → echo NFO_EXISTS 让 Python 区分；exit ln_rc
         cmd = (
-            f"{backup_step}"
-            f"printf '%s' {shlex.quote(xml_b64)} | base64 -d > {safe_tmp} && "
-            f"mv {safe_tmp} {safe_nfo}{verify_step}"
+            f"( printf '%s' {shlex.quote(xml_b64)} | base64 -d > {safe_tmp} && "
+            f"ln {safe_tmp} {safe_nfo} ); LN_RC=$?; "
+            f"rm -f {safe_tmp}; "
+            f"if [ $LN_RC -ne 0 ]; then "
+            f"  [ -e {safe_nfo} ] && echo NFO_EXISTS; "
+            f"  exit $LN_RC; "
+            f"fi{verify_step}"
         )
         rc, out, err = ssh_exec(cmd, timeout=30)
         if rc != 0:
-            # 清理 tmp（best-effort，独占 uuid 后缀所以安全）
-            ssh_exec(f"rm -f {safe_tmp}", timeout=5)
-            return False, f"write_failed: {err.strip()[:200]}"
+            if "NFO_EXISTS" in (out or ""):
+                return False, "nfo_exists"
+            return False, f"create_failed: {err.strip()[:200]}"
         if verify_tmdb:
-            count = int(out.strip().splitlines()[-1]) if out.strip() else 0
+            try:
+                count = int(out.strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                count = 0
             if count < 1:
                 return False, "readback_missing_tmdbid"
         return True, ""
@@ -1966,13 +1973,13 @@ def _write_organize_nfo(
     target_nfo_path: str,
     nfo_kind: str,
     *,
-    target_exists: bool = False,
     expected_metadata: dict | None = None,
 ) -> str:
-    """读 cache → 验证 + 构造 NFOPayload → build_nfo → atomic write。
+    """读 cache → 验证 + 构造 NFOPayload → build_nfo → atomic create-only write。
 
-    target_exists=True 时 skip 不覆盖（已有 NFO 保留 — 大概率是用户手工 / 别的工具写的，
-    organize 是 first-time integration 不该破坏）。
+    codex r3: 不再用 target_exists pre-check（stat→mv 之间有 race window）；
+    依靠 _ssh_create_nfo_if_absent 的 atomic ln 做 write-boundary enforcement。
+    dst 已存在 → ln 失败 → helper 返 'nfo_exists' → 这里转 'skipped: nfo_exists'。
 
     expected_metadata: preview 阶段签进 payload 的 {tmdb_id,title,year,season_number,
     episode_number}；confirm 用 cache 重读后比对，不一致 → skipped (cache 已漂移，
@@ -1983,9 +1990,6 @@ def _write_organize_nfo(
       'failed: no_cache' / 'failed: <reason>'。
     Pattern D: 失败不抛 — 调用方根据 status 决定要不要告知用户「文件已整理但 NFO 失败」。
     """
-    if target_exists:
-        return "skipped: nfo_exists"
-
     cached, _ = metadata_cache.get_by_path(get_db(), src_path)
     if cached is None:
         return "failed: no_cache"
@@ -2002,12 +2006,15 @@ def _write_organize_nfo(
         xml = nfo_writer.build_nfo(payload)
     except Exception as e:  # noqa: BLE001
         return f"failed: build_nfo {type(e).__name__}: {e}"
-    ok, reason = _ssh_atomic_write_nfo(
+    ok, reason = _ssh_create_nfo_if_absent(
         target_nfo_path, xml,
-        existing=False,
         verify_tmdb=bool(cached.tmdb_id),
     )
-    return "created" if ok else f"failed: {reason}"
+    if ok:
+        return "created"
+    if reason == "nfo_exists":
+        return "skipped: nfo_exists"
+    return f"failed: {reason}"
 
 
 def _organize_executor(payload: dict) -> dict:
@@ -2031,15 +2038,33 @@ def _organize_executor(payload: dict) -> dict:
     items = payload["items"]
     results: list[dict] = []
 
+    _REQUIRED_METADATA_KEYS = {
+        "tmdb_id", "title", "year", "media_type",
+        "season_number", "episode_number",
+    }
+
     for it in items:
         src_path = it["src_path"]
         plan = it["computed_plan"]
         media_type = it["media_type"]
         src_snap_pre = it["src_snapshot"]
-        # codex I1: preview 阶段签进 payload 的 metadata 快照，confirm 用 cache 重读对比
-        expected_metadata = it.get("metadata_snapshot") or {}
-        # codex r2 B1: preview 阶段的 nfo_path_exists / tvshow_nfo_exists 仅作 UI hint，
-        # 不用来跳过写入 — confirm 时会 re-stat（preview→confirm 之间新出现的 NFO 也要保护）
+        # codex r3 IMPORTANT: metadata_snapshot 必须存在且完整（不能 docs-only 不变量）
+        expected_metadata = it.get("metadata_snapshot")
+        if not isinstance(expected_metadata, dict):
+            results.append({
+                "src_path": src_path, "status": "failed",
+                "reason": "missing_metadata_snapshot_in_payload",
+            })
+            continue
+        missing_keys = _REQUIRED_METADATA_KEYS - set(expected_metadata.keys())
+        if missing_keys:
+            results.append({
+                "src_path": src_path, "status": "failed",
+                "reason": f"incomplete_metadata_snapshot: missing_keys={sorted(missing_keys)}",
+            })
+            continue
+        # codex r3 BLOCKER: NFO 写不再 pre-check（_ssh_create_nfo_if_absent 用 atomic ln，
+        # dst 已存在则 ln 失败 → skipped: nfo_exists；无 stat→mv race window）
 
         src_now = _ssh_stat_paths([src_path]).get(src_path, {"exists": False})
         if not src_now.get("exists"):
@@ -2109,30 +2134,19 @@ def _organize_executor(payload: dict) -> dict:
             })
             continue
 
-        # 4. 写 NFO（Pattern D：失败不回滚 hardlink；codex r2 B1: confirm 时 re-stat
-        #    防 preview 不存在但 confirm 时新出现的 NFO 被覆盖）
+        # 4. 写 NFO（Pattern D：失败不回滚 hardlink）
+        # codex r3 BLOCKER: 用 atomic create-only ln（不 pre-check 直接尝试 ln），
+        # dst 已存在 → helper 返 'skipped: nfo_exists'。无 stat→mv race window。
         nfo_kind = "episode" if media_type == "tv" else "movie"
-        nfo_paths_now = _ssh_stat_paths(
-            [plan["nfo_path"]]
-            + ([plan["tvshow_nfo_path"]] if plan.get("tvshow_nfo_path") else [])
-        )
-        nfo_exists_at_confirm = bool(
-            nfo_paths_now.get(plan["nfo_path"], {}).get("exists")
-        )
         nfo_status = _write_organize_nfo(
             src_path, plan["nfo_path"], nfo_kind,
-            target_exists=nfo_exists_at_confirm,
             expected_metadata=expected_metadata,
         )
 
         tvshow_nfo_status = "skipped"
         if media_type == "tv" and plan.get("tvshow_nfo_path"):
-            tvshow_exists_at_confirm = bool(
-                nfo_paths_now.get(plan["tvshow_nfo_path"], {}).get("exists")
-            )
             tvshow_nfo_status = _write_organize_nfo(
                 src_path, plan["tvshow_nfo_path"], "tvshow",
-                target_exists=tvshow_exists_at_confirm,
                 expected_metadata=expected_metadata,
             )
 
