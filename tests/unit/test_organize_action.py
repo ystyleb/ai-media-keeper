@@ -1000,6 +1000,68 @@ def test_executor_rejects_payload_missing_metadata_snapshot(monkeypatch):
     assert item["reason"] == "missing_metadata_snapshot_in_payload"
 
 
+def test_ssh_ln_rejects_directory_dst(monkeypatch):
+    """codex r5 BLOCKER 2: _ssh_ln pre-check [ -d dst ] 防 silent ln-into-dir."""
+    def fake_ssh_exec(cmd, timeout=10):
+        return (99, "DST_IS_DIR\n", "")
+    monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
+    rc, out, err = app_module._ssh_ln("/src/x.mkv", "/dst/dir_target")
+    assert rc == 99
+    assert "DST_IS_DIR" in out
+
+
+def test_ssh_ln_detects_race_ln_into_dir_and_cleans_up(monkeypatch):
+    """codex r5 BLOCKER 2: pre-check 后 race-created dir 让 ln-into-dir →
+    post-stat [ -f dst ] 抓到 + cleanup `<dst>/<basename(src)>` + exit 98."""
+    def fake_ssh_exec(cmd, timeout=10):
+        return (98, "DST_NOT_REGULAR\n", "")
+    monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
+    rc, out, err = app_module._ssh_ln("/src/x.mkv", "/dst/race_dir")
+    assert rc == 98
+    assert "DST_NOT_REGULAR" in out
+
+
+def test_ssh_ln_shell_cmd_includes_dir_check_and_post_stat(monkeypatch):
+    """codex r5 BLOCKER 2: shell 命令必须含 [ -d ] pre-check + [ -f ] post-stat + cleanup."""
+    captured = []
+    def fake_ssh_exec(cmd, timeout=10):
+        captured.append(cmd)
+        return (0, "", "")
+    monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
+    app_module._ssh_ln("/src/x.mkv", "/dst/y.mkv")
+    cmd = captured[0]
+    assert "[ -d " in cmd, f"missing dir pre-check: {cmd}"
+    assert "DST_IS_DIR" in cmd
+    assert "ln " in cmd
+    assert "[ ! -f " in cmd, f"missing post-stat: {cmd}"
+    assert "DST_NOT_REGULAR" in cmd
+    assert "basename" in cmd, "missing cleanup of <dst>/<basename(src)>"
+
+
+def test_ssh_create_nfo_if_absent_detects_race_ln_into_dir(monkeypatch):
+    """codex r5 BLOCKER 1: _ssh_create_nfo_if_absent pre-check 后 race-dir →
+    post-stat [ -f final ] 抓到 + cleanup `<final>/<basename(tmp)>` + exit 98."""
+    def fake_ssh_exec(cmd, timeout=30):
+        return (98, "NFO_TARGET_NOT_REGULAR\n", "")
+    monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
+    ok, reason = app_module._ssh_create_nfo_if_absent("/m/x.nfo", "<a/>", verify_tmdb=False)
+    assert ok is False
+    assert reason == "nfo_target_not_regular_race"
+
+
+def test_ssh_create_nfo_if_absent_shell_cmd_includes_post_stat(monkeypatch):
+    """codex r5 BLOCKER 1: shell 命令必须含 post-stat `[ ! -f final ]` race-protect."""
+    captured = []
+    def fake_ssh_exec(cmd, timeout=30):
+        captured.append(cmd)
+        return (0, "1\n", "")
+    monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
+    app_module._ssh_create_nfo_if_absent("/m/x.nfo", "<a/>", verify_tmdb=True)
+    cmd = captured[0]
+    assert "[ ! -f " in cmd
+    assert "NFO_TARGET_NOT_REGULAR" in cmd
+
+
 def test_executor_rejects_incomplete_metadata_snapshot(monkeypatch):
     """缺 required key (如 tmdb_id) → failed incomplete_metadata_snapshot."""
     monkeypatch.setattr(app_module, "_ssh_stat_paths", lambda paths: {

@@ -1472,10 +1472,29 @@ def _ssh_mkdir_p(path: str) -> tuple[int, str, str]:
 def _ssh_ln(src: str, dst: str) -> tuple[int, str, str]:
     """SSH `ln <src> <dst>` 创建硬链接。
 
-    Phase 4A.2: 不加 -f flag —— dst 已存在直接报错（让 executor 显式判断
-    already_linked vs conflict），避免静默覆盖。
+    Phase 4A.2: 不加 -f flag —— dst 已存在直接报错。
+    codex r5 BLOCKER 2: 加 pre-check `[ -d dst ]` + post-stat `[ -f dst ]`
+    防 silent ln-into-dir race。BusyBox 不支持 `-T` flag，所以走 shell
+    控制流而非 GNU 专属 option。
+
+    stdout marker:
+      DST_IS_DIR    — pre-check 命中：dst 已是目录（exit 99）
+      DST_NOT_REGULAR — ln 后 dst 不是 regular file（race ln-into-dir，
+                        cleanup `<dst>/<basename(src)>` 后 exit 98）
+      其他失败 → 普通 ln 错误（exit ln_rc，stderr 含 ln msg）
     """
-    return ssh_exec(f"ln {shlex.quote(src)} {shlex.quote(dst)}", timeout=10)
+    safe_src = shlex.quote(src)
+    safe_dst = shlex.quote(dst)
+    cmd = (
+        f"if [ -d {safe_dst} ]; then echo DST_IS_DIR; exit 99; fi; "
+        f"ln {safe_src} {safe_dst}; LN_RC=$?; "
+        f"if [ $LN_RC -ne 0 ]; then exit $LN_RC; fi; "
+        f"if [ ! -f {safe_dst} ]; then "
+        f"  [ -d {safe_dst} ] && rm -f {safe_dst}/$(basename {safe_src}) 2>/dev/null; "
+        f"  echo DST_NOT_REGULAR; exit 98; "
+        f"fi"
+    )
+    return ssh_exec(cmd, timeout=10)
 
 
 def _build_delete_snapshot(
@@ -1819,11 +1838,15 @@ def _nfo_write_executor(payload: dict) -> dict:
             # 2. 写 .tmp（base64 解码 + 重定向）
             # 3. 原子 mv
             # 4. readback 提取 tmdbid 验证
+            # codex r5 IMPORTANT: grep -c 在 count=0 时 rc=1 让 && 链断 → 整条
+            # rc=1 → write_failed 误归类。用 subshell `(grep || echo 0)` 隔离：
+            # mv 成功 → 跑 subshell；mv 失败 → && 链断不跑 subshell，rc=mv_rc
+            # 保 mv 失败的 write_failed 语义，同时 grep count=0 不再误归类。
             cmd = (
                 f"{backup_step}"
                 f"printf '%s' {shlex.quote(xml_b64)} | base64 -d > {safe_tmp} && "
                 f"mv {safe_tmp} {safe_nfo} && "
-                f"grep -c 'tmdb' {safe_nfo}"
+                f"( grep -c 'tmdb' {safe_nfo} || echo 0 )"
             )
             rc, out, err = ssh_exec(cmd, timeout=30)
             if rc != 0:
@@ -1912,13 +1935,15 @@ def _ssh_create_nfo_if_absent(
         # codex r4 NIT: grep -c 在 count=0 时 rc=1 让整个 shell rc!=0 进 create_failed 分支，
         # 误归类。用 `|| echo 0` 兜底保证 rc=0，count 由 stdout 决定。
         verify_step = f"; grep -c 'tmdb' {safe_nfo} || echo 0" if verify_tmdb else ""
-        # codex r4 BLOCKER: `ln src dir/` 会在 dir 内 link，没失败。先 `[ -d ]` 阻止：
-        # dst 是目录 → echo NFO_IS_DIR + exit 99，Python 转 'nfo_is_directory'
-        # 1. 检查 dst 不是 directory（race window 极窄但比 ln-into-dir 安全）
-        # 2. 写 tmp（同 dir 不跨 fs，保证 ln 不会 EXDEV）
-        # 3. ln tmp final（dst 已存在为 regular file 时 ln 失败，atomic create-only）
-        # 4. 无论 ln 成败 rm tmp（成功后 final 是 tmp 的 hardlink；rm tmp 不影响 final）
-        # 5. 若 ln 失败 + dst 已存在 → echo NFO_EXISTS 让 Python 区分；exit ln_rc
+        # codex r4 + r5 BLOCKER: `ln src dir/` 会在 dir 内 link 不失败。
+        # 双重防护：pre-check [-d] + post-stat [-f]（race-window：dir 在
+        # pre-check 后 ln 前出现时，post-stat 抓到 + 清理 race-created link）
+        # 1. 检查 dst 不是 directory → echo NFO_IS_DIR exit 99
+        # 2. 写 tmp + ln tmp final（atomic create-only）
+        # 3. 无论 ln 成败 rm tmp（成功 → final 是 tmp 的 hardlink，rm tmp 不影响 final）
+        # 4. ln 失败 + dst 已存在 → echo NFO_EXISTS（exit ln_rc）
+        # 5. ln 成功但 dst 不是 regular file → ln-into-dir race 发生，
+        #    cleanup <final>/<basename(tmp)> + echo NFO_TARGET_NOT_REGULAR + exit 98
         cmd = (
             f"if [ -d {safe_nfo} ]; then echo NFO_IS_DIR; exit 99; fi; "
             f"( printf '%s' {shlex.quote(xml_b64)} | base64 -d > {safe_tmp} && "
@@ -1927,12 +1952,18 @@ def _ssh_create_nfo_if_absent(
             f"if [ $LN_RC -ne 0 ]; then "
             f"  [ -e {safe_nfo} ] && echo NFO_EXISTS; "
             f"  exit $LN_RC; "
+            f"fi; "
+            f"if [ ! -f {safe_nfo} ]; then "
+            f"  [ -d {safe_nfo} ] && rm -f {safe_nfo}/$(basename {safe_tmp}) 2>/dev/null; "
+            f"  echo NFO_TARGET_NOT_REGULAR; exit 98; "
             f"fi{verify_step}"
         )
         rc, out, err = ssh_exec(cmd, timeout=30)
         if rc != 0:
             if "NFO_IS_DIR" in (out or ""):
                 return False, "nfo_is_directory"
+            if "NFO_TARGET_NOT_REGULAR" in (out or ""):
+                return False, "nfo_target_not_regular_race"
             if "NFO_EXISTS" in (out or ""):
                 return False, "nfo_exists"
             return False, f"create_failed: {err.strip()[:200]}"
@@ -2121,11 +2152,19 @@ def _organize_executor(payload: dict) -> dict:
             continue
 
         # 2. ln src dst (失败时不动 dst_dir — 详见 cleanup 策略 docstring)
-        rc, _, err = _ssh_ln(src_path, dst_path)
+        # codex r5 BLOCKER 2: _ssh_ln 内部已含 [-d dst] pre-check + post-stat
+        # [-f dst] 防 ln-into-dir race；out 含 DST_IS_DIR / DST_NOT_REGULAR marker。
+        rc, ln_out, err = _ssh_ln(src_path, dst_path)
         if rc != 0:
+            if "DST_IS_DIR" in (ln_out or ""):
+                reason = "dst_is_directory_at_ln"
+            elif "DST_NOT_REGULAR" in (ln_out or ""):
+                reason = "ln_target_not_regular_race_cleaned"
+            else:
+                reason = f"ln_failed: {err.strip()[:200]}"
             results.append({
                 "src_path": src_path, "status": "failed",
-                "reason": f"ln_failed: {err.strip()[:200]}",
+                "reason": reason,
             })
             continue
 
