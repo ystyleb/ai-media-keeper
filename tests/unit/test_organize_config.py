@@ -216,3 +216,14 @@ def test_test_ssh_uses_test_d_and_w(client, token, monkeypatch):
     for c in seen_cmds:
         assert "test -d" in c, f"cmd should use test -d: {c}"
         assert "-w" in c, f"cmd should check writable: {c}"
+
+
+def test_test_rejects_relative_path(client, token):
+    """codex r1 IMPORTANT 2: test route 也必须强制绝对路径（跟 POST 一致）。"""
+    resp = client.post(
+        "/api/config/organize/test",
+        json={"movies_root": "media/movies", "tv_root": "/a/t"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+    assert "absolute" in resp.get_json()["message"]

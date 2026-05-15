@@ -3764,13 +3764,19 @@ def set_organize_config():
 @app.route("/api/config/organize/test", methods=["POST"])
 @require_token
 def test_organize_config():
-    """SSH 检查两个 root 目录存在 + 可写。body 可传新 path 直接测不落盘。"""
+    """SSH 检查两个 root 目录存在 + 可写。body 可传新 path 直接测不落盘。
+
+    codex r1 IMPORTANT 2: 跟 POST save 一样强制绝对路径，避免 test/save 接口
+    contract 漂移（用户在 test 时传相对路径"看着 ok" 但 save 阶段被 reject）。
+    """
     data = request.json or {}
     cfg = load_organize_config()
     movies_root = (data.get("movies_root") or "").strip() or cfg.get("movies_root", "")
     tv_root = (data.get("tv_root") or "").strip() or cfg.get("tv_root", "")
     if not movies_root or not tv_root:
         return jsonify({"ok": False, "message": "movies_root and tv_root required"}), 400
+    if not movies_root.startswith("/") or not tv_root.startswith("/"):
+        return jsonify({"ok": False, "message": "paths must be absolute (start with /)"}), 400
     rc_m, _, _ = ssh_exec(
         f"test -d {shlex.quote(movies_root)} -a -w {shlex.quote(movies_root)}",
         timeout=10,

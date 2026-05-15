@@ -1026,8 +1026,9 @@ async function showDetail(path) {
             } else {
                 aiBtn.innerHTML = '<i class="bi bi-stars me-1"></i>AI 识别（TMDB）';
             }
-            // Phase 4A.4: 已识别且 media_type 是 movie/tv → 显示整理按钮
-            const mt = cacheData.cached && cacheData.media_type;
+            // Phase 4A.4 + codex r1 B1: media_type 实际在 cacheData.top_pick.media_type,
+            // 不在顶层（后端 shape 见 app.py:3052）。
+            const mt = cacheData.cached && cacheData.top_pick && cacheData.top_pick.media_type;
             if (mt === "movie" || mt === "tv") {
                 organizeBtn.style.display = "inline-block";
             }
@@ -1050,8 +1051,9 @@ async function showDetail(path) {
                 renderMetadataCard(aiResult, data);
                 // 写入成功 → 旧的 cache 卡片用新数据替换（让用户看到刚 cache 的）
                 cachedCard.innerHTML = "";
-                // Phase 4A.4: 识别成功且 media_type 是 movie/tv → 显示整理按钮
-                const mt = data && (data.media_type || (data.cached && data.cached.media_type));
+                // Phase 4A.4 + codex r1 B1: identify route 也把 media_type 放
+                // top_pick.media_type（见 app.py:2939）
+                const mt = data && data.top_pick && data.top_pick.media_type;
                 if (mt === "movie" || mt === "tv") {
                     organizeBtn.style.display = "inline-block";
                 }
@@ -3622,18 +3624,25 @@ async function saveOrganizeConfig() {
 // ==================== Phase 4A.4 整理到媒体库 ====================
 
 let organizeModal = null;
-let _organizeAction = null;   // {action_id, signed_token, item}
+let _organizeAction = null;   // {request_id, action_id, signed_token, item}
+let _organizeRequestSeq = 0;  // 递增 request id 防 stale response 覆盖（codex r1 B2）
 
 async function openOrganize(srcPath) {
-    if (!organizeModal) {
-        organizeModal = new bootstrap.Modal(document.getElementById("organizeModal"));
-    }
-    const path = srcPath || currentFilePath;
-    if (!path) {
+    if (!srcPath) {
         alert("没有选中文件");
         return;
     }
-    // 渲染 loading 状态
+    if (!organizeModal) {
+        organizeModal = new bootstrap.Modal(document.getElementById("organizeModal"));
+        // codex r1 B2: modal 关闭时 invalidate 当前 action，防止 race-confirm
+        document.getElementById("organizeModal").addEventListener("hidden.bs.modal", () => {
+            _organizeAction = null;
+        });
+    }
+    // codex r1 B2: 递增 request id；response 返回时不匹配就丢弃
+    const requestId = ++_organizeRequestSeq;
+    _organizeAction = null;   // 显式清空，防早期点击的 preview 残留
+
     document.getElementById("organize-modal-body").innerHTML =
         '<div class="text-secondary py-3 text-center"><i class="bi bi-hourglass-split"></i> 计算目标路径...</div>';
     document.getElementById("organize-confirm-btn").style.display = "none";
@@ -3643,16 +3652,27 @@ async function openOrganize(srcPath) {
         const res = await apiFetch(`${API_BASE}/api/action/preview`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ kind: "organize", items: [{ src_path: path }] }),
+            body: JSON.stringify({ kind: "organize", items: [{ src_path: srcPath }] }),
         });
+        // codex r1 B2: response 到达时检查 request id，过时则丢弃
+        if (requestId !== _organizeRequestSeq) {
+            console.warn(`[organize] stale preview response (req=${requestId}, current=${_organizeRequestSeq}), discarding`);
+            return;
+        }
         if (!res.ok) {
             const body = await res.json();
             renderOrganizeError(body);
             return;
         }
         const body = await res.json();
+        // 再检查一次（json 解析也是 async）
+        if (requestId !== _organizeRequestSeq) {
+            console.warn("[organize] stale preview response after json parse, discarding");
+            return;
+        }
         const item = body.items[0];
         _organizeAction = {
+            request_id: requestId,
             action_id: body.action_id,
             signed_token: body.signed_token,
             item,
@@ -3660,6 +3680,7 @@ async function openOrganize(srcPath) {
         renderOrganizePreview(item);
         document.getElementById("organize-confirm-btn").style.display = "inline-block";
     } catch (err) {
+        if (requestId !== _organizeRequestSeq) return;   // 同上：stale 不渲染
         document.getElementById("organize-modal-body").innerHTML =
             `<div class="text-danger py-3 text-center">网络错误: ${escapeHtml(err.message)}</div>`;
     }
@@ -3682,12 +3703,15 @@ function renderOrganizeError(body) {
     `;
 }
 
+// codex r1 NIT 2: 所有动态字段统一 escape（即使数字类型也包 String）
+function _esc(v) { return escapeHtml(String(v ?? "")); }
+
 function renderOrganizePreview(item) {
     const plan = item.computed_plan;
     const status = item.dst_status;
     const mediaTypeLabel = item.media_type === "movie" ? "电影" : "剧集";
     const tvMeta = item.media_type === "tv"
-        ? `<div class="small text-secondary">Season ${item.season_number} · Episode ${item.episode_number}</div>`
+        ? `<div class="small text-secondary">Season ${_esc(item.season_number)} · Episode ${_esc(item.episode_number)}</div>`
         : "";
 
     // 状态徽章
@@ -3707,21 +3731,21 @@ function renderOrganizePreview(item) {
     const badgesHtml = badges.length ? `<div class="mb-2">${badges.join(" ")}</div>` : "";
 
     const tvshowHtml = plan.tvshow_nfo_path
-        ? `<div class="mb-2"><strong>tvshow.nfo:</strong><br><code class="small">${escapeHtml(plan.tvshow_nfo_path)}</code></div>`
+        ? `<div class="mb-2"><strong>tvshow.nfo:</strong><br><code class="small">${_esc(plan.tvshow_nfo_path)}</code></div>`
         : "";
 
     document.getElementById("organize-modal-body").innerHTML = `
         ${badgesHtml}
-        <div class="mb-2"><strong>源文件:</strong><br><code class="small">${escapeHtml(item.src_path)}</code></div>
+        <div class="mb-2"><strong>源文件:</strong><br><code class="small">${_esc(item.src_path)}</code></div>
         <div class="mb-2">
-            <strong>识别结果:</strong> ${escapeHtml(item.title)}${item.year ? " (" + item.year + ")" : ""}
+            <strong>识别结果:</strong> ${_esc(item.title)}${item.year ? " (" + _esc(item.year) + ")" : ""}
             <span class="badge bg-primary ms-1">${mediaTypeLabel}</span>
-            ${item.tmdb_id ? `<span class="badge bg-secondary ms-1">tmdb_id=${escapeHtml(item.tmdb_id)}</span>` : ""}
+            ${item.tmdb_id ? `<span class="badge bg-secondary ms-1">tmdb_id=${_esc(item.tmdb_id)}</span>` : ""}
             ${tvMeta}
         </div>
         <hr class="my-2" style="border-color:var(--border);">
-        <div class="mb-2"><strong>目标文件:</strong><br><code class="small">${escapeHtml(plan.dst_path)}</code></div>
-        <div class="mb-2"><strong>NFO:</strong><br><code class="small">${escapeHtml(plan.nfo_path)}</code></div>
+        <div class="mb-2"><strong>目标文件:</strong><br><code class="small">${_esc(plan.dst_path)}</code></div>
+        <div class="mb-2"><strong>NFO:</strong><br><code class="small">${_esc(plan.nfo_path)}</code></div>
         ${tvshowHtml}
         <div class="alert alert-info mt-2 mb-0 small">
             <i class="bi bi-info-circle me-1"></i>
@@ -3729,6 +3753,15 @@ function renderOrganizePreview(item) {
         </div>
     `;
 }
+
+// codex r1 IMPORTANT 1: confirm 阶段 error code → 中文 mapping
+const _CONFIRM_ERROR_MSG = {
+    action_not_found: "Action 不存在（可能已过期或 server 重启清除）",
+    action_already_consumed: "此 action 已被消费过（不能重复 confirm）",
+    action_expired: "Action 已过期，请重新触发 preview",
+    invalid_signed_token: "签名 token 无效（不应该发生 — 请刷新页面重试）",
+    action_error: "Action 内部状态错误",
+};
 
 async function confirmOrganize() {
     if (!_organizeAction) return;
@@ -3746,10 +3779,22 @@ async function confirmOrganize() {
             }),
         });
         const body = await res.json();
+        // codex r1 IMPORTANT 1: 区分 contract-level error (res.ok=false) vs item-level result
+        if (!res.ok) {
+            const code = body.error || "unknown";
+            const friendly = _CONFIRM_ERROR_MSG[code] || `${code} (${body.detail || body.hint || "?"})`;
+            document.getElementById("organize-modal-body").innerHTML += `
+                <div class="alert alert-danger mt-3 mb-0">
+                    <i class="bi bi-x-circle me-1"></i>
+                    <strong>Confirm 失败:</strong> ${_esc(friendly)}
+                </div>
+            `;
+            return;
+        }
         renderOrganizeResult(body);
     } catch (err) {
         document.getElementById("organize-modal-body").innerHTML +=
-            `<div class="alert alert-danger mt-3">网络错误: ${escapeHtml(err.message)}</div>`;
+            `<div class="alert alert-danger mt-3">网络错误: ${_esc(err.message)}</div>`;
     } finally {
         btn.disabled = false;
         btn.innerHTML = '<i class="bi bi-check2 me-1"></i>确认整理';
@@ -3762,7 +3807,7 @@ function renderOrganizeResult(body) {
     if (!items.length) {
         document.getElementById("organize-modal-body").innerHTML += `
             <div class="alert alert-warning mt-3">
-                action status=${escapeHtml(body.status || "?")}: ${escapeHtml(body.error || body.hint || "无 items")}
+                action status=${_esc(body.status)}: ${_esc(body.error || body.hint || "无 items")}
             </div>
         `;
         return;
@@ -3774,9 +3819,9 @@ function renderOrganizeResult(body) {
             <div class="alert alert-success mt-3 mb-0">
                 <i class="bi bi-check-circle me-1"></i>
                 <strong>整理成功</strong><br>
-                <code class="small">${escapeHtml(item.dst_path)}</code>
+                <code class="small">${_esc(item.dst_path)}</code>
                 <div class="small mt-1 text-secondary">
-                    inode 共享 (${item.src_inode} == ${item.dst_inode}) — qBit 保种正常
+                    inode 共享 (${_esc(item.src_inode)} == ${_esc(item.dst_inode)}) — qBit 保种正常
                 </div>
             </div>
         `;
@@ -3785,14 +3830,14 @@ function renderOrganizeResult(body) {
             html += `
                 <div class="alert alert-warning mt-2 mb-0 small">
                     <i class="bi bi-exclamation-triangle me-1"></i>
-                    NFO 状态: ${escapeHtml(item.nfo_status)}（hardlink 成功，可手工补 NFO）
+                    NFO 状态: ${_esc(item.nfo_status)}（hardlink 成功，可手工补 NFO）
                 </div>
             `;
         }
         if (item.tvshow_nfo_status && item.tvshow_nfo_status.startsWith("failed:")) {
             html += `
                 <div class="alert alert-warning mt-2 mb-0 small">
-                    tvshow.nfo: ${escapeHtml(item.tvshow_nfo_status)}
+                    tvshow.nfo: ${_esc(item.tvshow_nfo_status)}
                 </div>
             `;
         }
@@ -3801,9 +3846,9 @@ function renderOrganizeResult(body) {
             <div class="alert alert-info mt-3 mb-0">
                 <i class="bi bi-info-circle me-1"></i>
                 <strong>已经整理过（idempotent skip）</strong><br>
-                <code class="small">${escapeHtml(item.dst_path)}</code>
+                <code class="small">${_esc(item.dst_path)}</code>
                 <div class="small mt-1 text-secondary">
-                    shared_inode=${item.shared_inode}
+                    shared_inode=${_esc(item.shared_inode)}
                 </div>
             </div>
         `;
@@ -3812,8 +3857,8 @@ function renderOrganizeResult(body) {
             <div class="alert alert-danger mt-3 mb-0">
                 <i class="bi bi-x-circle me-1"></i>
                 <strong>整理失败</strong><br>
-                <code class="small">${escapeHtml(item.reason || "unknown")}</code>
-                ${item.hint ? `<div class="small mt-2"><strong>提示:</strong> ${escapeHtml(item.hint)}</div>` : ""}
+                <code class="small">${_esc(item.reason || "unknown")}</code>
+                ${item.hint ? `<div class="small mt-2"><strong>提示:</strong> ${_esc(item.hint)}</div>` : ""}
             </div>
         `;
     }
