@@ -369,3 +369,219 @@ def test_cron_calls_reconcile_before_dispatch(client, monkeypatch):
     )
     app_module._cron_qbit_auto_organize()
     reconcile_called.assert_called_once()
+
+
+# ── 4C.5 routes ───
+
+
+@pytest.fixture
+def token():
+    return app_module.API_TOKEN
+
+
+def test_get_config_returns_defaults(client, token, monkeypatch, tmp_path):
+    """GET /api/config/qbit-auto-organize 默认 disabled + 空 categories."""
+    cfg_file = tmp_path / "qbit_auto_organize.json"
+    monkeypatch.setattr(app_module, "QBIT_AUTO_ORGANIZE_CONFIG_FILE", cfg_file)
+    monkeypatch.setattr(app_module.qbit, "get_torrents", lambda: [])
+    resp = client.get(
+        "/api/config/qbit-auto-organize",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["enabled"] is False
+    assert body["categories"] == []
+    assert body["poll_interval_minutes"] == 5
+    assert body["confidence_threshold"] == 0.85
+    assert body["available_qbit_categories"] == []
+    assert body["qbit_fetch_error"] is None
+    assert body["active_changes_require_restart"] is True
+
+
+def test_get_config_lists_qbit_categories(client, token, monkeypatch, tmp_path):
+    """available_qbit_categories 列出当前 qBit 现存 categories（dedup + 排序）."""
+    cfg_file = tmp_path / "qbit_auto_organize.json"
+    monkeypatch.setattr(app_module, "QBIT_AUTO_ORGANIZE_CONFIG_FILE", cfg_file)
+    monkeypatch.setattr(
+        app_module.qbit, "get_torrents",
+        lambda: [
+            {"category": "Movies"}, {"category": "TV"}, {"category": "Movies"},
+            {"category": "Music"}, {"category": ""},  # 空 category 应过滤
+        ],
+    )
+    resp = client.get(
+        "/api/config/qbit-auto-organize",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = resp.get_json()
+    assert body["available_qbit_categories"] == ["Movies", "Music", "TV"]
+
+
+def test_get_config_handles_qbit_error_gracefully(client, token, monkeypatch, tmp_path):
+    """qBit down → qbit_fetch_error 填入，主路径仍 200."""
+    cfg_file = tmp_path / "qbit_auto_organize.json"
+    monkeypatch.setattr(app_module, "QBIT_AUTO_ORGANIZE_CONFIG_FILE", cfg_file)
+
+    def boom():
+        raise ConnectionError("qbit unreachable")
+
+    monkeypatch.setattr(app_module.qbit, "get_torrents", boom)
+    resp = client.get(
+        "/api/config/qbit-auto-organize",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["available_qbit_categories"] == []
+    assert "ConnectionError" in body["qbit_fetch_error"]
+
+
+def test_post_config_saves_and_returns_clamped(client, token, monkeypatch, tmp_path):
+    """POST 落盘 + 边界清洗 + return clamp 后的值."""
+    cfg_file = tmp_path / "qbit_auto_organize.json"
+    monkeypatch.setattr(app_module, "QBIT_AUTO_ORGANIZE_CONFIG_FILE", cfg_file)
+    resp = client.post(
+        "/api/config/qbit-auto-organize",
+        json={
+            "enabled": True,
+            "categories": ["Movies", "TV"],
+            "poll_interval_minutes": 0,        # → clamp 1
+            "confidence_threshold": 2.5,        # → clamp 1.0
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["enabled"] is True
+    assert body["categories"] == ["Movies", "TV"]
+    assert body["poll_interval_minutes"] == 1
+    assert body["confidence_threshold"] == 1.0
+    assert "重启 server" in body["message"]
+
+
+def test_list_runs_empty(client, token):
+    resp = client.get(
+        "/api/auto-organize/runs",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert isinstance(body["runs"], list)
+    assert "total" in body
+    assert body["limit"] == 50
+    assert body["offset"] == 0
+
+
+def test_list_runs_with_status_filter(client, token):
+    """status filter + total count 跟 filter 一致."""
+    import time
+    with app_module.app.test_request_context():
+        c = app_module.get_db()
+        c.execute(
+            "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,attempts,"
+            "created_at) VALUES(?,?,?,?,?)",
+            ("h-success-1", "/x", "succeeded", 1, int(time.time())),
+        )
+        c.execute(
+            "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,attempts,"
+            "created_at) VALUES(?,?,?,?,?)",
+            ("h-failed-1", "/x", "failed", 1, int(time.time())),
+        )
+        c.commit()
+
+    resp = client.get(
+        "/api/auto-organize/runs?status=succeeded&limit=10",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = resp.get_json()
+    assert resp.status_code == 200
+    hashes = {r["qbit_hash"] for r in body["runs"]}
+    assert "h-success-1" in hashes
+    assert "h-failed-1" not in hashes
+    assert body["total"] >= 1  # 可能有其他 test 残留
+
+    # cleanup
+    with app_module.app.test_request_context():
+        c = app_module.get_db()
+        c.execute("DELETE FROM auto_organize_runs WHERE qbit_hash IN (?,?)",
+                  ("h-success-1", "h-failed-1"))
+        c.commit()
+
+
+def test_reset_run_missing_hash_returns_400(client, token):
+    resp = client.post(
+        "/api/auto-organize/reset",
+        json={},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+
+
+def test_reset_run_not_found_returns_404(client, token):
+    resp = client.post(
+        "/api/auto-organize/reset",
+        json={"qbit_hash": "ghost-hash-xyz"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_reset_run_rejects_active_status(client, token):
+    """organizing / pending 不能 reset (副作用未完成)."""
+    import time
+    with app_module.app.test_request_context():
+        c = app_module.get_db()
+        c.execute(
+            "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,attempts,"
+            "created_at) VALUES(?,?,?,?,?)",
+            ("h-organizing-1", "/x", "organizing", 1, int(time.time())),
+        )
+        c.commit()
+    try:
+        resp = client.post(
+            "/api/auto-organize/reset",
+            json={"qbit_hash": "h-organizing-1"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 409
+        body = resp.get_json()
+        assert body["current_status"] == "organizing"
+    finally:
+        with app_module.app.test_request_context():
+            c = app_module.get_db()
+            c.execute("DELETE FROM auto_organize_runs WHERE qbit_hash=?",
+                      ("h-organizing-1",))
+            c.commit()
+
+
+def test_reset_run_terminal_deletes_row(client, token):
+    """failed / skipped_* row 可 reset (DELETE)，下周期 cron 重试."""
+    import time
+    with app_module.app.test_request_context():
+        c = app_module.get_db()
+        c.execute(
+            "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,attempts,"
+            "created_at,completed_at) VALUES(?,?,?,?,?,?)",
+            ("h-failed-reset-1", "/x", "failed", 1, int(time.time()), int(time.time())),
+        )
+        c.commit()
+    resp = client.post(
+        "/api/auto-organize/reset",
+        json={"qbit_hash": "h-failed-reset-1"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["previous_status"] == "failed"
+    # row 真的删了
+    with app_module.app.test_request_context():
+        c = app_module.get_db()
+        assert qbit_auto_check_get(c, "h-failed-reset-1") is None
+
+
+def qbit_auto_check_get(conn, qbit_hash):
+    from services import qbit_auto as qa
+    return qa.get_run(conn, qbit_hash)

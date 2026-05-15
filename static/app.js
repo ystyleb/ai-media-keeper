@@ -3633,6 +3633,231 @@ async function saveOrganizeConfig() {
 }
 
 
+// ==================== Phase 4C.5 qBit 自动整理 (config + history) ====================
+
+let _autoOrgConfigModal = null;
+let _autoOrgCurrentCategories = [];
+
+const _AUTO_ORG_STATUS_BADGE = {
+    pending: { label: "等待中", cls: "bg-secondary" },
+    organizing: { label: "整理中", cls: "bg-primary" },
+    succeeded: { label: "成功", cls: "bg-success" },
+    failed: { label: "失败", cls: "bg-danger" },
+    skipped_needs_identify: { label: "未识别", cls: "bg-warning text-dark" },
+    skipped_low_confidence: { label: "置信度不足", cls: "bg-warning text-dark" },
+    skipped_unsupported: { label: "不支持", cls: "bg-secondary" },
+};
+
+async function showAutoOrganizeConfig() {
+    if (!_autoOrgConfigModal) {
+        _autoOrgConfigModal = new bootstrap.Modal(document.getElementById("autoOrganizeConfigModal"));
+    }
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/qbit-auto-organize`);
+        const cfg = await res.json();
+        document.getElementById("autoOrg-enabled").checked = !!cfg.enabled;
+        _renderAutoOrgEnabledBadge(!!cfg.enabled);
+        document.getElementById("autoOrg-poll-interval").value = cfg.poll_interval_minutes || 5;
+        document.getElementById("autoOrg-confidence-threshold").value = cfg.confidence_threshold || 0.85;
+        _autoOrgCurrentCategories = (cfg.categories || []).slice();
+        _renderAutoOrgCategoriesChips();
+        // qBit 现存 categories hint（可点击加进白名单）
+        const hint = document.getElementById("autoOrg-qbit-categories-hint");
+        if (cfg.qbit_fetch_error) {
+            hint.innerHTML = `<span class="text-warning">⚠ 无法从 qBit 拉取 categories: ${escapeHtml(cfg.qbit_fetch_error)}</span>`;
+        } else if (cfg.available_qbit_categories?.length) {
+            const chips = cfg.available_qbit_categories
+                .filter(c => !_autoOrgCurrentCategories.includes(c))
+                .map(c => `<a href="#" class="badge bg-secondary text-decoration-none me-1"
+                              onclick="addAutoOrgCategoryByName('${escapeHtml(c)}'); return false;">
+                              + ${escapeHtml(c)}
+                          </a>`).join("");
+            hint.innerHTML = chips ? `<span class="text-secondary">qBit 现存 categories: </span>${chips}` : "";
+        } else {
+            hint.innerHTML = "";
+        }
+        document.getElementById("autoOrg-save-status").innerHTML = "";
+    } catch (err) {
+        console.error("load auto-organize config failed", err);
+    }
+    _autoOrgConfigModal.show();
+}
+
+function _renderAutoOrgEnabledBadge(enabled) {
+    const el = document.getElementById("autoOrg-enabled-badge");
+    if (!el) return;
+    el.textContent = enabled ? "已启用" : "未启用";
+    el.className = enabled ? "badge bg-success ms-1" : "badge bg-secondary ms-1";
+}
+
+function _renderAutoOrgCategoriesChips() {
+    const container = document.getElementById("autoOrg-categories-list");
+    if (!container) return;
+    if (_autoOrgCurrentCategories.length === 0) {
+        container.innerHTML = '<span class="text-secondary small">未配置 — 自动整理不会触发任何种子</span>';
+        return;
+    }
+    container.innerHTML = _autoOrgCurrentCategories.map((c, i) => `
+        <span class="badge bg-info text-dark d-inline-flex align-items-center gap-1">
+            ${escapeHtml(c)}
+            <button type="button" class="btn-close btn-close-white" style="font-size:.6em;"
+                    onclick="removeAutoOrgCategory(${i})" aria-label="删除"></button>
+        </span>
+    `).join("");
+}
+
+function addAutoOrgCategory() {
+    const input = document.getElementById("autoOrg-categories-input");
+    const name = input.value.trim();
+    if (!name) return;
+    addAutoOrgCategoryByName(name);
+    input.value = "";
+}
+
+function addAutoOrgCategoryByName(name) {
+    if (!name || _autoOrgCurrentCategories.includes(name)) return;
+    _autoOrgCurrentCategories.push(name);
+    _renderAutoOrgCategoriesChips();
+    // re-render qBit categories hint（已加的从 hint 去除）
+    showAutoOrganizeConfig.bind(null);  // noop — hint 在下次 open 才刷新
+}
+
+function removeAutoOrgCategory(index) {
+    _autoOrgCurrentCategories.splice(index, 1);
+    _renderAutoOrgCategoriesChips();
+}
+
+async function saveAutoOrganizeConfig() {
+    const status = document.getElementById("autoOrg-save-status");
+    const enabled = document.getElementById("autoOrg-enabled").checked;
+    const poll = parseInt(document.getElementById("autoOrg-poll-interval").value || "5", 10);
+    const threshold = parseFloat(document.getElementById("autoOrg-confidence-threshold").value || "0.85");
+
+    if (enabled && _autoOrgCurrentCategories.length === 0) {
+        status.innerHTML = '<span class="text-danger">✗ 启用前必须配置至少一个 category 白名单</span>';
+        return;
+    }
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/qbit-auto-organize`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                enabled,
+                categories: _autoOrgCurrentCategories,
+                poll_interval_minutes: poll,
+                confidence_threshold: threshold,
+            }),
+        });
+        const data = await res.json();
+        if (!data.ok) {
+            status.innerHTML = `<span class="text-danger">✗ ${escapeHtml(data.message || res.status)}</span>`;
+            return;
+        }
+        _renderAutoOrgEnabledBadge(data.enabled);
+        status.innerHTML = `<span class="text-success">✓ 已保存。${data.message || ""}</span>`;
+        addLog("自动整理配置已保存", "success");
+    } catch (err) {
+        status.innerHTML = `<span class="text-danger">网络错误: ${escapeHtml(err.message)}</span>`;
+    }
+}
+
+async function loadAutoOrganizeHistory() {
+    const listEl = document.getElementById("autoOrg-history-list");
+    const statusEl = document.getElementById("autoOrg-history-filter");
+    const summaryEl = document.getElementById("autoOrg-history-summary");
+    const countBadgeEl = document.getElementById("autoOrg-history-count-badge");
+    listEl.innerHTML = '<div class="text-secondary text-center py-4">加载中…</div>';
+    try {
+        const params = new URLSearchParams({ limit: "100" });
+        const filter = statusEl.value.trim();
+        if (filter) params.set("status", filter);
+        const res = await apiFetch(`${API_BASE}/api/auto-organize/runs?${params}`);
+        const data = await res.json();
+        countBadgeEl.textContent = data.total > 0 ? String(data.total) : "";
+        summaryEl.textContent = data.total > 0 ? `共 ${data.total} 条${filter ? "（已过滤）" : ""}` : "";
+        if (!data.runs || data.runs.length === 0) {
+            listEl.innerHTML = '<div class="text-secondary text-center py-4">暂无历史</div>';
+            return;
+        }
+        listEl.innerHTML = `
+            <table class="table table-sm table-hover">
+              <thead>
+                <tr>
+                  <th>状态</th>
+                  <th>种子</th>
+                  <th>Category</th>
+                  <th>结果</th>
+                  <th>时间</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>${data.runs.map(_renderAutoOrgHistoryRow).join("")}</tbody>
+            </table>
+        `;
+    } catch (err) {
+        listEl.innerHTML = `<div class="text-danger text-center py-4">加载失败：${escapeHtml(err.message)}</div>`;
+    }
+}
+
+function _renderAutoOrgHistoryRow(run) {
+    const badgeCfg = _AUTO_ORG_STATUS_BADGE[run.status] || { label: run.status, cls: "bg-secondary" };
+    const ts = run.completed_at || run.created_at;
+    const tsDisplay = ts ? new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false }) : "—";
+    let resultCol = "";
+    if (run.status === "succeeded") {
+        resultCol = `<small>✓ ${run.files_succeeded || 0} 成功`
+                  + (run.files_already_linked ? ` · ${run.files_already_linked} 已 link` : "")
+                  + (run.files_failed ? ` · <span class="text-danger">${run.files_failed} 失败</span>` : "")
+                  + `</small>`;
+    } else if (run.last_error) {
+        resultCol = `<small class="text-danger" title="${escapeHtml(run.last_error)}">${escapeHtml(run.last_error).slice(0, 80)}${run.last_error.length > 80 ? "…" : ""}</small>`;
+    } else {
+        resultCol = `<small class="text-secondary">—</small>`;
+    }
+    const canReset = !["pending", "organizing"].includes(run.status);
+    return `
+        <tr>
+            <td><span class="badge ${badgeCfg.cls}">${badgeCfg.label}</span></td>
+            <td>
+                <div style="max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                     title="${escapeHtml(run.torrent_name || "")}">
+                    ${escapeHtml(run.torrent_name || run.qbit_hash.slice(0, 12))}
+                </div>
+                <small class="text-secondary">${escapeHtml(run.qbit_hash.slice(0, 8))}</small>
+            </td>
+            <td><small>${escapeHtml(run.category || "—")}</small></td>
+            <td>${resultCol}</td>
+            <td><small class="text-secondary">${tsDisplay}</small></td>
+            <td>
+                ${canReset ? `<button class="btn btn-sm btn-outline-warning" onclick="resetAutoOrgRun('${escapeHtml(run.qbit_hash)}')" title="删除该 row，下周期 cron 重试">
+                    <i class="bi bi-arrow-counterclockwise"></i>
+                </button>` : ""}
+            </td>
+        </tr>
+    `;
+}
+
+async function resetAutoOrgRun(qbit_hash) {
+    if (!confirm("确认 reset 这条记录？下个 cron 周期会重新尝试 organize。")) return;
+    try {
+        const res = await apiFetch(`${API_BASE}/api/auto-organize/reset`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ qbit_hash }),
+        });
+        const data = await res.json();
+        if (!data.ok) {
+            alert("reset 失败：" + (data.message || data.error));
+            return;
+        }
+        addLog(`已 reset ${qbit_hash.slice(0, 8)} (was ${data.previous_status})`, "success");
+        loadAutoOrganizeHistory();
+    } catch (err) {
+        alert(`网络错误: ${err.message}`);
+    }
+}
+
+
 // ==================== Phase 4A.4 整理到媒体库 ====================
 
 let organizeModal = null;

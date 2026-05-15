@@ -1055,6 +1055,10 @@
             <i class="bi bi-folder-symlink"></i>
             媒体库
         </button>
+        <button class="tb-btn" onclick="showAutoOrganizeConfig()" title="qBit 下载完成后自动 organize (Phase 4C)">
+            <i class="bi bi-magic"></i>
+            自动整理
+        </button>
         <button class="tb-btn" onclick="openScanModal()" title="后台扫描全库 + 自动识别元数据">
             <i class="bi bi-radar"></i>
             扫库
@@ -1837,6 +1841,112 @@
     </div>
 </div>
 
+<!-- ── AUTO ORGANIZE CONFIG + HISTORY MODAL (Phase 4C.5) ─────────── -->
+<div class="modal fade" id="autoOrganizeConfigModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-magic me-2" style="color:var(--teal);"></i>qBit 自动整理
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <ul class="nav nav-tabs" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#autoOrgConfigTab" type="button" role="tab">
+                            <i class="bi bi-sliders me-1"></i>配置
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#autoOrgHistoryTab" type="button" role="tab" onclick="loadAutoOrganizeHistory()">
+                            <i class="bi bi-clock-history me-1"></i>历史记录
+                            <span id="autoOrg-history-count-badge" class="badge bg-secondary ms-1"></span>
+                        </button>
+                    </li>
+                </ul>
+
+                <div class="tab-content pt-3">
+                    <!-- ── 配置 tab ── -->
+                    <div class="tab-pane fade show active" id="autoOrgConfigTab" role="tabpanel">
+                        <p class="text-secondary small mb-3">
+                            qBit 下载完成后 cron 自动扫描，对**已识别 + confidence ≥ 阈值 + category 在白名单**的种子自动 organize 到媒体库（同手动整理走 hardlink + NFO + 双 inode 锚定）。
+                            未达标种子不动 (留在 file 视图等手动处理)。
+                        </p>
+
+                        <div class="form-check form-switch mb-3">
+                            <input class="form-check-input" type="checkbox" id="autoOrg-enabled">
+                            <label class="form-check-label" for="autoOrg-enabled">
+                                <strong>启用自动整理</strong>
+                                <span class="badge bg-secondary ms-1" id="autoOrg-enabled-badge">未启用</span>
+                            </label>
+                            <div class="form-text">关闭后 cron 仍跑 reconcile（同步已 organizing → terminal），但不触发新 organize</div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label"><strong>Category 白名单</strong></label>
+                            <div id="autoOrg-categories-list" class="d-flex flex-wrap gap-2 mb-2"></div>
+                            <div class="input-group input-group-sm">
+                                <input type="text" class="form-control" id="autoOrg-categories-input"
+                                       placeholder="手动添加 category 名">
+                                <button class="btn btn-outline-secondary" type="button" onclick="addAutoOrgCategory()">+ 添加</button>
+                            </div>
+                            <div class="form-text">仅触发这些 category 的种子；显示当前 qBit 现存 categories 供勾选</div>
+                            <div id="autoOrg-qbit-categories-hint" class="small text-secondary mt-1"></div>
+                        </div>
+
+                        <div class="row g-3 mb-3">
+                            <div class="col-md-6">
+                                <label class="form-label"><strong>Cron 周期</strong>（分钟）</label>
+                                <input type="number" class="form-control" id="autoOrg-poll-interval"
+                                       min="1" step="1" value="5">
+                                <div class="form-text">最小 1min；改动需重启 server 生效</div>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label"><strong>识别 confidence 门槛</strong></label>
+                                <input type="number" class="form-control" id="autoOrg-confidence-threshold"
+                                       min="0" max="1" step="0.05" value="0.85">
+                                <div class="form-text">LLM 识别 ≥ 此值才自动 organize；否则标 skipped_low_confidence 等手动</div>
+                            </div>
+                        </div>
+
+                        <div id="autoOrg-save-status" class="mt-2 small"></div>
+                    </div>
+
+                    <!-- ── 历史 tab ── -->
+                    <div class="tab-pane fade" id="autoOrgHistoryTab" role="tabpanel">
+                        <div class="d-flex gap-2 mb-3 align-items-center">
+                            <select class="form-select form-select-sm" id="autoOrg-history-filter" style="max-width:200px;" onchange="loadAutoOrganizeHistory()">
+                                <option value="">全部状态</option>
+                                <option value="organizing">organizing</option>
+                                <option value="pending">pending</option>
+                                <option value="succeeded">succeeded</option>
+                                <option value="failed">failed</option>
+                                <option value="skipped_needs_identify">skipped_needs_identify</option>
+                                <option value="skipped_low_confidence">skipped_low_confidence</option>
+                                <option value="skipped_unsupported">skipped_unsupported</option>
+                            </select>
+                            <button class="btn btn-sm btn-outline-secondary" onclick="loadAutoOrganizeHistory()">
+                                <i class="bi bi-arrow-clockwise"></i> 刷新
+                            </button>
+                            <span class="text-secondary small" id="autoOrg-history-summary"></span>
+                        </div>
+                        <div id="autoOrg-history-list" style="max-height:50vh; overflow-y:auto;">
+                            <div class="text-secondary text-center py-4">加载中…</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                <button type="button" class="btn btn-primary" onclick="saveAutoOrganizeConfig()">
+                    <i class="bi bi-check2 me-1"></i>保存配置
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- ── ORGANIZE PREVIEW/CONFIRM MODAL (Phase 4A.4) ─────────── -->
 <div class="modal fade" id="organizeModal" tabindex="-1">
     <div class="modal-dialog modal-lg">
@@ -1910,6 +2020,6 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script src="/static/app.js?v=2026-05-15d"></script>
+<script src="/static/app.js?v=2026-05-15e"></script>
 </body>
 </html>

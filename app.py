@@ -4735,6 +4735,121 @@ def _open_db_conn():
     return destructive_action.open_connection(DB_PATH)
 
 
+# ─── Phase 4C.5: qBit auto-organize config + history routes ────────
+
+
+@app.route("/api/config/qbit-auto-organize", methods=["GET"])
+@require_token
+def get_qbit_auto_organize_config():
+    """返当前 config + 配套：现有 qBit categories list (UI 多选用)."""
+    cfg = load_qbit_auto_organize_config()
+    # qBit categories 可能 fetch 失败 (qbit down)；不影响 config GET 主路径
+    qbit_categories: list[str] = []
+    qbit_error: str | None = None
+    try:
+        torrents = qbit.get_torrents()
+        qbit_categories = sorted({
+            (t.get("category") or "").strip()
+            for t in torrents
+            if (t.get("category") or "").strip()
+        })
+    except Exception as e:  # noqa: BLE001
+        qbit_error = f"{type(e).__name__}: {e}"
+    return jsonify({
+        **cfg,
+        "available_qbit_categories": qbit_categories,
+        "qbit_fetch_error": qbit_error,
+        "active_changes_require_restart": True,
+    })
+
+
+@app.route("/api/config/qbit-auto-organize", methods=["POST"])
+@require_token
+def set_qbit_auto_organize_config():
+    """落盘 + 提示重启生效（poll_interval 跟 cron 注册时绑定）.
+
+    Phase 4C v1: interval 改动需要重启 server（APScheduler 周期变更需 reschedule）.
+    """
+    data = request.json or {}
+    # 类型 / 边界校验在 save 内做
+    save_qbit_auto_organize_config(data)
+    new_cfg = load_qbit_auto_organize_config()
+    return jsonify({
+        "ok": True,
+        **new_cfg,
+        "active_changes_require_restart": True,
+        "message": "保存成功；poll_interval 变更需重启 server 生效",
+    })
+
+
+@app.route("/api/auto-organize/runs", methods=["GET"])
+@require_token
+def list_auto_organize_runs():
+    """UI 历史视图查询.
+
+    Query: ?status=<filter>&limit=50&offset=0
+    Returns: {runs: [...], total, limit, offset}
+    """
+    try:
+        limit = max(1, min(200, int(request.args.get("limit", "50"))))
+    except (TypeError, ValueError):
+        limit = 50
+    try:
+        offset = max(0, int(request.args.get("offset", "0")))
+    except (TypeError, ValueError):
+        offset = 0
+    status_filter = request.args.get("status", "").strip() or None
+    db = get_db()
+    runs = qbit_auto.list_history(
+        db, limit=limit, offset=offset, status_filter=status_filter,
+    )
+    # total count for pagination UI
+    if status_filter:
+        total = db.execute(
+            "SELECT count(*) FROM auto_organize_runs WHERE status = ?",
+            (status_filter,),
+        ).fetchone()[0]
+    else:
+        total = db.execute(
+            "SELECT count(*) FROM auto_organize_runs"
+        ).fetchone()[0]
+    return jsonify({
+        "runs": runs,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    })
+
+
+@app.route("/api/auto-organize/reset", methods=["POST"])
+@require_token
+def reset_auto_organize_run():
+    """User 手动 reset 单 row (failed / skipped_* → 删除，下周期 cron 重新尝试).
+
+    Body: {"qbit_hash": str}
+    只允许删除 terminal 状态的 row (不能删 organizing / pending — 可能有副作用未完成).
+    """
+    data = request.json or {}
+    qbit_hash = (data.get("qbit_hash") or "").strip()
+    if not qbit_hash:
+        return jsonify({"ok": False, "error": "qbit_hash required"}), 400
+    db = get_db()
+    row = qbit_auto.get_run(db, qbit_hash)
+    if row is None:
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    if row["status"] in ("pending", "organizing"):
+        return jsonify({
+            "ok": False,
+            "error": "cannot_reset_active",
+            "current_status": row["status"],
+            "message": f"row 当前 {row['status']}，等其变为 terminal 再 reset",
+        }), 409
+    db.execute("DELETE FROM auto_organize_runs WHERE qbit_hash = ?", (qbit_hash,))
+    db.commit()
+    return jsonify({"ok": True, "qbit_hash": qbit_hash,
+                    "previous_status": row["status"]})
+
+
 @app.route("/api/watch/sync", methods=["POST"])
 @require_token
 def watch_sync_start():
