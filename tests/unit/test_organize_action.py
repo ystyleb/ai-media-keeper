@@ -1022,11 +1022,11 @@ def test_ssh_ln_detects_race_ln_into_dir_and_cleans_up(monkeypatch):
 
 
 def test_ssh_ln_shell_cmd_includes_dir_check_and_post_stat(monkeypatch):
-    """codex r5 BLOCKER 2 + r6: shell 命令必须含 [ -d ] pre-check + [ -f ] post-stat。
+    """codex r5 BLOCKER 2 + r7: shell 命令必须含 [ -d ] pre-check + [ -f ] post-stat。
 
-    r6: cleanup path 用 Python 端预算的 basename（不在 shell 用 $(basename)），
-    避免 src 含空格时 word-split。所以 shell cmd 不再含 'basename' 字面，
-    而是含 quoted full cleanup path '<dst>/<src_basename>'."""
+    r7: 移除自动 cleanup（ownership 无法 path-based 证明）— shell cmd 不再
+    含 rm；只 echo marker + exit，让调用方提示 user 手工查 orphan。
+    """
     captured = []
     def fake_ssh_exec(cmd, timeout=10):
         captured.append(cmd)
@@ -1039,17 +1039,13 @@ def test_ssh_ln_shell_cmd_includes_dir_check_and_post_stat(monkeypatch):
     assert "ln " in cmd
     assert "[ ! -f " in cmd, f"missing post-stat: {cmd}"
     assert "DST_NOT_REGULAR" in cmd
-    # r6: cleanup path 是 Python 端预算的 <dst>/<basename(src)>
-    assert "/dst/y.mkv/x.mkv" in cmd, f"missing pre-computed cleanup path: {cmd}"
+    # r7: shell 不再自动 cleanup（codex r7 BLOCKER：ownership 无法 path-based 证明）
+    assert "rm -f " not in cmd, f"cleanup removed: {cmd}"
 
 
-def test_ssh_ln_cleanup_path_safe_with_space_in_src_filename(monkeypatch):
-    """codex r6 BLOCKER: src 含空格时 cleanup path 不能在 shell word-split.
-
-    之前 `rm -f <dst>/$(basename '<path with space>')` 会让 basename 输出的
-    『My Movie.mkv』在 shell 里 split 成 ['<dst>/My', 'Movie.mkv'] 两个 arg，
-    rm -f 调用时可能误删 CWD 同名文件。
-    """
+def test_ssh_ln_shell_cmd_no_basename_expansion(monkeypatch):
+    """codex r6 + r7: shell cmd 不含 $(basename ...) 也不含自动 rm cleanup。
+    src 含空格时不会引入 word-split 风险（因为根本没有 cleanup path 拼接）。"""
     captured = []
     def fake_ssh_exec(cmd, timeout=10):
         captured.append(cmd)
@@ -1057,14 +1053,41 @@ def test_ssh_ln_cleanup_path_safe_with_space_in_src_filename(monkeypatch):
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
     app_module._ssh_ln("/dl/My Movie.mkv", "/media/My Show (2024)")
     cmd = captured[0]
-    # cleanup path 必须是单 token shlex.quote 的字符串
-    assert "'/media/My Show (2024)/My Movie.mkv'" in cmd, (
-        f"cleanup path must be pre-quoted single token: {cmd}"
+    assert "$(basename" not in cmd, f"must not use shell $(basename ...): {cmd}"
+    assert "rm -f " not in cmd, f"must not auto-cleanup: {cmd}"
+
+
+def test_executor_ln_target_not_regular_includes_orphan_hint(monkeypatch, client, token):
+    """codex r7 BLOCKER: race-into-dir 时 executor 必须返 hint 含 orphan 路径
+    让 user SSH 手工查（替代自动 cleanup）。"""
+    _patch_organize_config(monkeypatch)
+    _patch_cache(monkeypatch, _full_cached_movie())
+
+    src = "/dl/movie.mkv"
+    src_stat = {"exists": True, "inode": 700, "size_bytes": 1, "mtime": 1}
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", _make_stat_fn({src: src_stat}))
+    action_id, signed = _do_preview_and_get_token(client, token, src)
+
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", _make_stat_fn({src: src_stat}))
+    monkeypatch.setattr(app_module, "_ssh_mkdir_p", lambda p: (0, "", ""))
+    # ln 失败返 DST_NOT_REGULAR marker（race-into-dir）
+    monkeypatch.setattr(
+        app_module, "_ssh_ln",
+        lambda s, d: (98, "DST_NOT_REGULAR\n", ""),
     )
-    # 不能含 `$(basename ...)` 实时展开
-    assert "$(basename" not in cmd, (
-        f"must not use shell $(basename ...) — word-split risk: {cmd}"
+
+    resp = client.post(
+        "/api/action/confirm",
+        json={"action_id": action_id, "signed_token": signed},
+        headers={"Authorization": f"Bearer {token}"},
     )
+    item = resp.get_json()["result"]["items"][0]
+    assert item["status"] == "failed"
+    assert item["reason"] == "ln_target_not_regular_race"
+    assert "hint" in item
+    # hint 必须含 orphan 路径让 user 知道去哪 SSH 查
+    assert "movie.mkv" in item["hint"]
+    assert "SSH" in item["hint"] or "ls" in item["hint"]
 
 
 def test_ssh_create_nfo_if_absent_detects_race_ln_into_dir(monkeypatch):

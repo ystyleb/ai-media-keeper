@@ -1477,26 +1477,24 @@ def _ssh_ln(src: str, dst: str) -> tuple[int, str, str]:
     防 silent ln-into-dir race。BusyBox 不支持 `-T` flag，所以走 shell
     控制流而非 GNU 专属 option。
 
-    codex r6: cleanup path 在 Python 端 os.path.join + shlex.quote，避免
-    `$(basename '<src with space>')` 在 shell 里 word-split 成多个 token
-    被 `rm -f` 当多 arg 处理（可能误删 CWD 同名 file）。
+    codex r7 BLOCKER: 取消自动 cleanup — name-based unlink 不能证明
+    ownership（即使 inode check 也 TOCTOU）。race-into-dir 时只 report
+    marker + orphan hint，让调用方告知 user 手工清理。这跟 r1 B2 的决策
+    «不动 dst_path 防误删» 是同源原则。
 
     stdout marker:
       DST_IS_DIR    — pre-check 命中：dst 已是目录（exit 99）
-      DST_NOT_REGULAR — ln 后 dst 不是 regular file（race ln-into-dir，
-                        cleanup `<dst>/<basename(src)>` 后 exit 98）
+      DST_NOT_REGULAR — ln 后 dst 不是 regular file（race ln-into-dir
+                        发生，orphan 可能在 <dst>/<basename(src)> exit 98）
       其他失败 → 普通 ln 错误（exit ln_rc，stderr 含 ln msg）
     """
     safe_src = shlex.quote(src)
     safe_dst = shlex.quote(dst)
-    # Python 端预算 basename 一次性 shlex.quote — 避免 shell word-split
-    cleanup_in_dir = shlex.quote(f"{dst.rstrip('/')}/{os.path.basename(src)}")
     cmd = (
         f"if [ -d {safe_dst} ]; then echo DST_IS_DIR; exit 99; fi; "
         f"ln {safe_src} {safe_dst}; LN_RC=$?; "
         f"if [ $LN_RC -ne 0 ]; then exit $LN_RC; fi; "
         f"if [ ! -f {safe_dst} ]; then "
-        f"  [ -d {safe_dst} ] && rm -f {cleanup_in_dir} 2>/dev/null; "
         f"  echo DST_NOT_REGULAR; exit 98; "
         f"fi"
     )
@@ -1940,20 +1938,21 @@ def _ssh_create_nfo_if_absent(
         tmp_path = f"{nfo_dir}/{tmp_basename}" if nfo_dir else tmp_basename
         safe_nfo = shlex.quote(nfo_path)
         safe_tmp = shlex.quote(tmp_path)
-        # codex r6: cleanup path Python 端预算避免 $(basename '<space>') word-split
-        cleanup_in_dir = shlex.quote(f"{nfo_path.rstrip('/')}/{tmp_basename}")
         # codex r4 NIT: grep -c 在 count=0 时 rc=1 让整个 shell rc!=0 进 create_failed 分支，
         # 误归类。用 `|| echo 0` 兜底保证 rc=0，count 由 stdout 决定。
         verify_step = f"; grep -c 'tmdb' {safe_nfo} || echo 0" if verify_tmdb else ""
         # codex r4 + r5 BLOCKER: `ln src dir/` 会在 dir 内 link 不失败。
         # 双重防护：pre-check [-d] + post-stat [-f]（race-window：dir 在
-        # pre-check 后 ln 前出现时，post-stat 抓到 + 清理 race-created link）
+        # pre-check 后 ln 前出现时，post-stat 抓到）
+        # codex r7 BLOCKER: 取消自动 cleanup tmp-in-dir — name-based unlink
+        # 不能证明 ownership。orphan tmp file 留在 race-dir 是 garbage 但比误删安全。
         # 1. 检查 dst 不是 directory → echo NFO_IS_DIR exit 99
         # 2. 写 tmp + ln tmp final（atomic create-only）
-        # 3. 无论 ln 成败 rm tmp（成功 → final 是 tmp 的 hardlink，rm tmp 不影响 final）
+        # 3. 无论 ln 成败 rm tmp（独占 uuid 后缀的 tmp 在 nfo_dir 是安全的——
+        #    不会跟 race-into-dir 的 tmp 冲突，因为后者在 final 内部）
         # 4. ln 失败 + dst 已存在 → echo NFO_EXISTS（exit ln_rc）
-        # 5. ln 成功但 dst 不是 regular file → ln-into-dir race 发生，
-        #    cleanup <final>/<basename(tmp)> + echo NFO_TARGET_NOT_REGULAR + exit 98
+        # 5. ln 成功但 dst 不是 regular file → ln-into-dir race，echo
+        #    NFO_TARGET_NOT_REGULAR + exit 98（不 cleanup orphan，让 user 手工查）
         cmd = (
             f"if [ -d {safe_nfo} ]; then echo NFO_IS_DIR; exit 99; fi; "
             f"( printf '%s' {shlex.quote(xml_b64)} | base64 -d > {safe_tmp} && "
@@ -1964,7 +1963,6 @@ def _ssh_create_nfo_if_absent(
             f"  exit $LN_RC; "
             f"fi; "
             f"if [ ! -f {safe_nfo} ]; then "
-            f"  [ -d {safe_nfo} ] && rm -f {cleanup_in_dir} 2>/dev/null; "
             f"  echo NFO_TARGET_NOT_REGULAR; exit 98; "
             f"fi{verify_step}"
         )
@@ -2164,18 +2162,30 @@ def _organize_executor(payload: dict) -> dict:
         # 2. ln src dst (失败时不动 dst_dir — 详见 cleanup 策略 docstring)
         # codex r5 BLOCKER 2: _ssh_ln 内部已含 [-d dst] pre-check + post-stat
         # [-f dst] 防 ln-into-dir race；out 含 DST_IS_DIR / DST_NOT_REGULAR marker。
+        # codex r7: race-into-dir 时不自动 cleanup (ownership 无法证明)，
+        # 返 orphan_hint 让 user SSH 手工检查。
         rc, ln_out, err = _ssh_ln(src_path, dst_path)
         if rc != 0:
-            if "DST_IS_DIR" in (ln_out or ""):
-                reason = "dst_is_directory_at_ln"
-            elif "DST_NOT_REGULAR" in (ln_out or ""):
-                reason = "ln_target_not_regular_race_cleaned"
-            else:
-                reason = f"ln_failed: {err.strip()[:200]}"
-            results.append({
+            item_result = {
                 "src_path": src_path, "status": "failed",
-                "reason": reason,
-            })
+            }
+            if "DST_IS_DIR" in (ln_out or ""):
+                item_result["reason"] = "dst_is_directory_at_ln"
+                item_result["hint"] = (
+                    f"dst 已是目录: {dst_path}. SSH 检查后再 organize "
+                    f"(可能需要 mv 或 rm 该目录)"
+                )
+            elif "DST_NOT_REGULAR" in (ln_out or ""):
+                item_result["reason"] = "ln_target_not_regular_race"
+                item_result["hint"] = (
+                    f"race-into-dir 检测到: dst {dst_path} 在 ln 之间被替换成"
+                    f"目录。可能 orphan hardlink 在 "
+                    f"{dst_path.rstrip('/')}/{os.path.basename(src_path)}, "
+                    f"请 SSH 手工 ls -li 验证 inode 后再 rm。"
+                )
+            else:
+                item_result["reason"] = f"ln_failed: {err.strip()[:200]}"
+            results.append(item_result)
             continue
 
         # 3. Pattern C 锚 #2: verify dst inode == src inode
