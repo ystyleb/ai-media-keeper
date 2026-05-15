@@ -223,20 +223,26 @@ python3 app.py
 # 284 passed (Phase 3 complete)
 ```
 
-生产部署用 `gunicorn`，**强制单 worker**（`organize_runner` / `scanner` 用进程
-内 lock + abort flag，多 worker 会让 batch organize / 全库扫描互相打架）：
+生产部署用 `gunicorn`，**强制单 worker + 禁 preload**（`organize_runner` /
+`scanner` 用进程内 lock + abort flag，多 worker / preload 会让 batch organize /
+全库扫描互相打架）。推荐用仓库自带的 `gunicorn.conf.py`：
 
 ```bash
 pip install gunicorn
-# 单 worker 是硬要求 — 即使你忘了 -w 1，第二个 worker fork 后 fcntl.flock
-# 抢 config/.worker.lock 失败会立刻 sys.exit(1)，避免静默并发。
+# 推荐: 用仓库 config (强制 workers=1 + preload_app=False)
+gunicorn -c gunicorn.conf.py app:app
+
+# 或显式命令行 (不要加 --preload / -w >1):
 gunicorn -b 127.0.0.1:8080 -w 1 app:app
 ```
 
-如果要多 worker（不推荐，Phase 4B 阶段不支持），需要等 Phase 4C 升级到
-SQLite lease 跨进程互斥。**当前 hard guard**：
+**三层 hard guard**（缺一不可，all 必须单 worker）：
 - `app.py` 启动期检查 `WEB_CONCURRENCY != 1` 拒启动
-- `fcntl.flock(config/.worker.lock)` 跨进程抢锁，第二个 worker fork 必失败
+- `app.py` 启动期检测 `sys.argv` 含 `--preload` 或 `-w >1` 拒启动
+- `fcntl.flock(config/.worker.lock)` 跨进程抢锁（fork 模式 ground truth）
+
+如果你真要多 worker（不推荐，Phase 4B 阶段不支持），需要等 Phase 4C 升级到
+SQLite lease 跨进程互斥。
 
 ## 路线图
 

@@ -141,14 +141,15 @@ API_TOKEN = _load_api_token()
 logger.info(f"API Token loaded ({len(API_TOKEN)} chars).")
 
 # 契约 #1: server_secret 加载 + SQLite schema 初始化
-# Phase 4B codex r2 BLOCKER + r4 BLOCKER: organize_runner + scanner 用 module-level
-# lock + abort flag，**必须**单 worker。两层 enforcement:
-#   1. WEB_CONCURRENCY env check（user 显式声明的 worker 数；gunicorn 设 -w N 但
-#      不必同步 env，所以单这一层会被绕过）
-#   2. fcntl.flock 跨进程文件锁（hard 锁，gunicorn -w 2 第二个 worker fork 后
-#      open 同一文件 acquire LOCK_EX | LOCK_NB → BlockingIOError → sys.exit）
-# 两层缺一不可：fcntl 是 ground truth；env 是早期友好提示。
+# Phase 4B codex r2/r4/r5 BLOCKER: organize_runner + scanner 用 module-level
+# lock + abort flag，**必须**单 worker。三层 enforcement:
+#   1. WEB_CONCURRENCY env check（友好提示；user 显式声明 worker 数时拒）
+#   2. sys.argv 检测 --preload / -w N（gunicorn 命令行参数；覆盖 99% 部署 case）
+#   3. fcntl.flock 跨进程文件锁（fork 模式 ground truth；preload 模式被 #2 拦住）
+# 三层缺一不可。100% 完美的多-worker 安全要等 Phase 4C 升级到 SQLite lease。
 import fcntl as _fcntl
+
+# Layer 1: WEB_CONCURRENCY env
 WORKER_COUNT = int(os.environ.get("WEB_CONCURRENCY", "1"))
 if WORKER_COUNT != 1:
     sys.stderr.write(
@@ -159,9 +160,47 @@ if WORKER_COUNT != 1:
     )
     sys.exit(1)
 
-# 跨进程 ground-truth lock: fcntl.flock 不依赖 env，第二个 worker fork 后 open
-# 同一 .worker.lock 文件 acquire 失败 → 立刻退出。POSIX (Linux/macOS) only；
-# Windows 不支持 fcntl，但项目目标平台是 NAS server (Linux)。
+# Layer 2: sys.argv check —— 拒 gunicorn --preload / -w >1
+# 这是 ground truth for preload 模式（fcntl 在 preload 下被 fork 继承绕过）
+def _check_gunicorn_args() -> None:
+    argv = list(sys.argv)
+    # gunicorn 直接命令行参数
+    if "--preload" in argv:
+        sys.stderr.write(
+            "ERROR: gunicorn --preload is not supported by NAS Vault.\n"
+            "   preload 模式下 module-level lock 被 fork 继承绕过，\n"
+            "   导致 organize_runner / scanner 在多 worker 间无互斥。\n"
+            "   Use: gunicorn -b 127.0.0.1:8080 -w 1 app:app (no --preload)\n"
+        )
+        sys.exit(1)
+    # 检测 gunicorn worker count flag
+    for idx, arg in enumerate(argv):
+        if arg in ("-w", "--workers"):
+            try:
+                n = int(argv[idx + 1])
+                if n != 1:
+                    sys.stderr.write(
+                        f"ERROR: gunicorn workers={n} not supported. NAS Vault requires -w 1.\n"
+                    )
+                    sys.exit(1)
+            except (IndexError, ValueError):
+                pass
+        if arg.startswith("--workers="):
+            try:
+                n = int(arg.split("=", 1)[1])
+                if n != 1:
+                    sys.stderr.write(
+                        f"ERROR: gunicorn workers={n} not supported. NAS Vault requires -w 1.\n"
+                    )
+                    sys.exit(1)
+            except ValueError:
+                pass
+
+_check_gunicorn_args()
+
+# Layer 3: fcntl.flock 跨进程文件锁 — fork-mode ground truth
+# 标准 gunicorn (无 --preload) 下每个 worker fork 后重新 import → 再次 import-time
+# 抢同一 .worker.lock → 第二个 worker 必失败。preload 模式被 Layer 2 拦住。
 _WORKER_LOCK_FILE = CONFIG_DIR / ".worker.lock"
 try:
     _worker_lock_fd = os.open(
@@ -175,7 +214,7 @@ except BlockingIOError:
     sys.stderr.write(
         f"ERROR: another NAS Vault worker holds {_WORKER_LOCK_FILE}.\n"
         f"   NAS Vault requires single worker.\n"
-        f"   If you see this with gunicorn, you ran with -w >1 — "
+        f"   If you see this with gunicorn, you ran with -w >1 — \n"
         f"   organize_runner / scanner are not safe under multiple workers.\n"
         f"   Use gunicorn -w 1 (Phase 4C will add SQLite lease for multi-worker).\n"
     )
