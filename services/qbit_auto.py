@@ -482,26 +482,16 @@ def dispatch_one(
                 "error": result.get("error")}
 
     # 5. claim organizing（worker 已 started → pending → organizing）
-    # codex r1 B1 fix: 这步失败 = race（cron 双触发 / user 抢标 / reaper 抢标）。
-    # worker 已经在跑，必须把它对应的 destructive_actions row 标 failed，否则:
-    #   - destructive_actions.status=running（worker 跑）
-    #   - auto_organize_runs.status=pending（claim 失败留下的）
-    #   下周期 cron 看 row 是 pending → 再 dispatch_one → 又起一个 worker → 双副作用
-    # 我们 mark destructive_action 失败让 reconcile 下周期看到 failed → 不会再起。
-    # 注意：单飞 lock 已经在 build_and_start 里 acquired，worker 真在跑，
-    # 此处 _mark_terminal 让 worker 完成后看到 status≠'running' 自我 abort
-    # (mark_terminal_if_running guard 已在 organize_runner._worker_main 处理)
+    # codex r2 派生 fix（取消 r1 B1 修法）: r1 用 _mark_terminal 强标 destructive_action
+    # failed 会污染 worker 在跑的状态机（worker 副作用真做了，DB 说失败 = 永久脱节）。
+    #
+    # 真正修法：**完全不动**。claim_lost 的 race 是 auto_organize_runs row 不再 pending
+    # （user 手动 reset / 别处 dispatch 抢标），跟 destructive_actions 无关。worker 跑
+    # 完后 organize_runner._worker_main 的 mark_terminal_if_running 自己 handle 终态。
+    # 即使下周期 cron 因 auto_organize_runs row 不存在重新 dispatch，organize 本身
+    # 幂等（dst inode 共享则 already_linked, NFO atomic create-only 不覆盖），不会污染。
     ok = mark_organizing(conn, qbit_hash, action_id=action_id)
     if not ok:
-        from . import destructive_action as _da  # noqa: PLC0415
-        try:
-            _da._mark_terminal(
-                conn, action_id, status="failed", result=None,
-                error=f"auto_organize_claim_lost: row no longer pending (race)",
-            )
-        except Exception:
-            # 不让 cleanup 抛错掩盖根因；reaper 兜底
-            pass
         return {"action": "claim_lost", "qbit_hash": qbit_hash,
                 "action_id": action_id}
     return {"action": "started", "qbit_hash": qbit_hash, "action_id": action_id}

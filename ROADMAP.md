@@ -7,6 +7,37 @@
 
 ## 已完成（截至 2026-05-15）
 
+### Phase 4 Phase C: qBit 完成后自动 organize
+
+Phase 4A/B 是手动触发。**Phase 4C** 加 cron 定时扫 qBit 已完成种子 → confidence + category 双层授权后**自动** organize。契约 #5 (AI 介入边界) 仍守住：confidence ≥ threshold + category ∈ user 配置白名单 = user 通过规则**显式授权** AI 触发，AI 没决策"哪些该 organize"。
+
+- **4C.0 schema migration + config**：
+  * `auto_organize_runs` 表（qbit_hash PK + 7 状态 + partial unique idx status='organizing'）
+  * `phase5_migrate` idempotent helper（老 DB 加表，新 schema.sql 已含）
+  * `config/qbit_auto_organize.json` (enabled / categories[] / poll_interval_minutes / confidence_threshold) + load/save helper 边界清洗（防 `0 or 5=5` short-circuit / None category 过滤 / clamp 越界）
+- **4C.1 qBit completion detector + lifecycle helpers**：
+  * `services/qbit_auto.list_completed_torrents`（progress >= 0.999 + state ∈ 7 个 completed 枚举 + category 在 whitelist + content_path 非空 + hash 非空）
+  * `filter_unprocessed_hashes` 跳过已 terminal / organizing
+  * row 生命周期：`claim_pending_run`（INSERT OR IGNORE 幂等单语句）/ `mark_organizing`（guarded UPDATE WHERE status='pending' + partial unique 兜底）/ `mark_terminal`（COALESCE 保护 action_id；attempts 不在此增防双计数）/ `mark_skipped_at_pending`（confidence_gate fail 直转 terminal skip）
+- **4C.2 confidence gate (契约 #5 enforcement)**：
+  * `evaluate_confidence_gate(conn, paths, threshold)` fail-fast 4 优先级：needs_identify > unsupported > low_confidence > pass
+  * None confidence 视为 0；media_type ∉ {movie, tv} → skipped_unsupported
+- **4C.3 auto trigger executor (callback injection)**：
+  * `dispatch_one(conn, torrent, *, list_video_paths_fn, confidence_threshold, build_and_start_organize_fn)` 整套 orchestration：claim → list paths → confidence_gate → build_and_start → mark_organizing。返 dict.action enum (started / skip_existing / skipped / locked / errored / claim_lost)
+  * `reconcile_organizing_rows(conn)` 周期同步 organizing → terminal（基于 destructive_actions 真实状态；succeeded → 抽 result_json counts；failed / needs_manual_recovery → mark_terminal failed）
+  * `app.py::_build_and_start_auto_organize(paths, qbit_hash)` 内层 callback：with app.app_context() 包裹（cron thread 无 request context）→ 复用 organize preview 构造逻辑（compute_plan + dst stat）但精简（confidence_gate 已守门，不需要 6 状态分类）→ created_by='cron' + atomic_consume + verify + start_organize_executor。ConcurrentOrganizeError → rollback_to_pending + return locked；其他异常 → _mark_terminal failed
+- **4C.4 cron scheduler hook**：
+  * `_cron_qbit_auto_organize` APScheduler job (interval 从 config 读，max_instances=1 + coalesce=True 防 backlog)
+  * 周期：reconcile (独立于 enabled) → load config → enabled/whitelist 守门 → qbit.get_torrents → list_completed → filter unprocessed → for-each dispatch_one (locked → break 让 organize 跑完)
+  * 任意单种子 fail 不阻塞其余 (catch per-torrent)
+- **4C.5 UI config + history view**：
+  * 4 个 routes：GET/POST /api/config/qbit-auto-organize (含现存 qBit categories suggest + qbit_fetch_error graceful), GET /api/auto-organize/runs (status filter + pagination), POST /api/auto-organize/reset (terminal 才允许)
+  * Topbar 加 "自动整理" 按钮 + autoOrganizeConfigModal modal-lg 双 tab (配置 + 历史)
+  * categories chip 输入 + qBit 现存 category click-to-add
+- **4C.6 review + docs**：
+  * code-reviewer agent 2 轮 review：r1 抓 2 BLOCKER + 1 IMPORTANT + 2 NIT（progress 浮点 / claim_lost 游离 worker / enabled+空 whitelist / lambda 注释 / status_filter 枚举校验），r2 抓 r1 派生 1 BLOCKER（claim_lost 用 _mark_terminal 无守门污染 worker 状态机；正解：完全不动，靠 worker 自身 mark_terminal_if_running guard + organize 幂等）
+  * 总 tests 466 → 565（+99 涵盖 schema migration / config / completion detector / confidence gate / dispatch / reconcile / cron / 4 routes / regression）
+
 ### Phase 4 Phase B: 批量目录 organize
 
 Phase 4A 是单文件 manual organize。**Phase 4B** 把单步骤扩到一次性整理一整个目录（一个剧 25 集 / 一个发布版本的多 part），分类 + 勾选 + 后台进度 + abort。

@@ -852,21 +852,27 @@ def test_list_completed_filters_progress_below_threshold(conn):
     assert out == []
 
 
-def test_dispatch_one_claim_lost_marks_action_failed(conn, monkeypatch):
-    """codex r1 B1 fix: build_and_start 起 worker 后 mark_organizing 失败 →
-    destructive_action row 应被标 failed，让 reconcile 下周期不会再起 worker。
+def test_dispatch_one_claim_lost_does_not_touch_destructive_action(conn, monkeypatch):
+    """codex r2 派生 fix: claim_lost 路径不能动 destructive_actions row（防污染
+    worker 在跑的状态机）。worker 自己 mark_terminal_if_running 处理终态，
+    organize 幂等保证下周期 cron 重 dispatch 安全。
     """
     _patch_cache(monkeypatch, {
         "/d/Some.Movie.mkv": (_CachedStub(media_type="movie", metadata_confidence=0.9), "hit"),
     })
 
-    # 模拟 race: pending row 在 build_and_start 之后被改 (mark_organizing 失败)
-    # 用 monkeypatch 让 mark_organizing 返 False（模拟 race）
+    # 模拟 race: mark_organizing 返 False
     monkeypatch.setattr(qbit_auto, "mark_organizing", lambda *a, **kw: False)
 
-    # 模拟 build_and_start_organize_fn 返 started + action_id
-    # 真实场景这时 destructive_action row 已 running，需要被 cleanup
-    # 用 fake action_id；实际 _mark_terminal 会找不到 row（即 try/except 兜底）
+    # 加 spy 监视 destructive_action._mark_terminal — 不该被调
+    from services import destructive_action as _da
+    mark_terminal_called = []
+    original = _da._mark_terminal
+    monkeypatch.setattr(
+        _da, "_mark_terminal",
+        lambda *a, **kw: mark_terminal_called.append((a, kw)) or original(*a, **kw),
+    )
+
     out = qbit_auto.dispatch_one(
         conn, _torrent(hash="h-claim-lost"),
         list_video_paths_fn=lambda p: ["/d/Some.Movie.mkv"],
@@ -877,7 +883,11 @@ def test_dispatch_one_claim_lost_marks_action_failed(conn, monkeypatch):
     )
     assert out["action"] == "claim_lost"
     assert out["action_id"] == "act-ghost"
-    # _mark_terminal 在 fake act-ghost 上找不到 row → except 兜底，不抛错
+    # 关键断言：claim_lost 路径**没**调 _mark_terminal（不污染 worker）
+    assert mark_terminal_called == [], (
+        f"claim_lost path should not touch destructive_action, but _mark_terminal "
+        f"was called {len(mark_terminal_called)} times"
+    )
 
 
 def test_list_history_rejects_invalid_status_filter(conn):

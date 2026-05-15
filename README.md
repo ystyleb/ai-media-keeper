@@ -6,6 +6,21 @@ AI 原生的影视资源管理器（Phase 4A）。Web 版的 NAS 媒体库，专
 
 ## 核心功能
 
+### qBit 完成后自动整理（Phase 4C）
+- ⚡ **零干预 organize**：qBit 种子下载完成 → cron 周期扫 → 自动 organize 到媒体库（hardlink + NFO + 双 inode 锚定，跟手动同 stack）
+- 🛡️ **双层授权 enforce 契约 #5**（AI 不主动 destructive）：
+  * **Category 白名单**：仅触发 user 在 UI 选定的 qBit category（默认空 = 不动）
+  * **Confidence 门槛**：LLM 识别 confidence ≥ user 配置阈值（默认 0.85）才动；< 标 `skipped_low_confidence` 留 user 手动确认
+  * **未识别 / 不支持 media_type** → `skipped_needs_identify` / `skipped_unsupported`，cron 不会去试 LLM 重新识别（user 手动走 file 视图识别）
+- 📊 **状态机持久化**：每个 qBit info hash 在 `auto_organize_runs` 表至多一条 row，7 状态 (pending / organizing / succeeded / failed / skipped_*) — partial unique idx 防 cron 双触发同 hash 并发
+- 🔁 **跟 Phase 4B background worker 共生**：cron 触发的 organize 跟用户手动触发走同 stack；同进程同时只一个 organize 跑（organize_runner module lock）；conflict 时 cron 这次 cycle break，剩余种子推迟下周期重试
+- ⏱️ **配置项**：topbar「自动整理」modal → 双 tab (配置 / 历史)
+  * 启用开关 + qBit category 白名单（chip 输入 + qBit 现存 category click-to-add）
+  * cron 周期分钟（默认 5min，最小 1min）+ confidence 门槛（默认 0.85）
+  * 历史 tab：status filter + 表格（badge + 种子名 + category + files_succeeded/already_linked/failed + 时间 + reset 按钮）
+- 🔄 **Reconcile 解耦**：cron 每周期先 reconcile（同步 organizing → terminal，基于 destructive_actions 真实状态），独立于 enabled — 即使 user 关掉自动整理，已 organizing 的 row 仍能正确收尾
+- 🚦 **User 可 reset**：terminal row（failed / skipped_*）可手动删除 → 下个 cron 周期重试；organizing / pending 不允许 reset (副作用未完成)
+
 ### 整理到媒体库（Phase 4A 单文件 + Phase 4B 批量目录）
 - 🚚 **单文件 organize**（Phase 4A）：详情面板「整理到媒体库」按钮 → preview 显示「源/识别/目标路径/NFO」→ confirm 后 atomic hardlink。源文件 inode 不变 → qBittorrent 继续保种
 - 📦 **批量目录 organize**（Phase 4B 新增）：文件浏览器目录行「整理目录」按钮 → 三 step：
