@@ -226,3 +226,134 @@ def get_run(conn: sqlite3.Connection, qbit_hash: str) -> dict[str, Any] | None:
         "SELECT * FROM auto_organize_runs WHERE qbit_hash=?", (qbit_hash,)
     ).fetchone()
     return dict(row) if row else None
+
+
+# ── 4C.2 confidence gate ───
+
+# 支持自动 organize 的 media_type；其余（unknown / extra / ...）→ skipped_unsupported
+SUPPORTED_MEDIA_TYPES = frozenset({"movie", "tv"})
+
+
+def evaluate_confidence_gate(
+    conn: sqlite3.Connection,
+    paths: list[str],
+    *,
+    threshold: float,
+) -> dict[str, Any]:
+    """检查 paths 是否**全部**满足 confidence 门槛 → 决定能否自动 organize.
+
+    优先级（fail-fast，任一不满足整体 fail）：
+      1. 任一 path 在 metadata_cache 没 row / media_type=None → needs_identify
+         (user 必须先去 file 视图手动识别)
+      2. 任一 path media_type ∉ {'movie','tv'} → unsupported
+         (无法 organize 到媒体库，如 sample / extra / 未知格式)
+      3. 任一 path metadata_confidence < threshold → low_confidence
+         (LLM 识别可信度不够，user 必须先手动确认)
+      4. 全过 → pass
+
+    注意：metadata_confidence is None 视为 0（None ≠ "未识别"——这是 LLM 不返置信度的
+    极少 case，按谨慎态度 fail）。
+
+    返回:
+      {
+        "status": "pass" | "skipped_needs_identify" | "skipped_low_confidence" | "skipped_unsupported",
+        "reason": str (人类可读),
+        "blockers": [{"path": str, "reason": str, "confidence": float|None,
+                      "media_type": str|None}],  # 仅在非 pass 时填充
+        "checked_count": int,
+      }
+
+    [code-enforced 契约 #5 边界]：confidence ≥ threshold + media_type ∈ supported
+    是 user 通过 (a) 配 categories whitelist (b) 配 confidence threshold 两层授权后
+    AI 才能 destructive 的硬条件；任一不满足 fail-fast，AI 不主动越界。
+    """
+    if not paths:
+        return {
+            "status": "skipped_needs_identify",
+            "reason": "no video files found in torrent content path",
+            "blockers": [],
+            "checked_count": 0,
+        }
+
+    # 一次 batch 查（4C.1 / Phase 4B 已有 get_many_by_path 500-chunk SQL IN）
+    # 避免循环 import：lazy import metadata_cache
+    from . import metadata_cache  # noqa: PLC0415
+
+    cache_map = metadata_cache.get_many_by_path(conn, paths)
+
+    needs_identify: list[dict] = []
+    unsupported: list[dict] = []
+    low_confidence: list[dict] = []
+
+    for p in paths:
+        entry = cache_map.get(p)
+        if entry is None:
+            needs_identify.append({
+                "path": p, "reason": "no cache row", "confidence": None,
+                "media_type": None,
+            })
+            continue
+        cached, _status = entry  # (CachedMetadata, freshness_label)
+        if cached is None or cached.media_type is None:
+            needs_identify.append({
+                "path": p, "reason": "cache exists but media_type is None",
+                "confidence": cached.metadata_confidence if cached else None,
+                "media_type": None,
+            })
+            continue
+        if cached.media_type not in SUPPORTED_MEDIA_TYPES:
+            unsupported.append({
+                "path": p,
+                "reason": f"media_type={cached.media_type!r} not in {sorted(SUPPORTED_MEDIA_TYPES)}",
+                "confidence": cached.metadata_confidence,
+                "media_type": cached.media_type,
+            })
+            continue
+        conf = cached.metadata_confidence
+        if conf is None or conf < threshold:
+            low_confidence.append({
+                "path": p,
+                "reason": f"confidence {conf!r} < threshold {threshold}",
+                "confidence": conf,
+                "media_type": cached.media_type,
+            })
+            continue
+
+    # 优先级 fail-fast：needs_identify > unsupported > low_confidence > pass
+    # （needs_identify 最致命，user 一无所知；其他至少有部分信息）
+    if needs_identify:
+        return {
+            "status": "skipped_needs_identify",
+            "reason": (
+                f"{len(needs_identify)}/{len(paths)} file(s) not yet identified; "
+                f"user must identify first (open file browser → 识别)"
+            ),
+            "blockers": needs_identify,
+            "checked_count": len(paths),
+        }
+    if unsupported:
+        return {
+            "status": "skipped_unsupported",
+            "reason": (
+                f"{len(unsupported)}/{len(paths)} file(s) have unsupported "
+                f"media_type (not movie/tv)"
+            ),
+            "blockers": unsupported,
+            "checked_count": len(paths),
+        }
+    if low_confidence:
+        return {
+            "status": "skipped_low_confidence",
+            "reason": (
+                f"{len(low_confidence)}/{len(paths)} file(s) below confidence "
+                f"threshold {threshold}; user must manually confirm"
+            ),
+            "blockers": low_confidence,
+            "checked_count": len(paths),
+        }
+    return {
+        "status": "pass",
+        "reason": f"all {len(paths)} file(s) meet threshold {threshold}",
+        "blockers": [],
+        "checked_count": len(paths),
+    }

@@ -362,3 +362,156 @@ def test_get_run_existing_returns_dict(conn):
 
 def test_get_run_nonexistent_returns_none(conn):
     assert qbit_auto.get_run(conn, "ghost") is None
+
+
+# ─── 4C.2 evaluate_confidence_gate ───
+# Mock metadata_cache.get_many_by_path 让单测不依赖真 cache row insertion.
+
+from dataclasses import dataclass
+
+
+@dataclass
+class _CachedStub:
+    """Minimal CachedMetadata stub — 只填 confidence gate 用到的字段。"""
+    media_type: str | None
+    metadata_confidence: float | None
+    path: str = ""
+
+
+def _patch_cache(monkeypatch, cache_map):
+    """patch get_many_by_path 返指定 {path: (CachedStub | None, status)} map.
+
+    None entry / 不在 map 里都 = needs_identify。
+    """
+    from services import metadata_cache as mc
+
+    def fake_get_many(conn, paths):
+        # 模拟真实 helper：不在 map 里的 path 不在返回字典里
+        return {p: cache_map[p] for p in paths if p in cache_map}
+
+    monkeypatch.setattr(mc, "get_many_by_path", fake_get_many)
+
+
+def test_gate_empty_paths_returns_needs_identify(conn):
+    out = qbit_auto.evaluate_confidence_gate(conn, [], threshold=0.85)
+    assert out["status"] == "skipped_needs_identify"
+    assert "no video files" in out["reason"]
+    assert out["checked_count"] == 0
+
+
+def test_gate_no_cache_row_returns_needs_identify(conn, monkeypatch):
+    """get_many_by_path 没返某 path → needs_identify."""
+    _patch_cache(monkeypatch, {})  # 全 miss
+    out = qbit_auto.evaluate_confidence_gate(
+        conn, ["/x.mkv", "/y.mkv"], threshold=0.85,
+    )
+    assert out["status"] == "skipped_needs_identify"
+    assert out["checked_count"] == 2
+    assert len(out["blockers"]) == 2
+    assert all(b["media_type"] is None for b in out["blockers"])
+
+
+def test_gate_cache_exists_but_media_type_none_returns_needs_identify(conn, monkeypatch):
+    """cache row 存在但未识别 (media_type=None) → needs_identify."""
+    _patch_cache(monkeypatch, {
+        "/x.mkv": (_CachedStub(media_type=None, metadata_confidence=None), "hit"),
+    })
+    out = qbit_auto.evaluate_confidence_gate(conn, ["/x.mkv"], threshold=0.85)
+    assert out["status"] == "skipped_needs_identify"
+    assert "media_type is None" in out["blockers"][0]["reason"]
+
+
+def test_gate_unsupported_media_type_returns_unsupported(conn, monkeypatch):
+    """media_type='extra' / 'sample' / 'unknown' → unsupported (但优先级低于 needs_identify)."""
+    _patch_cache(monkeypatch, {
+        "/x.mkv": (_CachedStub(media_type="extra", metadata_confidence=0.99), "hit"),
+    })
+    out = qbit_auto.evaluate_confidence_gate(conn, ["/x.mkv"], threshold=0.85)
+    assert out["status"] == "skipped_unsupported"
+    assert "extra" in out["blockers"][0]["reason"]
+
+
+def test_gate_confidence_below_threshold_returns_low_confidence(conn, monkeypatch):
+    _patch_cache(monkeypatch, {
+        "/x.mkv": (_CachedStub(media_type="movie", metadata_confidence=0.5), "hit"),
+    })
+    out = qbit_auto.evaluate_confidence_gate(conn, ["/x.mkv"], threshold=0.85)
+    assert out["status"] == "skipped_low_confidence"
+    assert "0.5" in out["blockers"][0]["reason"]
+    assert "0.85" in out["blockers"][0]["reason"]
+
+
+def test_gate_confidence_none_treated_as_zero(conn, monkeypatch):
+    """metadata_confidence is None (LLM 没返置信度) → 视为 0 → low_confidence."""
+    _patch_cache(monkeypatch, {
+        "/x.mkv": (_CachedStub(media_type="movie", metadata_confidence=None), "hit"),
+    })
+    out = qbit_auto.evaluate_confidence_gate(conn, ["/x.mkv"], threshold=0.85)
+    assert out["status"] == "skipped_low_confidence"
+
+
+def test_gate_confidence_exactly_at_threshold_passes(conn, monkeypatch):
+    """confidence == threshold → pass（>= 边界）."""
+    _patch_cache(monkeypatch, {
+        "/x.mkv": (_CachedStub(media_type="movie", metadata_confidence=0.85), "hit"),
+    })
+    out = qbit_auto.evaluate_confidence_gate(conn, ["/x.mkv"], threshold=0.85)
+    assert out["status"] == "pass"
+    assert out["blockers"] == []
+
+
+def test_gate_all_pass_happy_path(conn, monkeypatch):
+    _patch_cache(monkeypatch, {
+        "/a.mkv": (_CachedStub(media_type="movie", metadata_confidence=0.9), "hit"),
+        "/b.mkv": (_CachedStub(media_type="tv", metadata_confidence=0.95), "hit"),
+    })
+    out = qbit_auto.evaluate_confidence_gate(
+        conn, ["/a.mkv", "/b.mkv"], threshold=0.85,
+    )
+    assert out["status"] == "pass"
+    assert out["checked_count"] == 2
+    assert "2 file(s) meet threshold" in out["reason"]
+
+
+def test_gate_priority_needs_identify_beats_unsupported(conn, monkeypatch):
+    """优先级：needs_identify > unsupported > low_confidence."""
+    _patch_cache(monkeypatch, {
+        "/a.mkv": (None, "miss"),  # needs_identify
+        "/b.mkv": (_CachedStub(media_type="extra", metadata_confidence=0.99), "hit"),  # unsupported
+    })
+    out = qbit_auto.evaluate_confidence_gate(
+        conn, ["/a.mkv", "/b.mkv"], threshold=0.85,
+    )
+    # needs_identify 胜出
+    assert out["status"] == "skipped_needs_identify"
+
+
+def test_gate_priority_unsupported_beats_low_confidence(conn, monkeypatch):
+    _patch_cache(monkeypatch, {
+        "/a.mkv": (_CachedStub(media_type="extra", metadata_confidence=0.99), "hit"),  # unsupported
+        "/b.mkv": (_CachedStub(media_type="movie", metadata_confidence=0.5), "hit"),    # low_confidence
+    })
+    out = qbit_auto.evaluate_confidence_gate(
+        conn, ["/a.mkv", "/b.mkv"], threshold=0.85,
+    )
+    # unsupported 胜出
+    assert out["status"] == "skipped_unsupported"
+
+
+def test_gate_mixed_pass_and_fail_returns_blockers_for_fail_only(conn, monkeypatch):
+    """部分文件 pass、部分 low_confidence → 整体 fail，blockers 只列 fail 项."""
+    _patch_cache(monkeypatch, {
+        "/good.mkv": (_CachedStub(media_type="movie", metadata_confidence=0.9), "hit"),
+        "/bad.mkv": (_CachedStub(media_type="movie", metadata_confidence=0.5), "hit"),
+    })
+    out = qbit_auto.evaluate_confidence_gate(
+        conn, ["/good.mkv", "/bad.mkv"], threshold=0.85,
+    )
+    assert out["status"] == "skipped_low_confidence"
+    assert len(out["blockers"]) == 1
+    assert out["blockers"][0]["path"] == "/bad.mkv"
+
+
+def test_gate_supported_media_types_constant():
+    """加新 media_type 时（如 anime / docu）必须同步更新 SUPPORTED_MEDIA_TYPES."""
+    assert qbit_auto.SUPPORTED_MEDIA_TYPES == {"movie", "tv"}
