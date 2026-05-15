@@ -362,3 +362,63 @@ def phase4_migrate(conn: sqlite3.Connection) -> dict:
         return summary
     except Exception:
         raise
+
+
+def phase5_migrate(conn: sqlite3.Connection) -> dict:
+    """Phase 4C 添加 auto_organize_runs 表 + 索引（idempotent）。
+
+    新表用 CREATE TABLE IF NOT EXISTS，二次跑无副作用。Schema 跟 db/schema.sql
+    末尾 section 完全一致 — 任何修改必须两处同步。
+
+    返回 summary {created: bool, reason?: str}。已存在 → created=False + reason=already_exists。
+    """
+    summary: dict = {"created": False}
+
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='auto_organize_runs'"
+    ).fetchone()
+    if row is not None:
+        summary["reason"] = "already_exists"
+        return summary
+
+    try:
+        with conn:
+            conn.execute(
+                """
+                CREATE TABLE auto_organize_runs (
+                  qbit_hash             TEXT PRIMARY KEY,
+                  category              TEXT,
+                  torrent_name          TEXT,
+                  content_path          TEXT NOT NULL,
+                  status                TEXT NOT NULL DEFAULT 'pending'
+                                          CHECK (status IN ('pending', 'organizing', 'succeeded', 'failed',
+                                                            'skipped_needs_identify', 'skipped_low_confidence',
+                                                            'skipped_unsupported')),
+                  attempts              INTEGER NOT NULL DEFAULT 0,
+                  last_attempt_at       INTEGER,
+                  last_error            TEXT,
+                  action_id             TEXT,
+                  files_succeeded       INTEGER,
+                  files_already_linked  INTEGER,
+                  files_failed          INTEGER,
+                  created_at            INTEGER NOT NULL,
+                  completed_at          INTEGER
+                )
+                """
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX uniq_auto_org_organizing "
+                "ON auto_organize_runs(qbit_hash) WHERE status = 'organizing'"
+            )
+            conn.execute(
+                "CREATE INDEX idx_auto_org_status "
+                "ON auto_organize_runs(status, last_attempt_at)"
+            )
+            conn.execute(
+                "CREATE INDEX idx_auto_org_history "
+                "ON auto_organize_runs(completed_at)"
+            )
+        summary["created"] = True
+        return summary
+    except Exception:
+        raise

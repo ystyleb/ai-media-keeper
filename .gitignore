@@ -26,3 +26,7 @@ config/
 
 # 日志
 *.log
+
+# Local dev DB (created by stray scripts; real DB lives in config/)
+nas.db
+*.db-journal

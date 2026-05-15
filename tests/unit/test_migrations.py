@@ -645,3 +645,111 @@ def test_phase4_migration_skips_when_brand_new_schema_already_has_organize(fresh
     summary = migrations.phase4_migrate(fresh_conn)
     assert summary["rebuilt"] is False
     assert summary.get("reason") == "already_has_organize"
+
+
+# ─── Phase 4C / phase5_migrate: auto_organize_runs 表 ───
+
+
+def test_phase5_migration_skips_when_table_already_exists(fresh_conn):
+    """新 DB 走最新 schema.sql 已建表 → phase5 检测到 already_exists 不重建。"""
+    summary = migrations.phase5_migrate(fresh_conn)
+    assert summary["created"] is False
+    assert summary.get("reason") == "already_exists"
+
+
+def test_phase5_migration_creates_table_on_legacy_db(tmp_path):
+    """老 DB（schema.sql 不含 auto_organize_runs）→ phase5 创建表。"""
+    db_path = tmp_path / "legacy.db"
+    conn = destructive_action.open_connection(db_path)
+    # 模拟老 schema：只建 destructive_actions（auto_organize_runs 不存在）
+    conn.executescript(
+        """
+        CREATE TABLE destructive_actions (
+          action_id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          payload_hash TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          expires_at INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          consumed_at INTEGER,
+          started_at INTEGER,
+          completed_at INTEGER,
+          error TEXT,
+          result_json TEXT,
+          recovery_hint TEXT,
+          created_by TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        """
+    )
+    summary = migrations.phase5_migrate(conn)
+    assert summary["created"] is True
+    # 表 + 3 个索引都建
+    tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='auto_organize_runs'"
+    ).fetchall()]
+    assert tables == ["auto_organize_runs"]
+    indices = sorted(r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' "
+        "AND tbl_name='auto_organize_runs' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall())
+    assert indices == ["idx_auto_org_history", "idx_auto_org_status", "uniq_auto_org_organizing"]
+    conn.close()
+
+
+def test_phase5_migration_idempotent_second_run_is_noop(fresh_conn):
+    """二次跑 phase5 → created=False，rowcount=0。"""
+    s1 = migrations.phase5_migrate(fresh_conn)
+    s2 = migrations.phase5_migrate(fresh_conn)
+    assert s1["created"] is False  # 新 schema 已含表
+    assert s2["created"] is False
+
+
+def test_phase5_status_check_constraint_enforces_enum(fresh_conn):
+    """CHECK 拒绝非法 status 值。"""
+    with pytest.raises(sqlite3.IntegrityError):
+        fresh_conn.execute(
+            "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,created_at) "
+            "VALUES(?,?,?,?)",
+            ("h1", "/x", "bogus_status", 0),
+        )
+
+
+def test_phase5_partial_unique_blocks_concurrent_organizing(fresh_conn):
+    """uniq_auto_org_organizing partial unique → 同 hash 不能两次 status='organizing'。
+
+    但 PK 已经保证同 hash 不能两 row，所以 partial unique 主要价值在 UPDATE 路径
+    （某天 schema 改为允许 history rows 时，partial 防 status='organizing' 撞）。
+    这个测试当前用 INSERT；PK 先撞 IntegrityError。两种约束都生效都视为 pass。
+    """
+    fresh_conn.execute(
+        "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,created_at) "
+        "VALUES(?,?,?,?)",
+        ("h1", "/x", "organizing", 0),
+    )
+    fresh_conn.commit()
+    # 二次 insert 同 hash → PK violation（partial unique 次优兜底）
+    with pytest.raises(sqlite3.IntegrityError):
+        fresh_conn.execute(
+            "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,created_at) "
+            "VALUES(?,?,?,?)",
+            ("h1", "/y", "organizing", 1),
+        )
+
+
+def test_phase5_terminal_statuses_accepted(fresh_conn):
+    """5 terminal + 2 transient = 7 个合法 status 全部能插入。"""
+    valid = [
+        "pending", "organizing", "succeeded", "failed",
+        "skipped_needs_identify", "skipped_low_confidence", "skipped_unsupported",
+    ]
+    for i, st in enumerate(valid):
+        # organizing 只能一行（partial unique），所以用不同 hash
+        fresh_conn.execute(
+            "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,created_at) "
+            "VALUES(?,?,?,?)",
+            (f"h{i}", "/x", st, i),
+        )
+    fresh_conn.commit()
+    n = fresh_conn.execute("SELECT count(*) FROM auto_organize_runs").fetchone()[0]
+    assert n == len(valid)

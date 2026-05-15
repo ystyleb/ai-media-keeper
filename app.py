@@ -285,9 +285,11 @@ try:
     from db import migrations as _migrations
     phase3_summary = _migrations.phase3_migrate(_init_conn)
     phase4_summary = _migrations.phase4_migrate(_init_conn)
+    phase5_summary = _migrations.phase5_migrate(_init_conn)
     logger.info(
         f"DB ready at {DB_PATH}; phase3 migration: {phase3_summary}; "
-        f"phase4 migration: {phase4_summary}"
+        f"phase4 migration: {phase4_summary}; "
+        f"phase5 migration: {phase5_summary}"
     )
 finally:
     _init_conn.close()
@@ -320,6 +322,7 @@ DEEPSEEK_KEY_FILE = CONFIG_DIR / ".deepseek_key"
 EMBY_KEY_FILE = CONFIG_DIR / ".emby_key"
 EMBY_CONFIG_FILE = CONFIG_DIR / "emby.json"
 ORGANIZE_CONFIG_FILE = CONFIG_DIR / "organize.json"
+QBIT_AUTO_ORGANIZE_CONFIG_FILE = CONFIG_DIR / "qbit_auto_organize.json"
 
 # Phase 4B：批量目录 organize 上限。N=500 时 payload_json ≈ 750KB（SQLite TEXT
 # 单 row 无硬限制，但渐进式 result_json 更新会重写整 row，500 次写放大 ~50s），
@@ -446,6 +449,81 @@ def save_organize_config(cfg: dict) -> None:
         "tv_root": (cfg.get("tv_root") or "").strip(),
     }
     ORGANIZE_CONFIG_FILE.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+# ─── qBit auto-organize config (Phase 4C) ─────────────────────────────────
+
+QBIT_AUTO_ORGANIZE_DEFAULTS = {
+    "enabled": False,
+    "categories": [],                  # qBit category 白名单（[] = 不触发任何种子；显式列表防误触）
+    "poll_interval_minutes": 5,        # cron 周期；最小 1min（防压垮 qBit API + DB）
+    "confidence_threshold": 0.85,      # identifier confidence 门槛；< 标 skipped_low_confidence
+}
+
+
+def load_qbit_auto_organize_config() -> dict:
+    """Phase 4C: qBit 自动 organize 配置 — 默认 enabled=False（user 显式开启才生效）。
+
+    Schema：{enabled, categories[], poll_interval_minutes, confidence_threshold}
+    缺字段用默认值（前向兼容，新增字段 graceful）。
+    """
+    if QBIT_AUTO_ORGANIZE_CONFIG_FILE.exists():
+        try:
+            raw = json.loads(QBIT_AUTO_ORGANIZE_CONFIG_FILE.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            raw = {}
+    else:
+        raw = {}
+    merged = {**QBIT_AUTO_ORGANIZE_DEFAULTS, **raw}
+    # 类型清洗 + 边界（防恶意 / 误配）
+    merged["enabled"] = bool(merged.get("enabled", False))
+    cats = merged.get("categories") or []
+    if not isinstance(cats, list):
+        cats = []
+    # 过滤 None / 空白 / 非字符串可转后为空的项；先 None check 防 str(None)='None' 入选
+    merged["categories"] = [
+        str(c).strip() for c in cats if c is not None and str(c).strip()
+    ]
+    try:
+        merged["poll_interval_minutes"] = max(1, int(merged.get("poll_interval_minutes", 5)))
+    except (TypeError, ValueError):
+        merged["poll_interval_minutes"] = 5
+    try:
+        ct = float(merged.get("confidence_threshold", 0.85))
+        merged["confidence_threshold"] = min(1.0, max(0.0, ct))
+    except (TypeError, ValueError):
+        merged["confidence_threshold"] = 0.85
+    return merged
+
+
+def save_qbit_auto_organize_config(cfg: dict) -> None:
+    """落盘 config/qbit_auto_organize.json。仅保留 schema 内 4 字段，做边界清洗。"""
+    cats = cfg.get("categories") or []
+    if not isinstance(cats, list):
+        cats = []
+    # 防 `0 or 5 = 5` 让 clamp 失效：先 None check，再 cast + clamp
+    raw_poll = cfg.get("poll_interval_minutes")
+    try:
+        poll = max(1, int(raw_poll)) if raw_poll is not None else 5
+    except (TypeError, ValueError):
+        poll = 5
+    raw_conf = cfg.get("confidence_threshold")
+    try:
+        conf = min(1.0, max(0.0, float(raw_conf))) if raw_conf is not None else 0.85
+    except (TypeError, ValueError):
+        conf = 0.85
+    payload = {
+        "enabled": bool(cfg.get("enabled", False)),
+        "categories": [
+            str(c).strip() for c in cats if c is not None and str(c).strip()
+        ],
+        "poll_interval_minutes": poll,
+        "confidence_threshold": conf,
+    }
+    QBIT_AUTO_ORGANIZE_CONFIG_FILE.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )

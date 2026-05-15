@@ -132,3 +132,42 @@ CREATE TABLE IF NOT EXISTS scan_items (
 -- claim_next_pending 的核心查询：WHERE scan_run_id=? AND status='pending' LIMIT 1
 CREATE INDEX IF NOT EXISTS idx_scan_items_claim
   ON scan_items(scan_run_id, status);
+
+-- Phase 4C: qBit completion 自动 organize 状态机
+-- 每个 qBit 种子的 info hash 在表里至多一条 row（PK 强制）。Cron 触发时按 hash dedup：
+-- 已 terminal 的不再处理；pending/organizing 的等下个周期看 status；
+-- 失败的（status='failed'）由 user 手动 reset 或加 attempts 上限。
+--
+-- terminal 状态：succeeded / failed / skipped_needs_identify / skipped_low_confidence / skipped_unsupported
+-- 临时状态：pending（下次 cron 重试）/ organizing（已起 worker，跟 destructive_actions running 关联）
+-- 'skipped_locked' 不持久化（lock 冲突时 row 留 pending 让下次 cron 重试）
+CREATE TABLE IF NOT EXISTS auto_organize_runs (
+  qbit_hash             TEXT PRIMARY KEY,
+  category              TEXT,                             -- 触发时种子的 qBit category（审计用）
+  torrent_name          TEXT,                             -- 友好显示（审计 / UI 用）
+  content_path          TEXT NOT NULL,                    -- 目录或单文件路径
+  status                TEXT NOT NULL DEFAULT 'pending'
+                          CHECK (status IN ('pending', 'organizing', 'succeeded', 'failed',
+                                            'skipped_needs_identify', 'skipped_low_confidence',
+                                            'skipped_unsupported')),
+  attempts              INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at       INTEGER,
+  last_error            TEXT,
+  action_id             TEXT,                             -- 成功时关联 destructive_actions.action_id
+  files_succeeded       INTEGER,
+  files_already_linked  INTEGER,
+  files_failed          INTEGER,
+  created_at            INTEGER NOT NULL,
+  completed_at          INTEGER                           -- terminal 时间戳
+);
+
+-- partial unique index 防并发 organizing：同 qbit_hash 同时只能一个 organizing
+-- （在 PK 之外多一道保险，因为 status 是可变字段，update 冲突直接 IntegrityError）
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_auto_org_organizing
+  ON auto_organize_runs(qbit_hash) WHERE status = 'organizing';
+
+CREATE INDEX IF NOT EXISTS idx_auto_org_status
+  ON auto_organize_runs(status, last_attempt_at);
+
+CREATE INDEX IF NOT EXISTS idx_auto_org_history
+  ON auto_organize_runs(completed_at);
