@@ -2,7 +2,7 @@
 
 AI 原生的影视资源管理器（Phase 4A）。Web 版的 NAS 媒体库，专为 **QNAP / Synology / 任意 Linux NAS** 设计，针对 **PT 玩家做硬链接 + qBittorrent 种子的联动删除 + AI 自动识别媒体元数据 + 下载完成后一键整理到媒体库**优化。
 
-> **解决的痛点**：用 SMB / Samba 删一部已经在 qBittorrent 做种的剧时，种子会变成 errored 状态扣保种率；手动到 qBit 里再删一遍又麻烦。这个工具一次操作把硬盘文件 + 关联硬链接 + qBit 种子（含下载文件）一起干掉，磁盘空间真正释放。同时 AI 自动识别电影/剧集 → 海报 + 简介 + 评分 + 演员，按 TMDB 浏览整个媒体库。下载完后一键整理 → atomic hardlink 到媒体库 + 写 NFO，保种不断 + Plex/Emby 立即识别。
+> **解决的痛点**：用 SMB / Samba 删一部已经在 qBittorrent 做种的剧时，种子会变成 errored 状态扣保种率；手动到 qBit 里再删一遍又麻烦。这个工具一次操作把硬盘文件 + 关联硬链接 + qBit 种子（含下载文件）一起干掉，磁盘空间真正释放。同时 AI 自动识别电影/剧集 → 海报 + 简介 + 评分 + 演员，按 TMDB 浏览整个媒体库。下载完后一键整理 → atomic hardlink 到媒体库 + 写 NFO，保种不断，待 Plex/Emby 下次扫描即可识别。
 
 ## 核心功能
 
