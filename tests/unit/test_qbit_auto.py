@@ -515,3 +515,311 @@ def test_gate_mixed_pass_and_fail_returns_blockers_for_fail_only(conn, monkeypat
 def test_gate_supported_media_types_constant():
     """加新 media_type 时（如 anime / docu）必须同步更新 SUPPORTED_MEDIA_TYPES."""
     assert qbit_auto.SUPPORTED_MEDIA_TYPES == {"movie", "tv"}
+
+
+# ─── 4C.3 dispatch_one ───
+# Mock list_video_paths_fn + build_and_start_organize_fn 让 service-level 单测
+# 不依赖 SSH 或 organize_runner 状态.
+
+
+def _torrent(**kw):
+    return {
+        "hash": kw.get("hash", "h1"),
+        "name": kw.get("name", "Some.Movie.mkv"),
+        "category": kw.get("category", "Movies"),
+        "content_path": kw.get("content_path", "/d/Some.Movie.mkv"),
+    }
+
+
+def test_dispatch_one_missing_hash_returns_skipped(conn):
+    out = qbit_auto.dispatch_one(
+        conn, _torrent(hash=""),
+        list_video_paths_fn=lambda p: [],
+        confidence_threshold=0.85,
+        build_and_start_organize_fn=lambda paths, h: {"action_id": None, "status": "error"},
+    )
+    assert out["action"] == "skipped"
+    assert "missing hash" in out["reason"]
+
+
+def test_dispatch_one_skips_already_terminal_row(conn):
+    _insert_row(conn, "h1", "succeeded")
+    out = qbit_auto.dispatch_one(
+        conn, _torrent(),
+        list_video_paths_fn=lambda p: [],
+        confidence_threshold=0.85,
+        build_and_start_organize_fn=lambda paths, h: {"action_id": "x", "status": "started"},
+    )
+    assert out["action"] == "skip_existing_run"
+    assert out["current_status"] == "succeeded"
+
+
+def test_dispatch_one_skips_already_organizing_row(conn):
+    _insert_row(conn, "h1", "organizing")
+    out = qbit_auto.dispatch_one(
+        conn, _torrent(),
+        list_video_paths_fn=lambda p: [],
+        confidence_threshold=0.85,
+        build_and_start_organize_fn=lambda paths, h: {"action_id": "x", "status": "started"},
+    )
+    assert out["action"] == "skip_existing_run"
+    assert out["current_status"] == "organizing"
+
+
+def test_dispatch_one_list_paths_raises_marks_skipped(conn):
+    def boom(content_path):
+        raise RuntimeError("ssh failed")
+
+    out = qbit_auto.dispatch_one(
+        conn, _torrent(),
+        list_video_paths_fn=boom,
+        confidence_threshold=0.85,
+        build_and_start_organize_fn=lambda paths, h: {"action_id": "x", "status": "started"},
+    )
+    assert out["action"] == "skipped"
+    assert out["status"] == "skipped_unsupported"
+    # row 应该被 mark_skipped_at_pending 落库
+    row = qbit_auto.get_run(conn, "h1")
+    assert row["status"] == "skipped_unsupported"
+    assert "list_paths_failed" in row["last_error"]
+
+
+def test_dispatch_one_confidence_gate_fail_marks_skipped(conn, monkeypatch):
+    _patch_cache(monkeypatch, {})  # 全 needs_identify
+
+    out = qbit_auto.dispatch_one(
+        conn, _torrent(),
+        list_video_paths_fn=lambda p: ["/d/Some.Movie.mkv"],
+        confidence_threshold=0.85,
+        build_and_start_organize_fn=lambda paths, h: pytest.fail("不该被调"),
+    )
+    assert out["action"] == "skipped"
+    assert out["status"] == "skipped_needs_identify"
+    row = qbit_auto.get_run(conn, "h1")
+    assert row["status"] == "skipped_needs_identify"
+
+
+def test_dispatch_one_locked_keeps_pending(conn, monkeypatch):
+    """build_and_start 返 locked → row 留 pending 让下周期重试.
+
+    NOT mark_skipped — locked 是临时状态.
+    """
+    _patch_cache(monkeypatch, {
+        "/d/Some.Movie.mkv": (_CachedStub(media_type="movie", metadata_confidence=0.9), "hit"),
+    })
+    out = qbit_auto.dispatch_one(
+        conn, _torrent(),
+        list_video_paths_fn=lambda p: ["/d/Some.Movie.mkv"],
+        confidence_threshold=0.85,
+        build_and_start_organize_fn=lambda paths, h: {
+            "action_id": None, "status": "locked", "error": None,
+        },
+    )
+    assert out["action"] == "locked"
+    row = qbit_auto.get_run(conn, "h1")
+    assert row["status"] == "pending"  # 留 pending 重试
+
+
+def test_dispatch_one_error_marks_skipped(conn, monkeypatch):
+    """build_and_start 返 error → mark_skipped_at_pending(skipped_unsupported)."""
+    _patch_cache(monkeypatch, {
+        "/d/Some.Movie.mkv": (_CachedStub(media_type="movie", metadata_confidence=0.9), "hit"),
+    })
+    out = qbit_auto.dispatch_one(
+        conn, _torrent(),
+        list_video_paths_fn=lambda p: ["/d/Some.Movie.mkv"],
+        confidence_threshold=0.85,
+        build_and_start_organize_fn=lambda paths, h: {
+            "action_id": None, "status": "error", "error": "preview build failed: X",
+        },
+    )
+    assert out["action"] == "errored"
+    assert "preview build failed" in out["error"]
+    row = qbit_auto.get_run(conn, "h1")
+    assert row["status"] == "skipped_unsupported"
+
+
+def test_dispatch_one_callback_raises_marks_skipped(conn, monkeypatch):
+    """build_and_start 内部抛异常 → mark_skipped 不 propagate."""
+    _patch_cache(monkeypatch, {
+        "/d/Some.Movie.mkv": (_CachedStub(media_type="movie", metadata_confidence=0.9), "hit"),
+    })
+
+    def boom(paths, h):
+        raise RuntimeError("kaboom")
+
+    out = qbit_auto.dispatch_one(
+        conn, _torrent(),
+        list_video_paths_fn=lambda p: ["/d/Some.Movie.mkv"],
+        confidence_threshold=0.85,
+        build_and_start_organize_fn=boom,
+    )
+    assert out["action"] == "errored"
+    assert "kaboom" in out["error"]
+    row = qbit_auto.get_run(conn, "h1")
+    assert row["status"] == "skipped_unsupported"
+
+
+def test_dispatch_one_happy_path_started(conn, monkeypatch):
+    _patch_cache(monkeypatch, {
+        "/d/Some.Movie.mkv": (_CachedStub(media_type="movie", metadata_confidence=0.9), "hit"),
+    })
+    out = qbit_auto.dispatch_one(
+        conn, _torrent(),
+        list_video_paths_fn=lambda p: ["/d/Some.Movie.mkv"],
+        confidence_threshold=0.85,
+        build_and_start_organize_fn=lambda paths, h: {
+            "action_id": "act-123", "status": "started", "error": None,
+        },
+    )
+    assert out["action"] == "started"
+    assert out["action_id"] == "act-123"
+    row = qbit_auto.get_run(conn, "h1")
+    assert row["status"] == "organizing"
+    assert row["action_id"] == "act-123"
+    assert row["attempts"] == 1
+
+
+def test_dispatch_one_resumes_pending_row(conn, monkeypatch):
+    """row 已存在 status='pending'（之前 locked 留下）→ 继续走 flow，不是 skip_existing."""
+    _insert_row(conn, "h1", "pending")
+    _patch_cache(monkeypatch, {
+        "/d/Some.Movie.mkv": (_CachedStub(media_type="movie", metadata_confidence=0.9), "hit"),
+    })
+    out = qbit_auto.dispatch_one(
+        conn, _torrent(),
+        list_video_paths_fn=lambda p: ["/d/Some.Movie.mkv"],
+        confidence_threshold=0.85,
+        build_and_start_organize_fn=lambda paths, h: {
+            "action_id": "act-retry", "status": "started", "error": None,
+        },
+    )
+    assert out["action"] == "started"
+    row = qbit_auto.get_run(conn, "h1")
+    assert row["status"] == "organizing"
+
+
+# ─── 4C.3 reconcile_organizing_rows ───
+
+
+def _insert_organizing_with_action(conn, qbit_hash, action_id):
+    import time
+    conn.execute(
+        "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,attempts,"
+        "created_at,action_id) VALUES(?,?,?,?,?,?)",
+        (qbit_hash, "/x", "organizing", 1, int(time.time()), action_id),
+    )
+    conn.commit()
+
+
+def _insert_destructive_action(conn, action_id, status, *, result_json=None, error=None):
+    import time
+    conn.execute(
+        "INSERT INTO destructive_actions(action_id,kind,payload_hash,payload_json,"
+        "expires_at,status,created_by,created_at,result_json,error) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (action_id, "organize", "ph", "{}", int(time.time()) + 1800, status,
+         "cron", int(time.time()), result_json, error),
+    )
+    conn.commit()
+
+
+def test_reconcile_skips_running_actions(conn):
+    """destructive_action 还 running → 不动 auto_organize_runs row."""
+    _insert_organizing_with_action(conn, "h1", "act-1")
+    _insert_destructive_action(conn, "act-1", "running")
+    out = qbit_auto.reconcile_organizing_rows(conn)
+    assert out == []
+    row = qbit_auto.get_run(conn, "h1")
+    assert row["status"] == "organizing"  # 不动
+
+
+def test_reconcile_succeeded_action_syncs(conn):
+    """destructive_action succeeded → mark_terminal(succeeded) + 抽 counts."""
+    import json
+    _insert_organizing_with_action(conn, "h1", "act-1")
+    _insert_destructive_action(
+        conn, "act-1", "succeeded",
+        result_json=json.dumps({
+            "total_succeeded": 5,
+            "total_already_linked": 1,
+            "total_failed": 0,
+        }),
+    )
+    out = qbit_auto.reconcile_organizing_rows(conn)
+    assert len(out) == 1 and out[0]["synced_to"] == "succeeded"
+    row = qbit_auto.get_run(conn, "h1")
+    assert row["status"] == "succeeded"
+    assert row["files_succeeded"] == 5
+    assert row["files_already_linked"] == 1
+    assert row["files_failed"] == 0
+    assert row["completed_at"] is not None
+
+
+def test_reconcile_failed_action_syncs(conn):
+    _insert_organizing_with_action(conn, "h1", "act-1")
+    _insert_destructive_action(conn, "act-1", "failed", error="something broke")
+    out = qbit_auto.reconcile_organizing_rows(conn)
+    assert out[0]["synced_to"] == "failed"
+    assert out[0]["action_status"] == "failed"
+    row = qbit_auto.get_run(conn, "h1")
+    assert row["status"] == "failed"
+    assert row["last_error"] == "something broke"
+
+
+def test_reconcile_needs_manual_recovery_treated_as_failed(conn):
+    """needs_manual_recovery 同 failed 处理（auto 端没有 manual_recovery 状态）."""
+    _insert_organizing_with_action(conn, "h1", "act-1")
+    _insert_destructive_action(conn, "act-1", "needs_manual_recovery",
+                                error="reaper intervened")
+    out = qbit_auto.reconcile_organizing_rows(conn)
+    assert out[0]["synced_to"] == "failed"
+    row = qbit_auto.get_run(conn, "h1")
+    assert row["status"] == "failed"
+
+
+def test_reconcile_missing_action_row_marks_failed(conn):
+    """auto_organize_runs.action_id 指向已删 destructive_action row → mark failed."""
+    _insert_organizing_with_action(conn, "h1", "act-missing")
+    # 不 insert destructive_action
+    out = qbit_auto.reconcile_organizing_rows(conn)
+    assert out[0]["synced_to"] == "failed"
+    assert out[0]["reason"] == "action_row_missing"
+    row = qbit_auto.get_run(conn, "h1")
+    assert "destructive_action row missing" in row["last_error"]
+
+
+def test_reconcile_organizing_without_action_id_marks_failed(conn):
+    """auto_organize_runs 异常状态: organizing 但 action_id NULL → corrupted, mark failed."""
+    _insert_organizing_with_action(conn, "h1", None)
+    out = qbit_auto.reconcile_organizing_rows(conn)
+    assert out[0]["synced_to"] == "failed"
+    assert out[0]["reason"] == "missing_action_id"
+    row = qbit_auto.get_run(conn, "h1")
+    assert "corrupted state" in row["last_error"]
+
+
+def test_reconcile_handles_invalid_json_result(conn):
+    """destructive_actions.result_json 损坏 / 非法 JSON → silent fallback 不 raise."""
+    _insert_organizing_with_action(conn, "h1", "act-1")
+    _insert_destructive_action(conn, "act-1", "succeeded",
+                                result_json="{not valid json")
+    out = qbit_auto.reconcile_organizing_rows(conn)
+    assert out[0]["synced_to"] == "succeeded"
+    row = qbit_auto.get_run(conn, "h1")
+    # 没 result_json → counts 为 0 / None
+    assert row["status"] == "succeeded"
+    assert row["files_succeeded"] in (0, None)
+
+
+def test_reconcile_skips_non_organizing_rows(conn):
+    """status=pending / succeeded / failed 的 row 不被 reconcile 触碰."""
+    _insert_row(conn, "h1", "pending")
+    _insert_row(conn, "h2", "succeeded")
+    _insert_row(conn, "h3", "failed")
+    out = qbit_auto.reconcile_organizing_rows(conn)
+    assert out == []
+    # 三个 row 状态都不变
+    assert qbit_auto.get_run(conn, "h1")["status"] == "pending"
+    assert qbit_auto.get_run(conn, "h2")["status"] == "succeeded"
+    assert qbit_auto.get_run(conn, "h3")["status"] == "failed"

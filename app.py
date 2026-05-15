@@ -24,6 +24,7 @@ from services import metadata_cache
 from services import nfo_writer
 from services import organize as organize_svc
 from services import organize_runner
+from services import qbit_auto
 from services import scanner
 from services import watch_sync
 from services.metadata.tmdb import TMDBProvider
@@ -2440,6 +2441,217 @@ def _organize_executor_one_item_threadsafe(
     """
     with app.app_context():
         return _organize_executor_one_item(item, expected_metadata)
+
+
+def _build_and_start_auto_organize(paths: list[str], qbit_hash: str) -> dict:
+    """Phase 4C.3 cron 触发 callback：组装 organize action + 起 background worker.
+
+    走 Phase 4B background dispatch 同 stack（atomic_consume + verify token +
+    start_organize_executor），但:
+    - created_by='cron'（destructive_actions audit 区分）
+    - signed_token 内部生成 + 立刻消费（不暴露 HTTP）→ 保持契约 #1 一致性
+    - 不接受 selected_indices（auto = 跑全部）
+    - 调用方（services/qbit_auto.dispatch_one）已经做过 confidence_gate，假设
+      paths 全部可识别且 supported；这里只做 plan 计算 + dst stat + payload sign.
+
+    返 {"action_id", "status": "started"|"locked"|"error", "error": str|None}.
+
+    Threading：cron 在 APScheduler thread 跑（不继承 request 的 Flask app context）。
+    入口 push app.app_context() 让 get_db() / metadata_cache 调用拿得到 g.db。
+    详见 [[methodology-patterns]] Threading 章节.
+    """
+    with app.app_context():
+        return _build_and_start_auto_organize_impl(paths, qbit_hash)
+
+
+def _build_and_start_auto_organize_impl(paths: list[str], qbit_hash: str) -> dict:
+    """Inner impl，假设 caller 已 push app context."""
+    org_cfg = load_organize_config()
+    movies_root = (org_cfg.get("movies_root") or "").strip()
+    tv_root = (org_cfg.get("tv_root") or "").strip()
+    if not (movies_root and tv_root):
+        return {"action_id": None, "status": "error",
+                "error": "organize_roots_not_configured"}
+
+    if not paths:
+        return {"action_id": None, "status": "error", "error": "empty_paths"}
+    if len(paths) > MAX_ORGANIZE_BATCH_ITEMS:
+        return {"action_id": None, "status": "error",
+                "error": f"batch_too_large: {len(paths)} > {MAX_ORGANIZE_BATCH_ITEMS}"}
+
+    try:
+        # ── compute plan for each path ───
+        src_stat_now = _ssh_stat_paths(paths)
+        # confidence_gate 已 cached.media_type ∈ {movie, tv}，所以 cache 必命中可识别
+        db = get_db()
+        current_stats = {
+            p: {"inode": s.get("inode"), "mtime": s.get("mtime")}
+            for p, s in src_stat_now.items() if s.get("exists")
+        }
+        cache_map = metadata_cache.get_many_by_path(
+            db, paths, current_stats=current_stats
+        )
+
+        plans_by_src: dict[str, organize_svc.OrganizePlan] = {}
+        dst_check_paths: list[str] = []
+        skipped_during_build: list[dict] = []  # audit：路径 missing / cache 漂移 等
+        for sp in paths:
+            src_stat = src_stat_now.get(sp, {"exists": False})
+            if not src_stat.get("exists"):
+                skipped_during_build.append({"path": sp, "reason": "src_missing"})
+                continue
+            cached, cache_status = cache_map.get(sp, (None, "miss"))
+            if cached is None or cache_status == "stale" or cached.media_type not in ("movie", "tv"):
+                # confidence_gate 之后到这里之间 cache 被改了 = 罕见 race；skip
+                skipped_during_build.append({
+                    "path": sp,
+                    "reason": f"cache_drift: status={cache_status} media_type="
+                              f"{getattr(cached, 'media_type', None)!r}",
+                })
+                continue
+            try:
+                plan = organize_svc.compute_organize_plan(sp, cached, movies_root, tv_root)
+            except organize_svc.OrganizeNotApplicable as e:
+                skipped_during_build.append({"path": sp, "reason": f"not_applicable: {e}"})
+                continue
+            plans_by_src[sp] = plan
+            dst_check_paths.extend([plan.dst_dir, plan.dst_path, plan.nfo_path])
+            if plan.tvshow_nfo_path:
+                dst_check_paths.append(plan.tvshow_nfo_path)
+
+        if not plans_by_src:
+            # confidence_gate 通过但所有 path 都漂移 — 极罕见
+            return {"action_id": None, "status": "error",
+                    "error": f"no plans computed for {qbit_hash}; "
+                             f"all paths drifted: {skipped_during_build}"}
+
+        dst_stat = _ssh_stat_paths(dst_check_paths) if dst_check_paths else {}
+
+        # ── 构造 payload_items（跳过 6 状态分类，confidence_gate 已守门）───
+        payload_items: list[dict] = []
+        for sp, plan in plans_by_src.items():
+            src_stat = src_stat_now[sp]
+            dst_now = dst_stat.get(plan.dst_path, {"exists": False})
+            src_inode = src_stat.get("inode")
+            already_linked = bool(
+                dst_now.get("exists") and dst_now.get("inode") == src_inode
+            )
+            payload_items.append({
+                "src_path": sp,
+                "src_snapshot": {
+                    "inode": src_stat.get("inode"),
+                    "size_bytes": src_stat.get("size_bytes"),
+                    "mtime": src_stat.get("mtime"),
+                },
+                "media_type": plan.media_type,
+                "tmdb_id": plan.tmdb_id,
+                "title": plan.title,
+                "year": plan.year,
+                "season_number": plan.season_number,
+                "episode_number": plan.episode_number,
+                "computed_plan": {
+                    "dst_dir": plan.dst_dir,
+                    "dst_path": plan.dst_path,
+                    "nfo_path": plan.nfo_path,
+                    "tvshow_nfo_path": plan.tvshow_nfo_path,
+                },
+                "metadata_snapshot": {
+                    "tmdb_id": plan.tmdb_id,
+                    "title": plan.title,
+                    "year": plan.year,
+                    "media_type": plan.media_type,
+                    "season_number": plan.season_number,
+                    "episode_number": plan.episode_number,
+                },
+                "dst_status": {
+                    "dst_dir_exists": dst_stat.get(plan.dst_dir, {}).get("exists", False),
+                    "dst_path_exists": dst_now.get("exists", False),
+                    "nfo_path_exists": dst_stat.get(plan.nfo_path, {}).get("exists", False),
+                    "tvshow_nfo_exists": (
+                        dst_stat.get(plan.tvshow_nfo_path, {}).get("exists", False)
+                        if plan.tvshow_nfo_path else False
+                    ),
+                    "already_linked": already_linked,
+                    "conflict": dst_now.get("exists") and not already_linked,
+                },
+            })
+
+        payload = {
+            "kind": "organize",
+            "items": payload_items,
+            "snapshot": {"captured_at": int(time.time())},
+            "auto_organize": {
+                "qbit_hash": qbit_hash,
+                "skipped_during_build": skipped_during_build,
+            },
+        }
+
+        # ── create preview row（created_by='cron'）───
+        res = destructive_action.create_preview(
+            db,
+            kind="organize",
+            payload=payload,
+            server_secret=SERVER_SECRET,
+            created_by="cron",
+        )
+        action_id = res.action_id
+        signed_token = res.signed_token
+
+        # PreviewResult 没暴露 payload_hash，重读 DB 拿（_atomic_consume / _verify_token 要用）
+        pre_row = db.execute(
+            "SELECT payload_hash FROM destructive_actions WHERE action_id = ?",
+            (action_id,),
+        ).fetchone()
+        if pre_row is None:
+            return {"action_id": action_id, "status": "error",
+                    "error": "preview row missing after create (internal bug)"}
+        payload_hash = pre_row["payload_hash"]
+
+        # ── atomic consume + verify（同 confirm 路由 background 分支）───
+        row = destructive_action._atomic_consume(
+            db, action_id, payload_hash, int(time.time()),
+        )
+        if row is None:
+            return {"action_id": action_id, "status": "error",
+                    "error": "atomic_consume_failed (internal race)"}
+        if not destructive_action._verify_token(
+            SERVER_SECRET, action_id, payload_hash, signed_token
+        ):
+            destructive_action._rollback_to_pending(db, action_id)
+            return {"action_id": action_id, "status": "error",
+                    "error": "verify_token_failed (internal bug)"}
+
+        # ── start worker ───
+        try:
+            organize_runner.start_organize_executor(
+                db_path=DB_PATH,
+                action_id=action_id,
+                payload=payload,
+                execute_one_item=_organize_executor_one_item_threadsafe,
+                selected_indices=None,
+            )
+        except organize_runner.ConcurrentOrganizeError:
+            destructive_action._rollback_to_pending(db, action_id)
+            return {"action_id": action_id, "status": "locked", "error": None}
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"[auto-organize] start worker failed for {qbit_hash}")
+            destructive_action._mark_terminal(
+                db, action_id, status="failed", result=None,
+                error=f"worker_start_failed: {type(e).__name__}: {e}",
+            )
+            return {"action_id": action_id, "status": "error",
+                    "error": f"{type(e).__name__}: {e}"}
+
+        logger.info(
+            f"[auto-organize] started action_id={action_id} qbit_hash={qbit_hash} "
+            f"items={len(payload_items)}"
+        )
+        return {"action_id": action_id, "status": "started", "error": None}
+
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"[auto-organize] build_and_start failed for {qbit_hash}")
+        return {"action_id": None, "status": "error",
+                "error": f"{type(e).__name__}: {e}"}
 
 
 def _organize_executor(payload: dict, selected_indices: list[int] | None = None) -> dict:
