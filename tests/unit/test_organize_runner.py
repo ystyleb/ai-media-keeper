@@ -318,3 +318,72 @@ def test_runner_handles_action_with_zero_items(db_path):
     assert info["status"] == "succeeded"
     assert info["result"]["items_total"] == 0
     assert info["result"]["total_succeeded"] == 0
+
+
+# ── codex r2 修复测试 ──
+
+
+def test_runner_aborts_when_reaper_intervenes_mid_run(db_path):
+    """codex r2 IMP2: reaper 抢标 needs_manual_recovery → worker 下一 item
+    update_running_result 返 False → 早退，后续 items 不执行 (no 副作用泄漏)."""
+    action_id, payload = _seed_running_action(db_path, n_items=5)
+    call_count = {"n": 0}
+
+    def fake_exec(item, expected):
+        call_count["n"] += 1
+        # 在第 2 个 item 执行前，模拟 reaper 标 terminal
+        if call_count["n"] == 2:
+            c = destructive_action.open_connection(db_path)
+            try:
+                c.execute(
+                    "UPDATE destructive_actions "
+                    "SET status='needs_manual_recovery', recovery_hint='test_reaper' "
+                    "WHERE action_id = ?", (action_id,),
+                )
+                c.commit()
+            finally:
+                c.close()
+        return {"src_path": item["src_path"], "status": "succeeded"}
+
+    organize_runner.start_organize_executor(
+        db_path=db_path, action_id=action_id, payload=payload,
+        execute_one_item=fake_exec,
+    )
+    # 等 worker 真退出（不能直接 _wait_until_terminal 因为 terminal 已写）
+    time.sleep(0.5)
+
+    # call_count <= 2（reaper 介入后立刻早退，3..5 不执行）
+    assert call_count["n"] <= 2
+
+    c = destructive_action.open_connection(db_path)
+    try:
+        row = c.execute(
+            "SELECT status FROM destructive_actions WHERE action_id = ?",
+            (action_id,),
+        ).fetchone()
+    finally:
+        c.close()
+    # status 仍是 reaper 标的，不被 worker 覆盖
+    assert row["status"] == "needs_manual_recovery"
+
+
+def test_runner_malformed_selected_indices_does_not_leak_active_lock(db_path):
+    """codex r2 IMP3: selected_indices=set([不可哈希]) 抛 TypeError 时 finally
+    仍能清 active state（不卡 lock）。"""
+    action_id, payload = _seed_running_action(db_path, n_items=2)
+
+    # 传一个不能 set() 化的对象触发 worker 内部 TypeError
+    class _BadList(list):
+        def __iter__(self):
+            raise TypeError("intentional iter failure")
+    bad_indices = _BadList([0])
+
+    organize_runner.start_organize_executor(
+        db_path=db_path, action_id=action_id, payload=payload,
+        execute_one_item=lambda it, _md: {"src_path": it["src_path"], "status": "succeeded"},
+        selected_indices=bad_indices,
+    )
+    # 等 worker 自然结束（其内部 set() 会抛 → finally 清 active）
+    time.sleep(0.5)
+    # 关键 invariant：active state 不应卡住
+    assert organize_runner.get_active_action_id() is None

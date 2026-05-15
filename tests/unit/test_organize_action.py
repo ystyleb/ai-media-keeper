@@ -1702,6 +1702,31 @@ def test_confirm_selected_indices_out_of_range_returns_400(client, token, monkey
     assert resp2.get_json()["error"] == "selected_indices_out_of_range"
 
 
+def test_confirm_selected_indices_rejects_bool(client, token, monkeypatch):
+    """codex r2 NIT: JSON true/false 不应作为合法 index（即使 Python bool 是 int 子类）."""
+    _patch_organize_config(monkeypatch)
+    monkeypatch.setattr(app_module, "_ssh_stat_paths",
+                        lambda paths: _src_stat("/dl/x.mkv"))
+    _patch_cache(monkeypatch, _CachedStub(
+        title="Movie", media_type="movie", year=2024, tmdb_id="111",
+    ))
+    resp = client.post(
+        "/api/action/preview",
+        json={"kind": "organize", "items": [{"src_path": "/dl/x.mkv"}]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = resp.get_json()
+
+    resp2 = client.post(
+        "/api/action/confirm",
+        json={"action_id": body["action_id"], "signed_token": body["signed_token"],
+              "selected_indices": [True]},   # bool 而非 int
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 400
+    assert "list[int]" in resp2.get_json()["error"]
+
+
 def test_confirm_concurrent_organize_rollbacks_to_pending(client, token, monkeypatch):
     """codex r1 NIT1: 并发 organize 撞上 → rollback_to_pending（不浪费 preview）."""
     from services import organize_runner

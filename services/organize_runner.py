@@ -13,13 +13,13 @@ DB 写争用 + qBit racing）。
   - abort 信号用 module-level dict（spike 阶段 — 用户不在意 cross-restart 恢复，
     reaper 在 RUNNING_TIMEOUT_BY_KIND['organize']=1800s 后兜底）
 
-[code-enforced single-worker constraint]（codex r1 BLOCKER 2 / IMP4）：
+[code-enforced single-worker constraint]（codex r1 BLOCKER 2 / IMP4 + r2 BLOCKER）：
 此模块的 _active_lock / _abort_flags 都是**进程内**状态，gunicorn 多 worker
 场景下两个进程会各自 start worker 互不感知，且 abort 信号可能落到错进程。
-项目级约束已经强制单 worker（destructive_action.load_server_secret 在
-WORKER_COUNT > 1 时拒绝启动），所以此约束跟现有架构对齐。
+**app.py 启动时硬 enforce WORKER_COUNT==1**（多 worker 抛 RuntimeError 拒启动），
+保证 module-level lock + abort flag 在跨请求间一致。
 真要多 worker 时切换到 SQLite lease（destructive_actions 表加 worker_id 列
-+ guarded UPDATE claim）— 留 Phase 4C 后置。
++ guarded UPDATE claim + abort 信号入 DB）— 留 Phase 4C 后置。
 
 依赖注入：execute_one_item callable 接受 (payload_item, expected_metadata)，
 返 dict result。这样 SSH / NFO write / qBit 副作用都解耦，单元测试 mock 即可。
@@ -134,7 +134,16 @@ def start_organize_executor(
         _active_action_id = action_id
         _active_thread = t
         _clear_abort(action_id)  # 清旧 abort flag 防 stale
-        t.start()
+        # codex r2 IMP1: t.start() 抛错（如 "can't start new thread"）时清 lock 再抛，
+        # 避免 active state 永远卡住 — finally _clear_active 不会被触发因为 thread
+        # 没真正启动 → _worker_main 不会跑 finally。
+        try:
+            t.start()
+        except Exception:
+            _active_action_id = None
+            _active_thread = None
+            _clear_abort(action_id)
+            raise
     logger.info(f"[organize_runner] started action_id={action_id} items={len(payload.get('items', []))}")
 
 
@@ -153,27 +162,39 @@ def _worker_main(
     codex r1 IMP7 修复：注释 fix — 实际上每 item 最多写 2 次 result_json（开始前
     写 current_item 给 polling 看 + 结束后写完成结果）。total ~2N commit per action。
     SQLite WAL + DEFERRED 下 N=500 增 ~50s commit 成本可接受。
-    """
-    selected_set: set[int] | None = (
-        set(selected_indices) if selected_indices is not None else None
-    )
-    items = payload.get("items", [])
-    total = len(items)
 
+    codex r2 IMP3 修复：selected_set 初始化移入 try 块（malformed indices 抛
+    TypeError 时 finally 仍能清 active state）。
+    """
     conn: sqlite3.Connection | None = None
     try:
+        # codex r2 IMP3: 移进 try 块，malformed args 抛错时 finally 仍清 lock
+        selected_set: set[int] | None = (
+            set(selected_indices) if selected_indices is not None else None
+        )
+        items = payload.get("items", [])
+        total = len(items)
         conn = destructive_action.open_connection(db_path)
         results: list[dict] = []
         status_counts: dict[str, int] = {}
 
         # 初始 progress：N items 全 pending
-        destructive_action.update_running_result(conn, action_id, {
+        # codex r2 IMP2: 每次 update_running_result 返 False 说明 row 已 terminal
+        # （reaper 抢标 needs_manual_recovery / 别处 mark_terminal），立刻早退停
+        # 后续副作用（hardlink / NFO write）— ownership 已丢失，继续执行就是孤儿写。
+        still_owns = destructive_action.update_running_result(conn, action_id, {
             "items_total": total,
             "items_completed": 0,
             "current_item": None,
             "status_counts": {},
             "items": [],
         })
+        if not still_owns:
+            logger.warning(
+                f"[organize_runner] action {action_id} ownership lost before any item "
+                f"(reaper intervened?); aborting worker"
+            )
+            return
 
         for idx, item in enumerate(items):
             src_path = item.get("src_path")
@@ -197,13 +218,20 @@ def _worker_main(
                 continue
 
             # 3) progressive：先写 current_item 让 polling 看到「正在跑哪个」
-            destructive_action.update_running_result(conn, action_id, {
+            # codex r2 IMP2: ownership guard — 同上，丢失 ownership 就早退
+            still_owns = destructive_action.update_running_result(conn, action_id, {
                 "items_total": total,
                 "items_completed": idx,
                 "current_item": src_path,
                 "status_counts": dict(status_counts),
                 "items": list(results),
             })
+            if not still_owns:
+                logger.warning(
+                    f"[organize_runner] action {action_id} ownership lost at item {idx} "
+                    f"({src_path!r}); aborting worker"
+                )
+                return
 
             # 4) 真跑 item（异常被 catch → failed）
             try:
@@ -223,6 +251,7 @@ def _worker_main(
             status_counts[st] = status_counts.get(st, 0) + 1
 
             # 5) 跑完一个就 commit 一次（用户 polling 即时看到 +1）
+            # 完成阶段也 guard：如果 reaper 抢标了，我们已经做了这次副作用，但下一个 item 不再做
             destructive_action.update_running_result(conn, action_id, {
                 "items_total": total,
                 "items_completed": idx + 1,

@@ -143,6 +143,16 @@ logger.info(f"API Token loaded ({len(API_TOKEN)} chars).")
 # 契约 #1: server_secret 加载 + SQLite schema 初始化
 # WEB_CONCURRENCY 是 gunicorn 约定 env；未设视为单 worker（dev / flask run）
 WORKER_COUNT = int(os.environ.get("WEB_CONCURRENCY", "1"))
+# Phase 4B codex r2 BLOCKER: organize_runner + scanner 都依赖 module-level lock /
+# abort flag，要求单 worker。硬 enforce，多 worker 直接拒启动。
+if WORKER_COUNT != 1:
+    sys.stderr.write(
+        f"ERROR: NAS Vault requires single worker (WEB_CONCURRENCY=1). "
+        f"got WEB_CONCURRENCY={WORKER_COUNT}.\n"
+        f"   organize_runner / scanner use module-level lock + abort flag,\n"
+        f"   which cannot span workers. Run gunicorn with -w 1 or use flask dev.\n"
+    )
+    sys.exit(1)
 SIGNING_KEY_FILE = CONFIG_DIR / ".signing_key"
 try:
     SERVER_SECRET = destructive_action.load_server_secret(
@@ -2768,12 +2778,13 @@ def action_confirm():
     if pre is None:
         return jsonify({"error": "action_not_found", "action_id": action_id}), 404
 
-    # 4B.3 / codex r1 IMP6: selected_indices 校验（inline 和 background 都用）
+    # 4B.3 / codex r1 IMP6 + r2 NIT: selected_indices 校验（inline 和 background 都用）
+    # type(i) is int 比 isinstance(i, int) 更严，排除 JSON bool（Python 中 True/False 是 int 子类）
     selected_indices_raw = data.get("selected_indices")
     selected_indices: list[int] | None = None
     if selected_indices_raw is not None:
         if not isinstance(selected_indices_raw, list) or \
-           not all(isinstance(i, int) for i in selected_indices_raw):
+           not all(type(i) is int for i in selected_indices_raw):
             return jsonify({"error": "selected_indices must be list[int]"}), 400
         if pre["kind"] != "organize":
             return jsonify({"error": "selected_indices only valid for organize"}), 400
