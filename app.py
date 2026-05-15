@@ -23,6 +23,7 @@ from services import llm
 from services import metadata_cache
 from services import nfo_writer
 from services import organize as organize_svc
+from services import organize_runner
 from services import scanner
 from services import watch_sync
 from services.metadata.tmdb import TMDBProvider
@@ -2077,170 +2078,160 @@ def _write_organize_nfo(
     return f"failed: {reason}"
 
 
-def _organize_executor(payload: dict) -> dict:
-    """Phase 4A.3: confirm 阶段 — Pattern C 双 inode 锚定 + Pattern D NFO 独立 status。
+_ORGANIZE_REQUIRED_METADATA_KEYS = {
+    "tmdb_id", "title", "year", "media_type",
+    "season_number", "episode_number",
+}
+
+
+def _organize_executor_one_item(item: dict, expected_metadata: dict | None) -> dict:
+    """Phase 4B.3：提取自 _organize_executor 的 per-item 逻辑，让 inline 和
+    background worker 都能调。
 
     流程：
       1. Re-stat src（防 mv 偷换）— src inode 锚 #1
       2. Check dst（已存在 + inode 同 → already_linked；已存在 + inode 异 → failed）
       3. mkdir -p dst_dir（已存在不抛错）
       4. ln src dst
-      5. Verify dst inode == src inode — Pattern C 锚 #2（保证真 hardlink 不是 cp）
+      5. Verify dst inode == src inode — Pattern C 锚 #2
       6. 写 episode/movie NFO + tvshow.nfo（仅 tv 且未存在）
 
     Cleanup 策略（codex r1 修订）：
-      - ln 失败：**不动** dst_dir（mkdir -p 不保证目录是本 action 创建的，rmdir 可能
-        删除别人留下的空目录或刚被并发 process 写入的目录）
-      - ln verify inode mismatch：**不动** dst_path（verify 失败说明 dst_path 已不是
-        预期 inode，rm 会删别人的文件）。返 failed + 提示 user 排查
+      - ln 失败：**不动** dst_dir（mkdir -p 不保证目录是本 action 创建的）
+      - ln verify inode mismatch：**不动** dst_path（已不是预期 inode）
       - 已有 NFO：skip 不覆盖（status='skipped: nfo_exists'）
+
+    返回值：dict 必含 src_path + status；status ∈ {succeeded, already_linked, failed}。
     """
-    items = payload["items"]
-    results: list[dict] = []
+    src_path = item["src_path"]
+    plan = item["computed_plan"]
+    media_type = item["media_type"]
+    src_snap_pre = item["src_snapshot"]
 
-    _REQUIRED_METADATA_KEYS = {
-        "tmdb_id", "title", "year", "media_type",
-        "season_number", "episode_number",
-    }
+    # codex r3 IMPORTANT: metadata_snapshot 必须存在且完整
+    if not isinstance(expected_metadata, dict):
+        return {
+            "src_path": src_path, "status": "failed",
+            "reason": "missing_metadata_snapshot_in_payload",
+        }
+    missing_keys = _ORGANIZE_REQUIRED_METADATA_KEYS - set(expected_metadata.keys())
+    if missing_keys:
+        return {
+            "src_path": src_path, "status": "failed",
+            "reason": f"incomplete_metadata_snapshot: missing_keys={sorted(missing_keys)}",
+        }
 
-    for it in items:
-        src_path = it["src_path"]
-        plan = it["computed_plan"]
-        media_type = it["media_type"]
-        src_snap_pre = it["src_snapshot"]
-        # codex r3 IMPORTANT: metadata_snapshot 必须存在且完整（不能 docs-only 不变量）
-        expected_metadata = it.get("metadata_snapshot")
-        if not isinstance(expected_metadata, dict):
-            results.append({
-                "src_path": src_path, "status": "failed",
-                "reason": "missing_metadata_snapshot_in_payload",
-            })
-            continue
-        missing_keys = _REQUIRED_METADATA_KEYS - set(expected_metadata.keys())
-        if missing_keys:
-            results.append({
-                "src_path": src_path, "status": "failed",
-                "reason": f"incomplete_metadata_snapshot: missing_keys={sorted(missing_keys)}",
-            })
-            continue
-        # codex r3 BLOCKER: NFO 写不再 pre-check（_ssh_create_nfo_if_absent 用 atomic ln，
-        # dst 已存在则 ln 失败 → skipped: nfo_exists；无 stat→mv race window）
+    src_now = _ssh_stat_paths([src_path]).get(src_path, {"exists": False})
+    if not src_now.get("exists"):
+        return {
+            "src_path": src_path, "status": "failed",
+            "reason": "src_missing_at_confirm",
+        }
+    # Pattern C 锚 #1
+    if src_now.get("inode") != src_snap_pre.get("inode"):
+        return {
+            "src_path": src_path, "status": "failed",
+            "reason": "src_inode_changed_since_preview",
+            "preview_inode": src_snap_pre.get("inode"),
+            "current_inode": src_now.get("inode"),
+        }
 
-        src_now = _ssh_stat_paths([src_path]).get(src_path, {"exists": False})
-        if not src_now.get("exists"):
-            results.append({
-                "src_path": src_path, "status": "failed",
-                "reason": "src_missing_at_confirm",
-            })
-            continue
-        # Pattern C 锚 #1
-        if src_now.get("inode") != src_snap_pre.get("inode"):
-            results.append({
-                "src_path": src_path, "status": "failed",
-                "reason": "src_inode_changed_since_preview",
-                "preview_inode": src_snap_pre.get("inode"),
-                "current_inode": src_now.get("inode"),
-            })
-            continue
+    dst_path = plan["dst_path"]
+    dst_now = _ssh_stat_paths([dst_path]).get(dst_path, {"exists": False})
 
-        dst_path = plan["dst_path"]
-        dst_now = _ssh_stat_paths([dst_path]).get(dst_path, {"exists": False})
+    if dst_now.get("exists") and dst_now.get("inode") == src_now.get("inode"):
+        return {
+            "src_path": src_path, "status": "already_linked",
+            "dst_path": dst_path,
+            "shared_inode": src_now.get("inode"),
+        }
+    if dst_now.get("exists"):
+        return {
+            "src_path": src_path, "status": "failed",
+            "reason": "dst_exists_different_inode",
+            "dst_path": dst_path,
+            "dst_inode": dst_now.get("inode"),
+            "src_inode": src_now.get("inode"),
+        }
 
-        if dst_now.get("exists") and dst_now.get("inode") == src_now.get("inode"):
-            results.append({
-                "src_path": src_path, "status": "already_linked",
-                "dst_path": dst_path,
-                "shared_inode": src_now.get("inode"),
-            })
-            continue
-        if dst_now.get("exists"):
-            results.append({
-                "src_path": src_path, "status": "failed",
-                "reason": "dst_exists_different_inode",
-                "dst_path": dst_path,
-                "dst_inode": dst_now.get("inode"),
-                "src_inode": src_now.get("inode"),
-            })
-            continue
+    # 1. mkdir -p
+    rc, _, err = _ssh_mkdir_p(plan["dst_dir"])
+    if rc != 0:
+        return {
+            "src_path": src_path, "status": "failed",
+            "reason": f"mkdir_failed: {err.strip()[:200]}",
+        }
 
-        # 1. mkdir -p
-        rc, _, err = _ssh_mkdir_p(plan["dst_dir"])
-        if rc != 0:
-            results.append({
-                "src_path": src_path, "status": "failed",
-                "reason": f"mkdir_failed: {err.strip()[:200]}",
-            })
-            continue
+    # 2. ln src dst — _ssh_ln 内部含 pre-check + post-stat 防 race-into-dir
+    rc, ln_out, err = _ssh_ln(src_path, dst_path)
+    if rc != 0:
+        item_result = {"src_path": src_path, "status": "failed"}
+        if "DST_IS_DIR" in (ln_out or ""):
+            item_result["reason"] = "dst_is_directory_at_ln"
+            item_result["hint"] = (
+                f"dst 已是目录: {dst_path}. SSH 检查后再 organize "
+                f"(可能需要 mv 或 rm 该目录)"
+            )
+        elif "DST_NOT_REGULAR" in (ln_out or ""):
+            item_result["reason"] = "ln_target_not_regular_race"
+            item_result["hint"] = (
+                f"race-into-dir 检测到: dst {dst_path} 在 ln 之间被替换成"
+                f"目录。可能 orphan hardlink 在 "
+                f"{dst_path.rstrip('/')}/{os.path.basename(src_path)}, "
+                f"请 SSH 手工 ls -li 验证 inode 后再 rm。"
+            )
+        else:
+            item_result["reason"] = f"ln_failed: {err.strip()[:200]}"
+        return item_result
 
-        # 2. ln src dst (失败时不动 dst_dir — 详见 cleanup 策略 docstring)
-        # codex r5 BLOCKER 2: _ssh_ln 内部已含 [-d dst] pre-check + post-stat
-        # [-f dst] 防 ln-into-dir race；out 含 DST_IS_DIR / DST_NOT_REGULAR marker。
-        # codex r7: race-into-dir 时不自动 cleanup (ownership 无法证明)，
-        # 返 orphan_hint 让 user SSH 手工检查。
-        rc, ln_out, err = _ssh_ln(src_path, dst_path)
-        if rc != 0:
-            item_result = {
-                "src_path": src_path, "status": "failed",
-            }
-            if "DST_IS_DIR" in (ln_out or ""):
-                item_result["reason"] = "dst_is_directory_at_ln"
-                item_result["hint"] = (
-                    f"dst 已是目录: {dst_path}. SSH 检查后再 organize "
-                    f"(可能需要 mv 或 rm 该目录)"
-                )
-            elif "DST_NOT_REGULAR" in (ln_out or ""):
-                item_result["reason"] = "ln_target_not_regular_race"
-                item_result["hint"] = (
-                    f"race-into-dir 检测到: dst {dst_path} 在 ln 之间被替换成"
-                    f"目录。可能 orphan hardlink 在 "
-                    f"{dst_path.rstrip('/')}/{os.path.basename(src_path)}, "
-                    f"请 SSH 手工 ls -li 验证 inode 后再 rm。"
-                )
-            else:
-                item_result["reason"] = f"ln_failed: {err.strip()[:200]}"
-            results.append(item_result)
-            continue
+    # 3. Pattern C 锚 #2: verify dst inode == src inode
+    verify = _ssh_stat_paths([dst_path]).get(dst_path, {"exists": False})
+    if not verify.get("exists") or verify.get("inode") != src_now.get("inode"):
+        return {
+            "src_path": src_path, "status": "failed",
+            "reason": "ln_verify_failed_inode_mismatch",
+            "expected_inode": src_now.get("inode"),
+            "actual_inode": verify.get("inode"),
+            "hint": "dst_path 已不是预期 inode；可能并发 process 改了它。请 SSH 手工检查后再决定。",
+        }
 
-        # 3. Pattern C 锚 #2: verify dst inode == src inode
-        # (失败时不动 dst_path — 详见 cleanup 策略 docstring)
-        verify = _ssh_stat_paths([dst_path]).get(dst_path, {"exists": False})
-        if not verify.get("exists") or verify.get("inode") != src_now.get("inode"):
-            results.append({
-                "src_path": src_path, "status": "failed",
-                "reason": "ln_verify_failed_inode_mismatch",
-                "expected_inode": src_now.get("inode"),
-                "actual_inode": verify.get("inode"),
-                "hint": "dst_path 已不是预期 inode；可能并发 process 改了它。请 SSH 手工检查后再决定。",
-            })
-            continue
-
-        # 4. 写 NFO（Pattern D：失败不回滚 hardlink）
-        # codex r3 BLOCKER: 用 atomic create-only ln（不 pre-check 直接尝试 ln），
-        # dst 已存在 → helper 返 'skipped: nfo_exists'。无 stat→mv race window。
-        nfo_kind = "episode" if media_type == "tv" else "movie"
-        nfo_status = _write_organize_nfo(
-            src_path, plan["nfo_path"], nfo_kind,
+    # 4. 写 NFO（Pattern D：失败不回滚 hardlink）
+    nfo_kind = "episode" if media_type == "tv" else "movie"
+    nfo_status = _write_organize_nfo(
+        src_path, plan["nfo_path"], nfo_kind,
+        expected_metadata=expected_metadata,
+    )
+    tvshow_nfo_status = "skipped"
+    if media_type == "tv" and plan.get("tvshow_nfo_path"):
+        tvshow_nfo_status = _write_organize_nfo(
+            src_path, plan["tvshow_nfo_path"], "tvshow",
             expected_metadata=expected_metadata,
         )
 
-        tvshow_nfo_status = "skipped"
-        if media_type == "tv" and plan.get("tvshow_nfo_path"):
-            tvshow_nfo_status = _write_organize_nfo(
-                src_path, plan["tvshow_nfo_path"], "tvshow",
-                expected_metadata=expected_metadata,
-            )
+    return {
+        "src_path": src_path,
+        "dst_path": dst_path,
+        "status": "succeeded",
+        "src_inode": src_now.get("inode"),
+        "dst_inode": verify.get("inode"),
+        "nfo_path": plan["nfo_path"],
+        "nfo_status": nfo_status,
+        "tvshow_nfo_path": plan.get("tvshow_nfo_path"),
+        "tvshow_nfo_status": tvshow_nfo_status,
+    }
 
-        results.append({
-            "src_path": src_path,
-            "dst_path": dst_path,
-            "status": "succeeded",
-            "src_inode": src_now.get("inode"),
-            "dst_inode": verify.get("inode"),
-            "nfo_path": plan["nfo_path"],
-            "nfo_status": nfo_status,
-            "tvshow_nfo_path": plan.get("tvshow_nfo_path"),
-            "tvshow_nfo_status": tvshow_nfo_status,
-        })
+
+def _organize_executor(payload: dict) -> dict:
+    """Phase 4A.3 inline 入口：循环调 _organize_executor_one_item。
+
+    Phase 4B：保留作为 inline (≤ ORGANIZE_BATCH_INLINE_THRESHOLD) 路径。
+    """
+    items = payload["items"]
+    results: list[dict] = []
+    for it in items:
+        results.append(
+            _organize_executor_one_item(it, it.get("metadata_snapshot"))
+        )
 
     counts: dict[str, int] = {}
     for r in results:
@@ -2745,9 +2736,87 @@ def action_confirm():
     if not action_id or not signed_token:
         return jsonify({"error": "action_id and signed_token required"}), 400
 
+    # Phase 4B.3：organize + items > ORGANIZE_BATCH_INLINE_THRESHOLD 走 background。
+    # 必须先读 kind + items count，再决定路径。
+    db = get_db()
+    pre = db.execute(
+        "SELECT kind, payload_json, payload_hash FROM destructive_actions "
+        "WHERE action_id = ?",
+        (action_id,),
+    ).fetchone()
+    if pre is None:
+        return jsonify({"error": "action_not_found", "action_id": action_id}), 404
+
+    if pre["kind"] == "organize":
+        try:
+            payload = json.loads(pre["payload_json"])
+        except (json.JSONDecodeError, TypeError):
+            return jsonify({"error": "payload_corrupted", "action_id": action_id}), 500
+        items = payload.get("items", [])
+        if len(items) > ORGANIZE_BATCH_INLINE_THRESHOLD:
+            # Background path: 手动 consume + verify token + start worker，返 202
+            selected_indices = data.get("selected_indices")
+            if selected_indices is not None and (
+                not isinstance(selected_indices, list) or
+                not all(isinstance(i, int) for i in selected_indices)
+            ):
+                return jsonify({"error": "selected_indices must be list[int]"}), 400
+
+            # Stage 1: atomic consume
+            row = destructive_action._atomic_consume(
+                db, action_id, pre["payload_hash"], int(time.time())
+            )
+            if row is None:
+                # 重查精确原因
+                cur = db.execute(
+                    "SELECT status, consumed_at, expires_at FROM destructive_actions "
+                    "WHERE action_id = ?", (action_id,),
+                ).fetchone()
+                if cur is None:
+                    return jsonify({"error": "action_not_found"}), 404
+                if cur["consumed_at"] is not None:
+                    return jsonify({"error": "action_already_consumed"}), 409
+                if cur["expires_at"] <= int(time.time()):
+                    return jsonify({"error": "action_expired"}), 410
+                return jsonify({"error": "action_state_invalid"}), 400
+
+            # Stage 2: HMAC 验签
+            if not destructive_action._verify_token(
+                SERVER_SECRET, action_id, pre["payload_hash"], signed_token
+            ):
+                destructive_action._rollback_to_pending(db, action_id)
+                return jsonify({"error": "invalid_signed_token"}), 401
+
+            # Stage 3: 起 background worker
+            try:
+                organize_runner.start_organize_executor(
+                    db_path=DB_PATH,
+                    action_id=action_id,
+                    payload=payload,
+                    execute_one_item=_organize_executor_one_item,
+                    selected_indices=selected_indices,
+                )
+            except organize_runner.ConcurrentOrganizeError as e:
+                destructive_action._mark_terminal(
+                    db, action_id, status="failed", result=None,
+                    error=f"concurrent_organize: {e}",
+                )
+                return jsonify({
+                    "error": "another_organize_running",
+                    "active_action_id": organize_runner.get_active_action_id(),
+                }), 409
+
+            return jsonify({
+                "action_id": action_id,
+                "status": "running",
+                "items_total": len(items),
+                "polling_url": f"/api/action/status?id={action_id}",
+            }), 202
+
+    # Default path: inline confirm（Phase 4A 行为）
     try:
         out = destructive_action.confirm(
-            get_db(),
+            db,
             action_id=action_id,
             signed_token=signed_token,
             server_secret=SERVER_SECRET,
@@ -2764,19 +2833,61 @@ def action_confirm():
     except destructive_action.ActionError as e:
         return jsonify({"error": "action_error", "detail": str(e)}), 400
 
-    # SnapshotMismatch 走 destructive_action 的 "failed" 路径：检查 error 字段
     response: dict = {"action_id": out.action_id, "status": out.status}
     if out.status == "succeeded":
         response["result"] = out.result
     else:
         response["error"] = out.error
-        # 把 snapshot mismatch 升级为 client 友好 status
         if out.error and out.error.startswith("SnapshotMismatch:"):
             response["status"] = "target_already_changed"
-            # 从 DB 读 result_json 拿不到（executor 抛异常没 result）；用 error 字符串解析
-            # spike 阶段简单：UI 提示用户刷新
             response["hint"] = "Target changed since preview; refresh and retry."
     return jsonify(response)
+
+
+@app.route("/api/action/status", methods=["GET"])
+@require_token
+def action_status():
+    """Phase 4B.3：polling endpoint。给前端 background organize 进度。
+
+    Query: ?id=<action_id>
+    Returns: {action_id, kind, status, items_total, items_completed, current_item,
+              status_counts, result, error, recovery_hint, ...}
+    """
+    action_id = request.args.get("id", "").strip()
+    if not action_id:
+        return jsonify({"error": "id required"}), 400
+    info = organize_runner.get_organize_status(get_db(), action_id)
+    if info is None:
+        return jsonify({"error": "action_not_found"}), 404
+    return jsonify(info)
+
+
+@app.route("/api/action/abort", methods=["POST"])
+@require_token
+def action_abort():
+    """Phase 4B.3：中止 background organize。
+
+    POST {"action_id": "..."}
+    设 abort 标志位 — worker 下一个 item 边界自然退出（不取消正在跑的 SSH）。
+    已完成的 items 保留，未完成的 items 标 'skipped_by_abort'。
+    """
+    data = request.json or {}
+    action_id = (data.get("action_id") or "").strip()
+    if not action_id:
+        return jsonify({"error": "action_id required"}), 400
+
+    info = organize_runner.get_organize_status(get_db(), action_id)
+    if info is None:
+        return jsonify({"error": "action_not_found"}), 404
+    if info["status"] != "running":
+        return jsonify({
+            "error": "action_not_running",
+            "current_status": info["status"],
+        }), 409
+
+    organize_runner.request_abort(action_id)
+    logger.info(f"[action/abort] requested for {action_id}")
+    return jsonify({"ok": True, "action_id": action_id, "status": "abort_requested"})
 
 
 # ─────────────────────────────────────────────────────────────

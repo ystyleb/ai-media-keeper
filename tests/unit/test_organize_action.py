@@ -1435,3 +1435,191 @@ def test_preview_all_unidentified_returns_zero_no_token(client, token, monkeypat
     assert "signed_token" not in body
     assert body["counts"]["needs_identify"] == 5
     assert body["message"] == "无可整理文件"
+
+
+# ── Phase 4B.3 confirm 分流 + status + abort route tests ──
+
+
+def test_confirm_organize_above_threshold_returns_202_background(client, token, monkeypatch):
+    """items 数超过 ORGANIZE_BATCH_INLINE_THRESHOLD → 202 + background worker。"""
+    from services import organize_runner
+
+    _patch_organize_config(monkeypatch)
+
+    n = app_module.ORGANIZE_BATCH_INLINE_THRESHOLD + 2
+    src_paths = [f"/dl/m{i}.mkv" for i in range(n)]
+
+    def fake_stat(paths):
+        return {
+            p: ({"exists": True, "inode": 1000 + i, "size_bytes": 1024, "mtime": 1000}
+                if p.startswith("/dl/m") and p in src_paths
+                else {"exists": False})
+            for i, p in enumerate(paths)
+        }
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
+    _patch_cache(monkeypatch, _CachedStub(
+        title="Movie", media_type="movie", year=2024, tmdb_id="111",
+    ))
+
+    # mock organize_runner.start_organize_executor 不真起 thread
+    started_with = {}
+    def fake_start(*, db_path, action_id, payload, execute_one_item,
+                   selected_indices=None):
+        started_with["action_id"] = action_id
+        started_with["items_count"] = len(payload["items"])
+        started_with["selected_indices"] = selected_indices
+    monkeypatch.setattr(organize_runner, "start_organize_executor", fake_start)
+
+    # Preview
+    resp = client.post(
+        "/api/action/preview",
+        json={"kind": "organize",
+              "items": [{"src_path": p} for p in src_paths]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    action_id, signed = body["action_id"], body["signed_token"]
+
+    # Confirm with selected_indices subset
+    resp2 = client.post(
+        "/api/action/confirm",
+        json={"action_id": action_id, "signed_token": signed,
+              "selected_indices": [0, 1, 3]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 202
+    body2 = resp2.get_json()
+    assert body2["status"] == "running"
+    assert body2["items_total"] == n
+    assert "polling_url" in body2
+    assert started_with["action_id"] == action_id
+    assert started_with["selected_indices"] == [0, 1, 3]
+
+
+def test_confirm_organize_at_threshold_uses_inline_path(client, token, monkeypatch):
+    """items 数 == ORGANIZE_BATCH_INLINE_THRESHOLD → 仍走 inline 同步 path。"""
+    from services import organize_runner
+
+    _patch_organize_config(monkeypatch)
+    n = app_module.ORGANIZE_BATCH_INLINE_THRESHOLD  # 5
+    src_paths = [f"/dl/m{i}.mkv" for i in range(n)]
+
+    def fake_stat(paths):
+        return {p: ({"exists": True, "inode": 1000 + i,
+                     "size_bytes": 1024, "mtime": 1000}
+                    if p in src_paths
+                    else {"exists": False})
+                for i, p in enumerate(paths)}
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
+    _patch_cache(monkeypatch, _CachedStub(
+        title="Movie", media_type="movie", year=2024, tmdb_id="111",
+    ))
+
+    # 如果错走 background path 会调 start_organize_executor — patch 让它 fail loudly
+    def boom_start(**_kw):
+        raise AssertionError("should NOT take background path at threshold boundary")
+    monkeypatch.setattr(organize_runner, "start_organize_executor", boom_start)
+
+    # 走 inline path → executor 真跑 → 我们 patch 它返 succeeded
+    inline_calls = {"n": 0}
+    def fake_one_item(item, expected_metadata):
+        inline_calls["n"] += 1
+        return {"src_path": item["src_path"], "status": "succeeded"}
+    monkeypatch.setattr(app_module, "_organize_executor_one_item", fake_one_item)
+
+    resp = client.post(
+        "/api/action/preview",
+        json={"kind": "organize",
+              "items": [{"src_path": p} for p in src_paths]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = resp.get_json()
+    action_id, signed = body["action_id"], body["signed_token"]
+
+    resp2 = client.post(
+        "/api/action/confirm",
+        json={"action_id": action_id, "signed_token": signed},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 200  # inline path 返 200，不是 202
+    assert resp2.get_json()["status"] == "succeeded"
+    assert inline_calls["n"] == n
+
+
+def test_action_status_returns_404_for_missing(client, token):
+    resp = client.get(
+        "/api/action/status?id=nonexistent",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_action_status_returns_progress_for_running(client, token, monkeypatch):
+    """worker 跑期间 status 端点能读到 running + items_completed。"""
+    from services import organize_runner
+    # 直接 mock organize_runner.get_organize_status 返 progress payload
+    def fake_status(conn, action_id):
+        if action_id == "test-action-id":
+            return {
+                "action_id": action_id, "kind": "organize",
+                "status": "running",
+                "items_total": 10, "items_completed": 4,
+                "current_item": "/dl/m4.mkv",
+                "status_counts": {"succeeded": 4},
+                "result": {"items_completed": 4},
+                "started_at": 1000, "completed_at": None,
+                "expires_at": 2000, "error": None, "recovery_hint": None,
+            }
+        return None
+    monkeypatch.setattr(organize_runner, "get_organize_status", fake_status)
+
+    resp = client.get(
+        "/api/action/status?id=test-action-id",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "running"
+    assert body["items_completed"] == 4
+    assert body["current_item"] == "/dl/m4.mkv"
+
+
+def test_action_abort_sets_flag_for_running_action(client, token, monkeypatch):
+    """POST /api/action/abort → request_abort 被调用，返 ok=true。"""
+    from services import organize_runner
+
+    monkeypatch.setattr(
+        organize_runner, "get_organize_status",
+        lambda conn, aid: {"status": "running"} if aid == "abc" else None,
+    )
+    abort_calls = []
+    def fake_request_abort(aid):
+        abort_calls.append(aid)
+        return True
+    monkeypatch.setattr(organize_runner, "request_abort", fake_request_abort)
+
+    resp = client.post(
+        "/api/action/abort",
+        json={"action_id": "abc"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "abort_requested"
+    assert abort_calls == ["abc"]
+
+
+def test_action_abort_rejects_non_running_action(client, token, monkeypatch):
+    """已 terminal 的 action 不能 abort → 409。"""
+    from services import organize_runner
+    monkeypatch.setattr(
+        organize_runner, "get_organize_status",
+        lambda conn, aid: {"status": "succeeded"},
+    )
+    resp = client.post(
+        "/api/action/abort",
+        json={"action_id": "done"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 409
+    assert resp.get_json()["current_status"] == "succeeded"
