@@ -15,6 +15,7 @@ Cron job (4C.4) 自己调 qbit.get_torrents() 然后传给本模块 filter / dis
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from typing import Any
@@ -55,7 +56,10 @@ def list_completed_torrents(
     for t in torrents:
         if not (t.get("hash") or "").strip():
             continue
-        if t.get("progress", 0) != 1.0:
+        # qBit progress 是 float（JSON round-trip 可能 1.0000001 / 0.9999999）。
+        # 用 >= 0.999 而非 == 1.0 防漏（B2 codex BLOCKER）；state ∈ COMPLETED_STATES
+        # 是 secondary 守门，已排掉 downloading / error / missingFiles。
+        if t.get("progress", 0) < 0.999:
             continue
         if t.get("state") not in COMPLETED_STATES:
             continue
@@ -197,6 +201,12 @@ def mark_skipped_at_pending(
 # ── query / UI ───
 
 
+VALID_STATUSES = frozenset({
+    "pending", "organizing", "succeeded", "failed",
+    "skipped_needs_identify", "skipped_low_confidence", "skipped_unsupported",
+})
+
+
 def list_history(
     conn: sqlite3.Connection,
     *,
@@ -207,7 +217,13 @@ def list_history(
     """UI 历史视图查询 helper.
 
     Ordering：进行中（pending / organizing）置顶；其余按 completed_at desc.
+
+    Raises ValueError if status_filter is not in VALID_STATUSES (codex r1 N3).
     """
+    if status_filter is not None and status_filter not in VALID_STATUSES:
+        raise ValueError(
+            f"invalid status_filter {status_filter!r}; must be one of {sorted(VALID_STATUSES)}"
+        )
     sql = "SELECT * FROM auto_organize_runs"
     params: list = []
     if status_filter:
@@ -466,9 +482,26 @@ def dispatch_one(
                 "error": result.get("error")}
 
     # 5. claim organizing（worker 已 started → pending → organizing）
+    # codex r1 B1 fix: 这步失败 = race（cron 双触发 / user 抢标 / reaper 抢标）。
+    # worker 已经在跑，必须把它对应的 destructive_actions row 标 failed，否则:
+    #   - destructive_actions.status=running（worker 跑）
+    #   - auto_organize_runs.status=pending（claim 失败留下的）
+    #   下周期 cron 看 row 是 pending → 再 dispatch_one → 又起一个 worker → 双副作用
+    # 我们 mark destructive_action 失败让 reconcile 下周期看到 failed → 不会再起。
+    # 注意：单飞 lock 已经在 build_and_start 里 acquired，worker 真在跑，
+    # 此处 _mark_terminal 让 worker 完成后看到 status≠'running' 自我 abort
+    # (mark_terminal_if_running guard 已在 organize_runner._worker_main 处理)
     ok = mark_organizing(conn, qbit_hash, action_id=action_id)
     if not ok:
-        # 极少 race：另一个进程把 row 改成非 pending（cron 双触发 / user 手动操作）
+        from . import destructive_action as _da  # noqa: PLC0415
+        try:
+            _da._mark_terminal(
+                conn, action_id, status="failed", result=None,
+                error=f"auto_organize_claim_lost: row no longer pending (race)",
+            )
+        except Exception:
+            # 不让 cleanup 抛错掩盖根因；reaper 兜底
+            pass
         return {"action": "claim_lost", "qbit_hash": qbit_hash,
                 "action_id": action_id}
     return {"action": "started", "qbit_hash": qbit_hash, "action_id": action_id}
@@ -514,12 +547,11 @@ def reconcile_organizing_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         if a_status == "running":
             continue  # 还在跑，下个周期再 check
         # terminal: succeeded / failed / needs_manual_recovery
-        import json as _json  # noqa: PLC0415
         try:
             result_data = (
-                _json.loads(action_row["result_json"]) if action_row["result_json"] else {}
+                json.loads(action_row["result_json"]) if action_row["result_json"] else {}
             )
-        except _json.JSONDecodeError:
+        except json.JSONDecodeError:
             result_data = {}
         if a_status == "succeeded":
             mark_terminal(

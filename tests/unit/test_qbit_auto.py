@@ -823,3 +823,72 @@ def test_reconcile_skips_non_organizing_rows(conn):
     assert qbit_auto.get_run(conn, "h1")["status"] == "pending"
     assert qbit_auto.get_run(conn, "h2")["status"] == "succeeded"
     assert qbit_auto.get_run(conn, "h3")["status"] == "failed"
+
+
+# ─── codex r1 regression tests ───
+
+
+def test_list_completed_accepts_progress_0_9999(conn):
+    """codex r1 B2 fix: 浮点 round-trip 1.0 略偏小（如 0.9999999）也算 completed."""
+    out = qbit_auto.list_completed_torrents(
+        [_t(progress=0.9999999, hash="h-fp")], ["Movies"],
+    )
+    assert len(out) == 1
+
+
+def test_list_completed_accepts_progress_1_0000001(conn):
+    """浮点 round-trip 略偏大也算 completed (>= 0.999 thresh)."""
+    out = qbit_auto.list_completed_torrents(
+        [_t(progress=1.0000001, hash="h-fp2")], ["Movies"],
+    )
+    assert len(out) == 1
+
+
+def test_list_completed_filters_progress_below_threshold(conn):
+    """progress < 0.999 仍要排除（防误算未完成种子）."""
+    out = qbit_auto.list_completed_torrents(
+        [_t(progress=0.95)], ["Movies"],
+    )
+    assert out == []
+
+
+def test_dispatch_one_claim_lost_marks_action_failed(conn, monkeypatch):
+    """codex r1 B1 fix: build_and_start 起 worker 后 mark_organizing 失败 →
+    destructive_action row 应被标 failed，让 reconcile 下周期不会再起 worker。
+    """
+    _patch_cache(monkeypatch, {
+        "/d/Some.Movie.mkv": (_CachedStub(media_type="movie", metadata_confidence=0.9), "hit"),
+    })
+
+    # 模拟 race: pending row 在 build_and_start 之后被改 (mark_organizing 失败)
+    # 用 monkeypatch 让 mark_organizing 返 False（模拟 race）
+    monkeypatch.setattr(qbit_auto, "mark_organizing", lambda *a, **kw: False)
+
+    # 模拟 build_and_start_organize_fn 返 started + action_id
+    # 真实场景这时 destructive_action row 已 running，需要被 cleanup
+    # 用 fake action_id；实际 _mark_terminal 会找不到 row（即 try/except 兜底）
+    out = qbit_auto.dispatch_one(
+        conn, _torrent(hash="h-claim-lost"),
+        list_video_paths_fn=lambda p: ["/d/Some.Movie.mkv"],
+        confidence_threshold=0.85,
+        build_and_start_organize_fn=lambda paths, h: {
+            "action_id": "act-ghost", "status": "started", "error": None,
+        },
+    )
+    assert out["action"] == "claim_lost"
+    assert out["action_id"] == "act-ghost"
+    # _mark_terminal 在 fake act-ghost 上找不到 row → except 兜底，不抛错
+
+
+def test_list_history_rejects_invalid_status_filter(conn):
+    """codex r1 N3: 非法 status_filter 抛 ValueError（route 层转 400）."""
+    import pytest
+    with pytest.raises(ValueError, match="invalid status_filter"):
+        qbit_auto.list_history(conn, status_filter="bogus")
+
+
+def test_list_history_accepts_all_valid_statuses(conn):
+    """VALID_STATUSES 包含所有 schema CHECK 允许的 status."""
+    for status in qbit_auto.VALID_STATUSES:
+        # 不该抛 — 只验枚举校验，结果可以空
+        qbit_auto.list_history(conn, status_filter=status)

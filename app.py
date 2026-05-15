@@ -4769,9 +4769,23 @@ def set_qbit_auto_organize_config():
     """落盘 + 提示重启生效（poll_interval 跟 cron 注册时绑定）.
 
     Phase 4C v1: interval 改动需要重启 server（APScheduler 周期变更需 reschedule）.
+
+    codex r1 I2 fix: enabled=True 但 categories=[] = 用户配置错误（cron 跑后只能
+    warn 然后不触发任何种子）→ 保存阶段直接 fail-fast 400，让用户立刻看到错误。
     """
     data = request.json or {}
-    # 类型 / 边界校验在 save 内做
+    enabled = bool(data.get("enabled", False))
+    cats = data.get("categories") or []
+    if not isinstance(cats, list):
+        cats = []
+    cleaned_cats = [str(c).strip() for c in cats if c is not None and str(c).strip()]
+    if enabled and not cleaned_cats:
+        return jsonify({
+            "ok": False,
+            "error": "categories_required_when_enabled",
+            "message": "启用前必须配置至少一个 qBit category 白名单",
+        }), 400
+    # 类型 / 边界清洗在 save 内做
     save_qbit_auto_organize_config(data)
     new_cfg = load_qbit_auto_organize_config()
     return jsonify({
@@ -4800,9 +4814,12 @@ def list_auto_organize_runs():
         offset = 0
     status_filter = request.args.get("status", "").strip() or None
     db = get_db()
-    runs = qbit_auto.list_history(
-        db, limit=limit, offset=offset, status_filter=status_filter,
-    )
+    try:
+        runs = qbit_auto.list_history(
+            db, limit=limit, offset=offset, status_filter=status_filter,
+        )
+    except ValueError as e:
+        return jsonify({"error": "invalid_status_filter", "message": str(e)}), 400
     # total count for pagination UI
     if status_filter:
         total = db.execute(
@@ -5015,6 +5032,8 @@ def _cron_qbit_auto_organize():
                 try:
                     out = qbit_auto.dispatch_one(
                         conn, t,
+                        # cp 是 lambda 参数（dispatch_one 调用时传入），不是闭包捕获 —
+                        # 不存在 Python late-binding 陷阱。
                         list_video_paths_fn=lambda cp: _list_video_paths(
                             cp, max_depth=3, limit=MAX_ORGANIZE_BATCH_ITEMS,
                         ),

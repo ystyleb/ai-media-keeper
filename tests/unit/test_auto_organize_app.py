@@ -585,3 +585,56 @@ def test_reset_run_terminal_deletes_row(client, token):
 def qbit_auto_check_get(conn, qbit_hash):
     from services import qbit_auto as qa
     return qa.get_run(conn, qbit_hash)
+
+
+# ─── codex r1 regression ───
+
+
+def test_post_config_enabled_without_categories_rejected(client, token, monkeypatch, tmp_path):
+    """codex r1 I2 fix: enabled=True + categories=[] → 400 fail-fast，不让用户
+    误以为已启用但实际不触发任何种子."""
+    cfg_file = tmp_path / "qbit_auto_organize.json"
+    monkeypatch.setattr(app_module, "QBIT_AUTO_ORGANIZE_CONFIG_FILE", cfg_file)
+    resp = client.post(
+        "/api/config/qbit-auto-organize",
+        json={"enabled": True, "categories": []},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["error"] == "categories_required_when_enabled"
+
+
+def test_post_config_disabled_with_empty_categories_allowed(client, token, monkeypatch, tmp_path):
+    """disabled 时 categories=[] 仍允许（用户关掉自动整理后保留空 list）."""
+    cfg_file = tmp_path / "qbit_auto_organize.json"
+    monkeypatch.setattr(app_module, "QBIT_AUTO_ORGANIZE_CONFIG_FILE", cfg_file)
+    resp = client.post(
+        "/api/config/qbit-auto-organize",
+        json={"enabled": False, "categories": []},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+
+
+def test_post_config_enabled_with_whitespace_categories_rejected(client, token, monkeypatch, tmp_path):
+    """categories 全是空白 → 清洗后为空 → 等价 enabled+empty 应 400."""
+    cfg_file = tmp_path / "qbit_auto_organize.json"
+    monkeypatch.setattr(app_module, "QBIT_AUTO_ORGANIZE_CONFIG_FILE", cfg_file)
+    resp = client.post(
+        "/api/config/qbit-auto-organize",
+        json={"enabled": True, "categories": ["", "  ", None]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+
+
+def test_list_runs_invalid_status_filter_returns_400(client, token):
+    """codex r1 N3: 非法 status_filter → 400 + 提示."""
+    resp = client.get(
+        "/api/auto-organize/runs?status=bogus",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["error"] == "invalid_status_filter"
