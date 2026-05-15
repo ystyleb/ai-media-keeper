@@ -1051,6 +1051,10 @@
             Emby
             <span class="tb-state-dot" data-state="unknown" title="加载中"></span>
         </button>
+        <button class="tb-btn" onclick="showOrganizeConfig()" title="配置媒体库 hardlink 目标根 (MOVIES_ROOT/TV_ROOT)">
+            <i class="bi bi-folder-symlink"></i>
+            媒体库
+        </button>
         <button class="tb-btn" onclick="openScanModal()" title="后台扫描全库 + 自动识别元数据">
             <i class="bi bi-radar"></i>
             扫库
@@ -1783,7 +1787,83 @@
     </div>
 </div>
 
+<!-- ── ORGANIZE CONFIG MODAL (Phase 4A.5) ────────────────────── -->
+<div class="modal fade" id="organizeConfigModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-folder-symlink me-2" style="color:var(--teal);"></i>媒体库目标根
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-secondary small mb-3">
+                    配置 hardlink 目标根目录。整理时电影会被 hardlink 到 <code>MOVIES_ROOT/&lt;Title (Year)&gt;/&lt;basename&gt;.mkv</code>，
+                    剧集 hardlink 到 <code>TV_ROOT/&lt;Series (Year)&gt;/Season NN/&lt;basename&gt;.mkv</code> + 自动写 NFO。
+                    路径必须是 NAS 上的绝对路径，且对 NAS 用户可写。
+                </p>
+
+                <div class="mb-3">
+                    <label class="form-label">
+                        <strong>MOVIES_ROOT</strong>
+                        <span class="badge bg-secondary ms-1" id="organize-movies-badge">未配置</span>
+                    </label>
+                    <input type="text" class="form-control" id="organize-movies-input"
+                           placeholder="/share/CACHEDEV2_DATA/media/movies">
+                    <div class="form-text">电影 hardlink 根目录</div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">
+                        <strong>TV_ROOT</strong>
+                        <span class="badge bg-secondary ms-1" id="organize-tv-badge">未配置</span>
+                    </label>
+                    <input type="text" class="form-control" id="organize-tv-input"
+                           placeholder="/share/CACHEDEV2_DATA/media/tv">
+                    <div class="form-text">剧集 hardlink 根目录（tvshow.nfo 落在 series 根，episode NFO 落在 Season NN 内）</div>
+                </div>
+                <div id="organize-test-status" class="mt-2 small"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-info btn-sm" onclick="testOrganizeConfig()">
+                    测试目录
+                </button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                <button type="button" class="btn btn-primary" onclick="saveOrganizeConfig()">
+                    <i class="bi bi-check2 me-1"></i>保存
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ── ORGANIZE PREVIEW/CONFIRM MODAL (Phase 4A.4) ─────────── -->
+<div class="modal fade" id="organizeModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-folder-symlink me-2" style="color:var(--teal);"></i>整理到媒体库
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="organize-modal-body">
+                    <!-- JS: renderOrganizePreview() / renderOrganizeResult() 注入 -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="organize-confirm-btn"
+                        style="display:none;" onclick="confirmOrganize()">
+                    <i class="bi bi-check2 me-1"></i>确认整理
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script src="/static/app.js?v=2026-05-14f"></script>
+<script src="/static/app.js?v=2026-05-15a"></script>
 </body>
 </html>

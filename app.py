@@ -3732,6 +3732,62 @@ def test_emby_config():
     return jsonify(result)
 
 
+# ─── Organize (Phase 4A.5): MOVIES_ROOT / TV_ROOT 配置 ────────
+
+
+@app.route("/api/config/organize", methods=["GET"])
+@require_token
+def get_organize_config():
+    cfg = load_organize_config()
+    return jsonify({
+        "movies_root": cfg.get("movies_root", ""),
+        "tv_root": cfg.get("tv_root", ""),
+        "configured": bool(cfg.get("movies_root") and cfg.get("tv_root")),
+    })
+
+
+@app.route("/api/config/organize", methods=["POST"])
+@require_token
+def set_organize_config():
+    """落盘 MOVIES_ROOT / TV_ROOT。两个 path 必须 absolute（防相对路径歧义）。"""
+    data = request.json or {}
+    movies_root = (data.get("movies_root") or "").strip()
+    tv_root = (data.get("tv_root") or "").strip()
+    if not movies_root or not tv_root:
+        return jsonify({"ok": False, "message": "movies_root and tv_root required"}), 400
+    if not movies_root.startswith("/") or not tv_root.startswith("/"):
+        return jsonify({"ok": False, "message": "paths must be absolute (start with /)"}), 400
+    save_organize_config({"movies_root": movies_root, "tv_root": tv_root})
+    return jsonify({"ok": True, "configured": True})
+
+
+@app.route("/api/config/organize/test", methods=["POST"])
+@require_token
+def test_organize_config():
+    """SSH 检查两个 root 目录存在 + 可写。body 可传新 path 直接测不落盘。"""
+    data = request.json or {}
+    cfg = load_organize_config()
+    movies_root = (data.get("movies_root") or "").strip() or cfg.get("movies_root", "")
+    tv_root = (data.get("tv_root") or "").strip() or cfg.get("tv_root", "")
+    if not movies_root or not tv_root:
+        return jsonify({"ok": False, "message": "movies_root and tv_root required"}), 400
+    rc_m, _, _ = ssh_exec(
+        f"test -d {shlex.quote(movies_root)} -a -w {shlex.quote(movies_root)}",
+        timeout=10,
+    )
+    rc_t, _, _ = ssh_exec(
+        f"test -d {shlex.quote(tv_root)} -a -w {shlex.quote(tv_root)}",
+        timeout=10,
+    )
+    return jsonify({
+        "movies_ok": rc_m == 0,
+        "tv_ok": rc_t == 0,
+        "ok": rc_m == 0 and rc_t == 0,
+        "movies_root": movies_root,
+        "tv_root": tv_root,
+    })
+
+
 def _open_db_conn():
     """Mint a fresh sqlite3 connection for background workers (not request-scoped)."""
     return destructive_action.open_connection(DB_PATH)

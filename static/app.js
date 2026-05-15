@@ -986,6 +986,13 @@ async function showDetail(path) {
             innerHTML: '<span class="spinner-border spinner-border-sm me-1"></span>检查缓存...',
             disabled: true,
         });
+        // Phase 4A.4: 整理到媒体库按钮（仅在已识别 movie/tv 时显示）
+        const organizeBtn = createElement("button", {
+            className: "btn btn-sm btn-outline-success ms-1",
+            innerHTML: '<i class="bi bi-folder-symlink me-1"></i>整理到媒体库',
+            style: "display:none;",
+        });
+        organizeBtn.addEventListener("click", () => openOrganize(file.path));
         const aiResult = createElement("div", { className: "mt-2" });
         aiResult.__videoPath = file.path;
 
@@ -1019,6 +1026,11 @@ async function showDetail(path) {
             } else {
                 aiBtn.innerHTML = '<i class="bi bi-stars me-1"></i>AI 识别（TMDB）';
             }
+            // Phase 4A.4: 已识别且 media_type 是 movie/tv → 显示整理按钮
+            const mt = cacheData.cached && cacheData.media_type;
+            if (mt === "movie" || mt === "tv") {
+                organizeBtn.style.display = "inline-block";
+            }
         }).finally(() => {
             aiBtn.disabled = false;
         });
@@ -1038,6 +1050,11 @@ async function showDetail(path) {
                 renderMetadataCard(aiResult, data);
                 // 写入成功 → 旧的 cache 卡片用新数据替换（让用户看到刚 cache 的）
                 cachedCard.innerHTML = "";
+                // Phase 4A.4: 识别成功且 media_type 是 movie/tv → 显示整理按钮
+                const mt = data && (data.media_type || (data.cached && data.cached.media_type));
+                if (mt === "movie" || mt === "tv") {
+                    organizeBtn.style.display = "inline-block";
+                }
             } catch (err) {
                 aiResult.innerHTML = "";
                 aiResult.appendChild(createElement("p", {
@@ -1051,6 +1068,7 @@ async function showDetail(path) {
         aiSection.appendChild(cachedCard);
         aiSection.appendChild(nfoCard);
         aiSection.appendChild(aiBtn);
+        aiSection.appendChild(organizeBtn);
         aiSection.appendChild(aiResult);
         content.appendChild(aiSection);
     }
@@ -3505,4 +3523,299 @@ async function loadWatchedStale() {
         console.error("[loadWatchedStale] failed:", e);
         container.innerHTML = '<div class="text-danger py-3 text-center">加载异常</div>';
     }
+}
+
+
+// ==================== Phase 4A.5 媒体库目标根配置 ====================
+
+let organizeConfigModal = null;
+
+async function showOrganizeConfig() {
+    if (!organizeConfigModal) {
+        organizeConfigModal = new bootstrap.Modal(document.getElementById("organizeConfigModal"));
+    }
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/organize`);
+        const cfg = await res.json();
+        document.getElementById("organize-movies-input").value = cfg.movies_root || "";
+        document.getElementById("organize-tv-input").value = cfg.tv_root || "";
+        _setOrganizeBadge("organize-movies-badge", !!cfg.movies_root);
+        _setOrganizeBadge("organize-tv-badge", !!cfg.tv_root);
+    } catch (err) {
+        console.error("load organize config failed", err);
+    }
+    document.getElementById("organize-test-status").innerHTML = "";
+    organizeConfigModal.show();
+}
+
+function _setOrganizeBadge(elId, configured) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    if (configured) {
+        el.textContent = "已配置";
+        el.className = "badge bg-success ms-1";
+    } else {
+        el.textContent = "未配置";
+        el.className = "badge bg-secondary ms-1";
+    }
+}
+
+async function testOrganizeConfig() {
+    const status = document.getElementById("organize-test-status");
+    status.innerHTML = '<span class="text-secondary">SSH 测试中...</span>';
+    const movies_root = document.getElementById("organize-movies-input").value.trim();
+    const tv_root = document.getElementById("organize-tv-input").value.trim();
+    const body = {};
+    if (movies_root) body.movies_root = movies_root;
+    if (tv_root) body.tv_root = tv_root;
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/organize/test`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (data.ok) {
+            status.innerHTML = `<span class="text-success">✓ 两个目录都存在且可写</span>`;
+        } else {
+            const issues = [];
+            if (data.movies_ok === false) issues.push(`MOVIES_ROOT (${escapeHtml(data.movies_root || "")}) 不存在或不可写`);
+            if (data.tv_ok === false) issues.push(`TV_ROOT (${escapeHtml(data.tv_root || "")}) 不存在或不可写`);
+            if (!issues.length && data.message) issues.push(escapeHtml(data.message));
+            status.innerHTML = `<span class="text-danger">✗ ${issues.join("；")}</span>`;
+        }
+    } catch (err) {
+        status.innerHTML = `<span class="text-danger">网络错误: ${escapeHtml(err.message)}</span>`;
+    }
+}
+
+async function saveOrganizeConfig() {
+    const movies_root = document.getElementById("organize-movies-input").value.trim();
+    const tv_root = document.getElementById("organize-tv-input").value.trim();
+    if (!movies_root || !tv_root) {
+        alert("MOVIES_ROOT 和 TV_ROOT 都必填");
+        return;
+    }
+    if (!movies_root.startsWith("/") || !tv_root.startsWith("/")) {
+        alert("路径必须是绝对路径（以 / 开头）");
+        return;
+    }
+    try {
+        const res = await apiFetch(`${API_BASE}/api/config/organize`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ movies_root, tv_root }),
+        });
+        const data = await res.json();
+        if (!data.ok) {
+            alert("保存失败：" + (data.message || res.status));
+            return;
+        }
+        addLog("媒体库目标根已保存", "success");
+        showOrganizeConfig();   // refresh badges
+    } catch (err) {
+        alert(`网络错误: ${err.message}`);
+    }
+}
+
+
+// ==================== Phase 4A.4 整理到媒体库 ====================
+
+let organizeModal = null;
+let _organizeAction = null;   // {action_id, signed_token, item}
+
+async function openOrganize(srcPath) {
+    if (!organizeModal) {
+        organizeModal = new bootstrap.Modal(document.getElementById("organizeModal"));
+    }
+    const path = srcPath || currentFilePath;
+    if (!path) {
+        alert("没有选中文件");
+        return;
+    }
+    // 渲染 loading 状态
+    document.getElementById("organize-modal-body").innerHTML =
+        '<div class="text-secondary py-3 text-center"><i class="bi bi-hourglass-split"></i> 计算目标路径...</div>';
+    document.getElementById("organize-confirm-btn").style.display = "none";
+    organizeModal.show();
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/action/preview`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ kind: "organize", items: [{ src_path: path }] }),
+        });
+        if (!res.ok) {
+            const body = await res.json();
+            renderOrganizeError(body);
+            return;
+        }
+        const body = await res.json();
+        const item = body.items[0];
+        _organizeAction = {
+            action_id: body.action_id,
+            signed_token: body.signed_token,
+            item,
+        };
+        renderOrganizePreview(item);
+        document.getElementById("organize-confirm-btn").style.display = "inline-block";
+    } catch (err) {
+        document.getElementById("organize-modal-body").innerHTML =
+            `<div class="text-danger py-3 text-center">网络错误: ${escapeHtml(err.message)}</div>`;
+    }
+}
+
+function renderOrganizeError(body) {
+    const errorMessages = {
+        organize_roots_not_configured: "尚未配置 MOVIES_ROOT / TV_ROOT。请先点 topbar「媒体库」按钮配置。",
+        src_missing: "源文件不存在或 SSH 无法访问。",
+        src_not_identified: "此文件尚未识别媒体类型。请先点详情面板「识别」按钮。",
+        organize_not_applicable: `无法整理: ${body.reason || "未知原因"}`,
+    };
+    const msg = errorMessages[body.error] || (body.message || body.error || "未知错误");
+    document.getElementById("organize-modal-body").innerHTML = `
+        <div class="alert alert-warning mb-0">
+            <i class="bi bi-exclamation-triangle me-2"></i>
+            <strong>${escapeHtml(body.error || "error")}</strong><br>
+            ${escapeHtml(msg)}
+        </div>
+    `;
+}
+
+function renderOrganizePreview(item) {
+    const plan = item.computed_plan;
+    const status = item.dst_status;
+    const mediaTypeLabel = item.media_type === "movie" ? "电影" : "剧集";
+    const tvMeta = item.media_type === "tv"
+        ? `<div class="small text-secondary">Season ${item.season_number} · Episode ${item.episode_number}</div>`
+        : "";
+
+    // 状态徽章
+    const badges = [];
+    if (status.already_linked) {
+        badges.push('<span class="badge bg-info ms-1">已 hardlinked（idempotent skip）</span>');
+    }
+    if (status.conflict) {
+        badges.push('<span class="badge bg-warning ms-1">⚠ dst 已存在但 inode 不同（confirm 会失败）</span>');
+    }
+    if (status.nfo_path_exists) {
+        badges.push('<span class="badge bg-secondary ms-1">NFO 已存在（保留不覆盖）</span>');
+    }
+    if (status.tvshow_nfo_exists) {
+        badges.push('<span class="badge bg-secondary ms-1">tvshow.nfo 已存在（保留不覆盖）</span>');
+    }
+    const badgesHtml = badges.length ? `<div class="mb-2">${badges.join(" ")}</div>` : "";
+
+    const tvshowHtml = plan.tvshow_nfo_path
+        ? `<div class="mb-2"><strong>tvshow.nfo:</strong><br><code class="small">${escapeHtml(plan.tvshow_nfo_path)}</code></div>`
+        : "";
+
+    document.getElementById("organize-modal-body").innerHTML = `
+        ${badgesHtml}
+        <div class="mb-2"><strong>源文件:</strong><br><code class="small">${escapeHtml(item.src_path)}</code></div>
+        <div class="mb-2">
+            <strong>识别结果:</strong> ${escapeHtml(item.title)}${item.year ? " (" + item.year + ")" : ""}
+            <span class="badge bg-primary ms-1">${mediaTypeLabel}</span>
+            ${item.tmdb_id ? `<span class="badge bg-secondary ms-1">tmdb_id=${escapeHtml(item.tmdb_id)}</span>` : ""}
+            ${tvMeta}
+        </div>
+        <hr class="my-2" style="border-color:var(--border);">
+        <div class="mb-2"><strong>目标文件:</strong><br><code class="small">${escapeHtml(plan.dst_path)}</code></div>
+        <div class="mb-2"><strong>NFO:</strong><br><code class="small">${escapeHtml(plan.nfo_path)}</code></div>
+        ${tvshowHtml}
+        <div class="alert alert-info mt-2 mb-0 small">
+            <i class="bi bi-info-circle me-1"></i>
+            操作通过 <strong>硬链接</strong>创建目标（不复制不移动），源文件 inode 不变 → qBittorrent 保种继续。
+        </div>
+    `;
+}
+
+async function confirmOrganize() {
+    if (!_organizeAction) return;
+    const btn = document.getElementById("organize-confirm-btn");
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>执行中...';
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/action/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                action_id: _organizeAction.action_id,
+                signed_token: _organizeAction.signed_token,
+            }),
+        });
+        const body = await res.json();
+        renderOrganizeResult(body);
+    } catch (err) {
+        document.getElementById("organize-modal-body").innerHTML +=
+            `<div class="alert alert-danger mt-3">网络错误: ${escapeHtml(err.message)}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-check2 me-1"></i>确认整理';
+        btn.style.display = "none";   // 不允许重复点
+    }
+}
+
+function renderOrganizeResult(body) {
+    const items = (body.result && body.result.items) || [];
+    if (!items.length) {
+        document.getElementById("organize-modal-body").innerHTML += `
+            <div class="alert alert-warning mt-3">
+                action status=${escapeHtml(body.status || "?")}: ${escapeHtml(body.error || body.hint || "无 items")}
+            </div>
+        `;
+        return;
+    }
+    const item = items[0];
+    let html = "";
+    if (item.status === "succeeded") {
+        html = `
+            <div class="alert alert-success mt-3 mb-0">
+                <i class="bi bi-check-circle me-1"></i>
+                <strong>整理成功</strong><br>
+                <code class="small">${escapeHtml(item.dst_path)}</code>
+                <div class="small mt-1 text-secondary">
+                    inode 共享 (${item.src_inode} == ${item.dst_inode}) — qBit 保种正常
+                </div>
+            </div>
+        `;
+        // 部分成功：NFO 失败
+        if (item.nfo_status && (item.nfo_status.startsWith("failed:") || item.nfo_status.startsWith("skipped: cache_drift"))) {
+            html += `
+                <div class="alert alert-warning mt-2 mb-0 small">
+                    <i class="bi bi-exclamation-triangle me-1"></i>
+                    NFO 状态: ${escapeHtml(item.nfo_status)}（hardlink 成功，可手工补 NFO）
+                </div>
+            `;
+        }
+        if (item.tvshow_nfo_status && item.tvshow_nfo_status.startsWith("failed:")) {
+            html += `
+                <div class="alert alert-warning mt-2 mb-0 small">
+                    tvshow.nfo: ${escapeHtml(item.tvshow_nfo_status)}
+                </div>
+            `;
+        }
+    } else if (item.status === "already_linked") {
+        html = `
+            <div class="alert alert-info mt-3 mb-0">
+                <i class="bi bi-info-circle me-1"></i>
+                <strong>已经整理过（idempotent skip）</strong><br>
+                <code class="small">${escapeHtml(item.dst_path)}</code>
+                <div class="small mt-1 text-secondary">
+                    shared_inode=${item.shared_inode}
+                </div>
+            </div>
+        `;
+    } else {
+        html = `
+            <div class="alert alert-danger mt-3 mb-0">
+                <i class="bi bi-x-circle me-1"></i>
+                <strong>整理失败</strong><br>
+                <code class="small">${escapeHtml(item.reason || "unknown")}</code>
+                ${item.hint ? `<div class="small mt-2"><strong>提示:</strong> ${escapeHtml(item.hint)}</div>` : ""}
+            </div>
+        `;
+    }
+    document.getElementById("organize-modal-body").innerHTML += html;
 }
