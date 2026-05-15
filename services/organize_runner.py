@@ -92,6 +92,33 @@ def _clear_active(action_id: str) -> None:
             _active_thread = None
 
 
+# codex r3 BLOCKER 2: inline organize 也必须持 active lock，否则一个 background
+# 跑期间 user 再触发一个 ≤5 item 的 inline organize 会并发跑 hardlink/NFO/qBit
+# 副作用 (违反 "全局唯一 active organize" 契约)
+_INLINE_LOCK_SENTINEL = "__inline_organize__"
+
+
+def try_acquire_inline_lock() -> bool:
+    """Inline organize 借用同一 active lock。返 True 表示成功，False 表示已有
+    background 或别处 inline organize 在跑。失败 caller 应 fail-fast，不允许并发副作用。"""
+    global _active_action_id, _active_thread
+    with _active_lock:
+        if _active_action_id is not None:
+            return False
+        _active_action_id = _INLINE_LOCK_SENTINEL
+        _active_thread = threading.current_thread()
+        return True
+
+
+def release_inline_lock() -> None:
+    """释放 inline lock，仅清当前 sentinel（防误清 background worker 标记）。"""
+    global _active_action_id, _active_thread
+    with _active_lock:
+        if _active_action_id == _INLINE_LOCK_SENTINEL:
+            _active_action_id = None
+            _active_thread = None
+
+
 # ─── public API ───
 
 

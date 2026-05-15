@@ -2237,44 +2237,68 @@ def _organize_executor(payload: dict, selected_indices: list[int] | None = None)
     Phase 4B：保留作为 inline (≤ ORGANIZE_BATCH_INLINE_THRESHOLD) 路径。
     codex r1 BLOCKER 1: inline 路径也支持 selected_indices（≤5 文件用户也可能勾子集）
     codex r1 IMP5: 单 item 异常被 catch 标 failed，跟 background 行为对齐。
+    codex r3 BLOCKER 2: 持 organize_runner inline lock，防一个 background organize
+    跑期间 inline organize 并发跑 hardlink/NFO/qBit 副作用（违反「全局唯一 active organize」契约）。
     """
-    items = payload["items"]
-    selected_set: set[int] | None = (
-        set(selected_indices) if selected_indices is not None else None
-    )
-    results: list[dict] = []
-    for idx, it in enumerate(items):
-        src_path = it.get("src_path")
-        if selected_set is not None and idx not in selected_set:
-            results.append({
-                "src_path": src_path, "status": "skipped_by_user", "index": idx,
-            })
-            continue
-        try:
-            r = _organize_executor_one_item(it, it.get("metadata_snapshot"))
-            r.setdefault("src_path", src_path)
-            r.setdefault("status", "failed")
-        except Exception as e:  # noqa: BLE001
-            logger.exception(f"[organize/inline] item {src_path!r} crashed")
-            r = {
-                "src_path": src_path, "status": "failed",
-                "reason": f"executor_crashed: {type(e).__name__}: {e}",
-            }
-        r["index"] = idx
-        results.append(r)
+    # codex r3 BLOCKER 2: acquire inline lock — 失败 = 已有 organize 在跑，全 fail
+    if not organize_runner.try_acquire_inline_lock():
+        active = organize_runner.get_active_action_id()
+        items = payload["items"]
+        logger.warning(
+            f"[organize/inline] another organize active ({active!r}); rejecting {len(items)} items"
+        )
+        results = [{
+            "src_path": it.get("src_path"), "status": "failed", "index": idx,
+            "reason": "another_organize_running",
+            "hint": f"另一个 organize ({active}) 正在执行；等其完成或中止后再试。",
+        } for idx, it in enumerate(items)]
+        counts = {"failed": len(results)}
+        return {
+            "items": results, "status_counts": counts,
+            "total_succeeded": 0, "total_already_linked": 0,
+            "total_failed": len(results), "total_skipped_by_user": 0,
+        }
 
-    counts: dict[str, int] = {}
-    for r in results:
-        counts[r["status"]] = counts.get(r["status"], 0) + 1
-    logger.info(f"[action/organize] done: {counts}")
-    return {
-        "items": results,
-        "status_counts": counts,
-        "total_succeeded": counts.get("succeeded", 0),
-        "total_already_linked": counts.get("already_linked", 0),
-        "total_failed": counts.get("failed", 0),
-        "total_skipped_by_user": counts.get("skipped_by_user", 0),
-    }
+    try:
+        items = payload["items"]
+        selected_set: set[int] | None = (
+            set(selected_indices) if selected_indices is not None else None
+        )
+        results: list[dict] = []
+        for idx, it in enumerate(items):
+            src_path = it.get("src_path")
+            if selected_set is not None and idx not in selected_set:
+                results.append({
+                    "src_path": src_path, "status": "skipped_by_user", "index": idx,
+                })
+                continue
+            try:
+                r = _organize_executor_one_item(it, it.get("metadata_snapshot"))
+                r.setdefault("src_path", src_path)
+                r.setdefault("status", "failed")
+            except Exception as e:  # noqa: BLE001
+                logger.exception(f"[organize/inline] item {src_path!r} crashed")
+                r = {
+                    "src_path": src_path, "status": "failed",
+                    "reason": f"executor_crashed: {type(e).__name__}: {e}",
+                }
+            r["index"] = idx
+            results.append(r)
+
+        counts: dict[str, int] = {}
+        for r in results:
+            counts[r["status"]] = counts.get(r["status"], 0) + 1
+        logger.info(f"[action/organize] done: {counts}")
+        return {
+            "items": results,
+            "status_counts": counts,
+            "total_succeeded": counts.get("succeeded", 0),
+            "total_already_linked": counts.get("already_linked", 0),
+            "total_failed": counts.get("failed", 0),
+            "total_skipped_by_user": counts.get("skipped_by_user", 0),
+        }
+    finally:
+        organize_runner.release_inline_lock()
 
 
 def _route_executor_by_kind(payload: dict) -> dict:

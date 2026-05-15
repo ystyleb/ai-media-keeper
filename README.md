@@ -223,12 +223,16 @@ python3 app.py
 # 284 passed (Phase 3 complete)
 ```
 
-生产部署用 `gunicorn`（**多 worker 必须设 `NAS_ACTION_SIGNING_KEY` env**，否则启动拒绝）：
+生产部署用 `gunicorn`，**强制单 worker**（`organize_runner` / `scanner` 用进程
+内 lock + abort flag，多 worker 会让 batch organize / 全库扫描互相打架）：
 
 ```bash
 pip install gunicorn
 export NAS_ACTION_SIGNING_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-gunicorn -b 127.0.0.1:8080 -w 2 app:app
+# IMPORTANT: -w 1 + 同步 WEB_CONCURRENCY=1（默认值，显式写防遗漏）
+# 真要 -w N，app.py 启动会 sys.exit(1) 拒启动；多 worker 需要 Phase 4C 改用
+# SQLite lease 跨进程互斥
+WEB_CONCURRENCY=1 gunicorn -b 127.0.0.1:8080 -w 1 app:app
 ```
 
 ## 路线图

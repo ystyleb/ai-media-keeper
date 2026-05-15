@@ -1702,6 +1702,45 @@ def test_confirm_selected_indices_out_of_range_returns_400(client, token, monkey
     assert resp2.get_json()["error"] == "selected_indices_out_of_range"
 
 
+def test_inline_organize_rejected_when_background_active(client, token, monkeypatch):
+    """codex r3 BLOCKER 2: 一个 background organize 在跑时, inline organize 应被拒
+    (避免并发 hardlink/NFO/qBit 副作用)."""
+    from services import organize_runner
+    _patch_organize_config(monkeypatch)
+    monkeypatch.setattr(app_module, "_ssh_stat_paths",
+                        lambda paths: _src_stat("/dl/x.mkv"))
+    _patch_cache(monkeypatch, _CachedStub(
+        title="Movie", media_type="movie", year=2024, tmdb_id="111",
+    ))
+
+    # 模拟已有 background organize 在跑：让 try_acquire_inline_lock 返 False
+    monkeypatch.setattr(organize_runner, "try_acquire_inline_lock", lambda: False)
+    monkeypatch.setattr(organize_runner, "get_active_action_id",
+                        lambda: "background-action-xyz")
+
+    # _organize_executor_one_item 不应被调用 (lock acquire 失败前)
+    boom = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("should NOT execute item when lock unavailable"))
+    monkeypatch.setattr(app_module, "_organize_executor_one_item", boom)
+
+    resp = client.post(
+        "/api/action/preview",
+        json={"kind": "organize", "items": [{"src_path": "/dl/x.mkv"}]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = resp.get_json()
+
+    resp2 = client.post(
+        "/api/action/confirm",
+        json={"action_id": body["action_id"], "signed_token": body["signed_token"]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 200
+    result = resp2.get_json()["result"]
+    assert result["status_counts"]["failed"] == 1
+    assert result["items"][0]["reason"] == "another_organize_running"
+
+
 def test_confirm_selected_indices_rejects_bool(client, token, monkeypatch):
     """codex r2 NIT: JSON true/false 不应作为合法 index（即使 Python bool 是 int 子类）."""
     _patch_organize_config(monkeypatch)
