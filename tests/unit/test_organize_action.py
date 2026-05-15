@@ -1815,3 +1815,118 @@ def test_confirm_concurrent_organize_rollbacks_to_pending(client, token, monkeyp
         ).fetchone()
     assert row["status"] == "pending"
     assert row["consumed_at"] is None
+
+
+# ─── Phase 4B background worker app-context regression ───
+# Bug: background worker thread 调 _organize_executor_one_item 直接撞
+# RuntimeError: Working outside of application context — get_db() 用 flask.g
+# 但 worker thread 没继承 request 的 app context。修法是引入
+# _organize_executor_one_item_threadsafe wrapper push app.app_context()。
+
+
+def test_threadsafe_wrapper_pushes_app_context_in_worker_thread():
+    """Regression: worker thread 调 wrapper 必须能拿到 app context（避免 get_db() 撞 RuntimeError）。
+
+    用真线程跑 wrapper，mock 掉里层 executor 让它检查 has_app_context() —
+    不要 mock app_context 自己，要验证 wrapper 真的 push 了一个 context。
+    """
+    import threading
+    from unittest.mock import patch
+    from flask import has_app_context
+
+    captured: dict = {}
+
+    def fake_inner(item, expected_metadata):
+        # worker thread 跑到这里时必须已经在 app context 里
+        captured["has_context"] = has_app_context()
+        return {"src_path": item["src_path"], "status": "succeeded"}
+
+    def run():
+        # main thread 此刻没 app context（test 没开 request_context），如果 wrapper
+        # 没 push context，里层 has_app_context() 必 False。
+        try:
+            with patch.object(app_module, "_organize_executor_one_item", fake_inner):
+                r = app_module._organize_executor_one_item_threadsafe(
+                    {"src_path": "/test/x.mkv"}, None,
+                )
+            captured["result"] = r
+        except Exception as e:  # noqa: BLE001
+            captured["error"] = f"{type(e).__name__}: {e}"
+
+    t = threading.Thread(target=run)
+    t.start()
+    t.join(timeout=5)
+
+    assert "error" not in captured, (
+        f"worker thread crashed: {captured.get('error')!r} — wrapper 没 push app context"
+    )
+    assert captured.get("has_context") is True, (
+        "wrapper 必须 push app context；当前 has_app_context() = False"
+    )
+    assert captured["result"]["status"] == "succeeded"
+
+
+def test_confirm_route_dispatches_background_via_threadsafe_wrapper(client, token, monkeypatch):
+    """Regression: confirm 路由起 worker 时必须传 threadsafe wrapper，不要传裸 executor。
+
+    Mock start_organize_executor 捕获 execute_one_item callable，断言它是
+    threadsafe wrapper（不是 _organize_executor_one_item 本体）。
+    """
+    captured: dict = {}
+
+    def fake_start(*, db_path, action_id, payload, execute_one_item, selected_indices):
+        captured["execute_one_item"] = execute_one_item
+
+    # 准备一个 N>5 的 organize action（强制走 background 分支）
+    org_cfg = {"movies_root": "/m", "tv_root": "/t"}
+    monkeypatch.setattr(app_module, "load_organize_config", lambda: org_cfg)
+
+    items = [{"src_path": f"/d/x{i}.mkv"} for i in range(6)]
+    stat_now = {
+        f"/d/x{i}.mkv": {"exists": True, "inode": 100 + i, "size_bytes": 1000, "mtime": 1000}
+        for i in range(6)
+    }
+    monkeypatch.setattr(
+        app_module, "_ssh_stat_paths",
+        lambda paths: {p: stat_now.get(p, {"exists": False}) for p in paths},
+    )
+
+    cached_by_path = {
+        f"/d/x{i}.mkv": _CachedStub(
+            title=f"Movie{i}", media_type="movie", year=2024, tmdb_id=f"tmdb{i}",
+        )
+        for i in range(6)
+    }
+    monkeypatch.setattr(
+        app_module.metadata_cache, "get_many_by_path",
+        lambda conn, paths, *, current_stats=None: {p: (cached_by_path[p], "hit") for p in paths if p in cached_by_path},
+    )
+
+    # preview
+    resp = client.post(
+        "/api/action/preview",
+        json={
+            "kind": "organize",
+            "items": [{"src_path": it["src_path"]} for it in items],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    action_id = body["action_id"]
+    signed = body["signed_token"]
+
+    # confirm → 走 background 分支（items > 5）
+    monkeypatch.setattr(app_module.organize_runner, "start_organize_executor", fake_start)
+    resp2 = client.post(
+        "/api/action/confirm",
+        json={"action_id": action_id, "signed_token": signed},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 202, resp2.get_json()
+
+    # 关键断言：传给 start_organize_executor 的 callable 是 threadsafe wrapper
+    cb = captured.get("execute_one_item")
+    assert cb is app_module._organize_executor_one_item_threadsafe, (
+        f"confirm 路由必须传 threadsafe wrapper 给 worker；实际传了 {cb!r}"
+    )

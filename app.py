@@ -2350,6 +2350,20 @@ def _organize_executor_one_item(item: dict, expected_metadata: dict | None) -> d
     }
 
 
+def _organize_executor_one_item_threadsafe(
+    item: dict, expected_metadata: dict | None
+) -> dict:
+    """Worker thread 调用的 wrapper：push 独立 Flask app context。
+
+    Worker thread 不继承 request 的 app context，直接调 get_db() 拿 g.db 会撞
+    `RuntimeError: Working outside of application context`。每 item 一个 app
+    context → 每 item 一个独立 SQLite connection（teardown_appcontext 自动 close），
+    不复用 request 的 g.db（也不该复用——sqlite3 connection thread-affinity）。
+    """
+    with app.app_context():
+        return _organize_executor_one_item(item, expected_metadata)
+
+
 def _organize_executor(payload: dict, selected_indices: list[int] | None = None) -> dict:
     """Phase 4A.3 inline 入口：循环调 _organize_executor_one_item。
 
@@ -2984,7 +2998,7 @@ def action_confirm():
                     db_path=DB_PATH,
                     action_id=action_id,
                     payload=payload,
-                    execute_one_item=_organize_executor_one_item,
+                    execute_one_item=_organize_executor_one_item_threadsafe,
                     selected_indices=selected_indices,
                 )
             except organize_runner.ConcurrentOrganizeError:
