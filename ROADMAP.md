@@ -7,6 +7,52 @@
 
 ## 已完成（截至 2026-05-15）
 
+### Phase 4 Phase B: 批量目录 organize
+
+Phase 4A 是单文件 manual organize。**Phase 4B** 把单步骤扩到一次性整理一整个目录（一个剧 25 集 / 一个发布版本的多 part），分类 + 勾选 + 后台进度 + abort。
+
+- **4B.0 schema TTL 调整 + helper**：
+  * `destructive_action.TTL_BY_KIND['organize']` 600 → 1800s（N=500 plan 给用户 30 min 审阅）
+  * `RUNNING_TIMEOUT_BY_KIND['organize']` 60 → 1800s（executor 跑 N=500 文件 5-8 min，reaper 不能误判）
+  * 新增 `update_running_result(conn, action_id, partial_result)` helper（仅 status='running' 时生效，避免踩 terminal 状态）
+  * `MAX_ORGANIZE_BATCH_ITEMS=500` + `ORGANIZE_BATCH_INLINE_THRESHOLD=5` 常量
+- **4B.1 dir-preview endpoint + batch cache**：
+  * `GET /api/organize/dir-preview?path=&max_depth=2&limit=500`：复用 `_list_video_paths` + `_ssh_stat_paths` 一次性批量 stat；调 `metadata_cache.get_many_by_path` 一次 SQL IN
+  * 6 状态分类：`will_link` / `already_linked` / `conflict` / `needs_identify` / `unsupported` / `not_applicable`
+  * 只读 dashboard，不签名、不落 destructive_actions row；返 counts + items + base_path/max_depth/limit_reached/total
+  * `services/metadata_cache.get_many_by_path` batch helper（500-chunk + stale 检测，替代 N 次 get_by_path）
+- **4B.2 preview multi-item + partial admission**：
+  * `_do_action_preview` organize 分支从 fail-fast 改 partial admission：所有可算 plan 的 items（will_link + already_linked + conflict）都进 payload 给 executor 处理；needs_identify / unsupported / not_applicable 仅进 preview_items 显示
+  * batch SSH stat: src + 所有 dst 合并 2 次 round-trip（之前 N×2 次）；batch metadata_cache batch SQL（之前 N 次单 SELECT）
+  * soft cap MAX_ORGANIZE_BATCH_ITEMS=500，超出 400 batch_too_large
+  * batch-level duplicate dst_path detection（同 batch 两 src → 同 dst → 后一个标 conflict + duplicate_dst_path_within_batch reason）
+  * 0 will_link → 不签名不落 row（节省 destructive_actions row + reaper noise）
+- **4B.3 background runner + status polling + abort**：
+  * `services/organize_runner.py`：单 thread + 模块级 `_active_lock` + `_active_action_id`（抄 scanner pattern）+ module-level `_abort_flags` dict
+  * `start_organize_executor(...)`、`request_abort(...)`、`get_organize_status(...)`、`try_acquire_inline_lock` / `release_inline_lock` 公共 API
+  * 提取 `_organize_executor_one_item`：per-item 核心逻辑 inline + background 共用（保证两路径行为一致）
+  * `/api/action/confirm` 分流：`kind=organize + items > 5` → 手动 atomic_consume + verify token + start background worker + return 202 + polling_url；否则 inline 同步
+  * `/api/action/status?id=<action_id>` 复用 destructive_actions.result_json 渐进式写（每 item commit 一次给前端 polling 即时看到）
+  * `/api/action/abort` POST 设 abort flag，worker 下一 item 边界自然退出（不取消正在跑的 SSH）
+  * 契约 #7（partial 部分成功）+ #8（preview 分类状态机）+ #9（progressive result_json）
+- **4B.4 三 step UI modal**：
+  * 文件浏览器目录行新增「整理目录」按钮（folder-symlink icon）
+  * `organizeBatchModal` modal-xl 三 step pane：dashboard / preview / progress
+  * step 1 dashboard：6 状态 counts cards + 折叠分组列表（will_link 默认展开 + 引导 needs_identify 用户先去文件视图批量识别）
+  * step 2 preview：紧凑 table + checkbox + 状态徽章 + 默认全勾 will_link；already_linked/conflict readonly disabled；全选/全不选 toggle
+  * step 3 progress：进度条 + status_counts + current_item + failed items 折叠列表 + abort 按钮
+  * request seq 防 stale response（codex r1 B2 模式）+ modal hidden 清 polling timer
+- **4B.5 端到端冒烟 + 6 轮 backend codex review + 文档**：
+  * 6 轮 backend codex review 累计 7 BLOCKER + 10 IMPORTANT + 5 NIT 全修
+  * 真机端到端冒烟见 README「整理到媒体库」section
+- **关键发现**（codex r1-r6 trace）：
+  * codex r3 BLOCKER 2 inline organize 不持 active lock → background + inline 可并发副作用，修法：`_organize_executor` 顶部 acquire `try_acquire_inline_lock`，失败全标 `another_organize_running` failed
+  * codex r4 BLOCKER `gunicorn -w N` 不会自动设 `WEB_CONCURRENCY=N` → r3 的 env check 被绕过 → 改用 `fcntl.flock(.worker.lock)` 跨进程硬锁
+  * codex r5 BLOCKER `gunicorn --preload` 模式 fcntl 被 fork 继承绕过 → 加 sys.argv 检测 + gunicorn.conf.py 模板 + on_starting hook
+  * codex r6 BLOCKER preload 通过 config file / `GUNICORN_CMD_ARGS` env 设置 sys.argv 无法捕获 → 加 `os.register_at_fork(after_in_child=...)` callback (preload-aware ground truth)
+  * **5 层 worker hard guard**（WEB_CONCURRENCY env + sys.argv check + fcntl.flock import-time + at_fork in child + gunicorn cfg hook）覆盖所有 gunicorn 启动路径下的 multi-worker / preload 风险；100% 多 worker safety 留 Phase 4C SQLite lease
+- **432 unit tests pass**（379 → 432，+53 涵盖 dir-preview / get_many / multi-item preview / background runner / status / abort / inline lock / fork callback / bool index reject）
+
 ### Phase 4 Phase A: 下载后 organize（hardlink + 独立目录 + NFO）
 
 PT 玩家的核心工作流：下载完文件留在 `/downloads/` 占位保种，手动 hardlink 到媒体库太繁琐 + 易错（特殊字符 / TV 季集编号 / NFO 单独写）。Phase 4A 把这块自动化。**手动触发版**（验证识别精度后再考虑批量 → Phase 4B / 自动监听 → Phase 4C）。

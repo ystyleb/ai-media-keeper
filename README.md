@@ -6,14 +6,21 @@ AI 原生的影视资源管理器（Phase 4A）。Web 版的 NAS 媒体库，专
 
 ## 核心功能
 
-### 整理到媒体库（Phase 4A 新增）
-- 🚚 **下载完一键整理**：详情面板「整理到媒体库」按钮 → preview 显示「源/识别/目标路径/NFO」→ confirm 后 atomic hardlink。源文件 inode 不变 → qBittorrent 继续保种
+### 整理到媒体库（Phase 4A 单文件 + Phase 4B 批量目录）
+- 🚚 **单文件 organize**（Phase 4A）：详情面板「整理到媒体库」按钮 → preview 显示「源/识别/目标路径/NFO」→ confirm 后 atomic hardlink。源文件 inode 不变 → qBittorrent 继续保种
+- 📦 **批量目录 organize**（Phase 4B 新增）：文件浏览器目录行「整理目录」按钮 → 三 step：
+  * **Step 1 dashboard**：递归扫目录里所有视频文件，6 状态分类（✓ 可整理 / ↻ 已 hardlinked / ⚠ 冲突 / ? 待识别 / ✗ 不支持 / ✗ 不适用）+ counts cards + 折叠分组列表
+  * **Step 2 multi-item preview**：紧凑 table + 默认全勾 will_link（已 link / 冲突 readonly disabled）+ 全选 / 全不选 + 状态徽章 + 目标路径预览
+  * **Step 3 progress**：后台 worker 跑 + 前端 polling 2s/次 + 进度条 + status_counts + current_item + 失败项折叠 + 中止按钮
+  * 单批上限 500 文件；items ≤ 5 走 inline 同步，> 5 走 background + polling
+  * 「全局唯一 active organize」契约：background + inline 共用同一 active lock，防硬链接 / NFO / qBit 副作用并发
 - 🎬 **自动目录约定**：电影 → `MOVIES_ROOT/<Title (Year)>/<basename>.mkv`，剧集 → `TV_ROOT/<Series (Year)>/Season NN/<basename>.mkv`，`tvshow.nfo` 落 series 根（Plex/Emby 标准结构）
 - 📝 **NFO 自动生成**：从 TMDB cache 构造 NFOPayload → 写 `<movie>` / `<episodedetails>` / `<tvshow>`（含 uniqueid + plot + cast + genres + rating）。已有 NFO 不覆盖（atomic create-only ln 保证）
 - ⚙️ **MOVIES_ROOT / TV_ROOT UI 配置**：topbar 「媒体库」按钮 → modal 输入两个根 + SSH 测试目录可写 + 落盘 `config/organize.json`
 - 🔒 **契约 #6 双 inode 锚定**：preview 抓 src inode → confirm 阶段（a）验 src inode 不变（防 mv 偷换）+（b）ln 后验 dst inode == src inode（保证真 hardlink 不是 cp）
 - 🛡️ **race 防护**：`[ -d dst ]` pre-check + `[ ! -f dst ]` post-stat 防 silent ln-into-dir；冲突时不自动 cleanup（POSIX 无 atomic verify-then-unlink），返 orphan path hint 让 user SSH 手工查
-- 📊 **部分成功语义**：hardlink ok + NFO 失败 = `status='succeeded' + nfo_status='failed: ...'`，UI 单独 warning 提示「可手工补 NFO」，不回滚 hardlink
+- 📊 **部分成功语义**（契约 #7）：hardlink ok + NFO 失败 = `status='succeeded' + nfo_status='failed: ...'`；批量场景每个 item 独立 status，整个 action.status='succeeded' 即使 some items failed
+- 🚀 **背景 worker + abort**（Phase 4B）：渐进式 result_json 写 → UI polling 看实时进度；abort 设标志位让 worker 下一 item 边界自然退出（不取消正在跑的 SSH）
 
 ### 媒体管理
 - 🎬 **AI 自动识别**：guessit 解析文件名 → TMDB 搜索候选 → DeepSeek V4 grounded select（**契约 #3：LLM 永远只从真实候选里选 ID，不生成 ID**）
@@ -220,7 +227,7 @@ python3 app.py
 
 ```bash
 .venv/bin/python -m pytest tests/unit/ -q
-# 284 passed (Phase 3 complete)
+# 432 passed (Phase 4B complete)
 ```
 
 生产部署用 `gunicorn`，**强制单 worker + 禁 preload**（`organize_runner` /
