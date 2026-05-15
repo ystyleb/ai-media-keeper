@@ -22,6 +22,7 @@ from services import identify as identify_svc
 from services import llm
 from services import metadata_cache
 from services import nfo_writer
+from services import organize as organize_svc
 from services import scanner
 from services import watch_sync
 from services.metadata.tmdb import TMDBProvider
@@ -1463,6 +1464,20 @@ def _ssh_stat_paths(paths: list[str]) -> dict[str, dict]:
     return result
 
 
+def _ssh_mkdir_p(path: str) -> tuple[int, str, str]:
+    """SSH `mkdir -p <path>`. 已存在不抛错。返回 (rc, stdout, stderr)。"""
+    return ssh_exec(f"mkdir -p {shlex.quote(path)}", timeout=10)
+
+
+def _ssh_ln(src: str, dst: str) -> tuple[int, str, str]:
+    """SSH `ln <src> <dst>` 创建硬链接。
+
+    Phase 4A.2: 不加 -f flag —— dst 已存在直接报错（让 executor 显式判断
+    already_linked vs conflict），避免静默覆盖。
+    """
+    return ssh_exec(f"ln {shlex.quote(src)} {shlex.quote(dst)}", timeout=10)
+
+
 def _build_delete_snapshot(
     candidates: list[dict], *, mode: str = "lenient"
 ) -> dict:
@@ -2067,6 +2082,126 @@ def _do_action_preview(kind: str, raw_data: dict):
                 "Archive 操作目前未启用：confirm 会落 status='failed' + "
                 "error='ArchiveDisabledError: archive_kind_disabled_in_phase3: ...'"
             ),
+        })
+    if kind == "organize":
+        # Phase 4A.3: hardlink + 独立目录 + .nfo 整理到媒体库。契约 #1 双段 + Pattern C 双 inode 锚定。
+        items_in = raw_data.get("items") or []
+        if not isinstance(items_in, list) or not items_in:
+            return jsonify({"error": "items required for organize"}), 400
+
+        # [code-enforced] 必须配置 MOVIES_ROOT / TV_ROOT
+        org_cfg = load_organize_config()
+        movies_root = (org_cfg.get("movies_root") or "").strip()
+        tv_root = (org_cfg.get("tv_root") or "").strip()
+        if not (movies_root and tv_root):
+            return jsonify({
+                "error": "organize_roots_not_configured",
+                "message": "请先在 UI 配置 MOVIES_ROOT / TV_ROOT 后再 organize",
+            }), 400
+
+        db = get_db()
+        src_paths = [
+            (it.get("src_path") or "").strip()
+            for it in items_in
+            if (it.get("src_path") or "").strip()
+        ]
+        if len(src_paths) != len(items_in):
+            return jsonify({"error": "src_path required per item"}), 400
+        src_stat_now = _ssh_stat_paths(src_paths)
+
+        plans: list[dict] = []
+        for it in items_in:
+            src_path = (it.get("src_path") or "").strip()
+            src_stat = src_stat_now.get(src_path, {"exists": False})
+            if not src_stat.get("exists"):
+                return jsonify({"error": "src_missing", "src_path": src_path}), 400
+
+            cached, _status = metadata_cache.get_by_path(
+                db, src_path,
+                current_mtime=src_stat.get("mtime"),
+                current_inode=src_stat.get("inode"),
+            )
+            if cached is None or cached.media_type not in ("movie", "tv"):
+                return jsonify({
+                    "error": "src_not_identified",
+                    "src_path": src_path,
+                    "message": "请先识别此文件再 organize（详情面板 → 识别）",
+                }), 400
+
+            try:
+                plan = organize_svc.compute_organize_plan(
+                    src_path, cached, movies_root, tv_root,
+                )
+            except organize_svc.OrganizeNotApplicable as e:
+                return jsonify({
+                    "error": "organize_not_applicable",
+                    "src_path": src_path,
+                    "reason": str(e),
+                }), 400
+
+            dst_check_paths = [plan.dst_dir, plan.dst_path, plan.nfo_path]
+            if plan.tvshow_nfo_path:
+                dst_check_paths.append(plan.tvshow_nfo_path)
+            dst_stat = _ssh_stat_paths(dst_check_paths)
+
+            dst_path_now = dst_stat.get(plan.dst_path, {"exists": False})
+            already_linked = bool(
+                dst_path_now.get("exists")
+                and dst_path_now.get("inode") == src_stat.get("inode")
+            )
+            dst_conflict = bool(dst_path_now.get("exists") and not already_linked)
+
+            plans.append({
+                "src_path": src_path,
+                "src_snapshot": {
+                    "inode": src_stat.get("inode"),
+                    "size_bytes": src_stat.get("size_bytes"),
+                    "mtime": src_stat.get("mtime"),
+                },
+                "media_type": plan.media_type,
+                "tmdb_id": plan.tmdb_id,
+                "title": plan.title,
+                "year": plan.year,
+                "season_number": plan.season_number,
+                "episode_number": plan.episode_number,
+                "computed_plan": {
+                    "dst_dir": plan.dst_dir,
+                    "dst_path": plan.dst_path,
+                    "nfo_path": plan.nfo_path,
+                    "tvshow_nfo_path": plan.tvshow_nfo_path,
+                },
+                "dst_status": {
+                    "dst_dir_exists": dst_stat.get(plan.dst_dir, {}).get("exists", False),
+                    "dst_path_exists": dst_path_now.get("exists", False),
+                    "nfo_path_exists": dst_stat.get(plan.nfo_path, {}).get("exists", False),
+                    "tvshow_nfo_exists": (
+                        dst_stat.get(plan.tvshow_nfo_path, {}).get("exists", False)
+                        if plan.tvshow_nfo_path else False
+                    ),
+                    "already_linked": already_linked,
+                    "conflict": dst_conflict,
+                },
+            })
+
+        payload = {
+            "kind": "organize",
+            "items": plans,
+            "snapshot": {"captured_at": int(time.time())},
+        }
+        res = destructive_action.create_preview(
+            get_db(),
+            kind="organize",
+            payload=payload,
+            server_secret=SERVER_SECRET,
+            created_by="web_ui",
+        )
+        return jsonify({
+            "action_id": res.action_id,
+            "signed_token": res.signed_token,
+            "expires_at": res.expires_at,
+            "kind": "organize",
+            "items": plans,
+            "items_count": len(plans),
         })
     return jsonify({"error": f"kind '{kind}' not supported in spike"}), 400
 
