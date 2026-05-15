@@ -401,6 +401,18 @@ function renderFiles(files) {
             openBtn.innerHTML = '<i class="bi bi-folder2-open"></i>';
             openBtn.addEventListener("click", () => loadFiles(file.path));
             btnGroup.appendChild(openBtn);
+
+            // Phase 4B.4: 目录可批量整理
+            const batchBtn = createElement("button", {
+                className: "btn btn-outline-success",
+                title: "批量整理目录到媒体库"
+            });
+            batchBtn.innerHTML = '<i class="bi bi-folder-symlink"></i>';
+            batchBtn.addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                openOrganizeBatch(file.path);
+            });
+            btnGroup.appendChild(batchBtn);
         } else {
             const infoBtn = createElement("button", {
                 className: "btn btn-outline-info",
@@ -3882,4 +3894,482 @@ function renderOrganizeResult(body) {
         `;
     }
     document.getElementById("organize-modal-body").innerHTML += html;
+}
+
+
+// ==================== Phase 4B.4 批量整理目录 ====================
+
+let batchModal = null;
+// 当前 batch 操作状态：{request_id, dir_path, dashboard, preview_data, action_id, signed_token, polling_timer}
+let _batchState = null;
+let _batchRequestSeq = 0;
+
+// 状态徽章映射
+const _BATCH_STATUS_BADGE = {
+    will_link: '<span class="badge bg-success">✓ 可整理</span>',
+    already_linked: '<span class="badge bg-info">↻ 已 hardlinked</span>',
+    conflict: '<span class="badge bg-warning text-dark">⚠ 冲突</span>',
+    needs_identify: '<span class="badge bg-secondary">? 待识别</span>',
+    unsupported: '<span class="badge bg-secondary">✗ 不支持</span>',
+    not_applicable: '<span class="badge bg-secondary">✗ 不适用</span>',
+};
+
+const _BATCH_GROUP_LABELS = {
+    will_link: "✓ 可整理",
+    already_linked: "↻ 已 hardlinked（跳过）",
+    conflict: "⚠ 目标冲突（confirm 会失败）",
+    needs_identify: "? 待识别（请先去文件视图批量识别）",
+    unsupported: "✗ 媒体类型不支持",
+    not_applicable: "✗ 不适用",
+};
+
+
+function _initBatchModal() {
+    if (batchModal) return;
+    batchModal = new bootstrap.Modal(document.getElementById("organizeBatchModal"));
+    document.getElementById("organizeBatchModal").addEventListener("hidden.bs.modal", () => {
+        // stale response 拦截 + 清 polling timer
+        ++_batchRequestSeq;
+        if (_batchState && _batchState.polling_timer) {
+            clearTimeout(_batchState.polling_timer);
+        }
+        _batchState = null;
+        ["batch-next-btn", "batch-confirm-btn", "batch-abort-btn"].forEach((id) => {
+            const b = document.getElementById(id);
+            if (b) b.style.display = "none";
+        });
+    });
+    // bind footer button click handlers
+    document.getElementById("batch-next-btn").addEventListener("click", proceedToBatchPreview);
+    document.getElementById("batch-confirm-btn").addEventListener("click", confirmBatchOrganize);
+    document.getElementById("batch-abort-btn").addEventListener("click", abortBatchOrganize);
+}
+
+
+function _showBatchStep(step) {
+    ["dashboard", "preview", "progress"].forEach((s) => {
+        const pane = document.getElementById(`batch-step-${s}`);
+        if (pane) pane.style.display = s === step ? "block" : "none";
+    });
+}
+
+
+async function openOrganizeBatch(dirPath) {
+    _initBatchModal();
+    const requestId = ++_batchRequestSeq;
+    _batchState = { request_id: requestId, dir_path: dirPath };
+
+    // reset buttons
+    ["batch-next-btn", "batch-confirm-btn", "batch-abort-btn"].forEach((id) => {
+        document.getElementById(id).style.display = "none";
+    });
+    document.getElementById("batch-cancel-btn").style.display = "inline-block";
+    document.getElementById("batch-modal-subtitle").textContent = dirPath;
+    document.getElementById("batch-dashboard-body").innerHTML =
+        '<div class="text-secondary py-4 text-center"><i class="bi bi-hourglass-split"></i> 扫描目录中...</div>';
+    _showBatchStep("dashboard");
+    batchModal.show();
+
+    try {
+        const url = `${API_BASE}/api/organize/dir-preview?path=${encodeURIComponent(dirPath)}&max_depth=2&limit=500`;
+        const res = await apiFetch(url);
+        if (requestId !== _batchRequestSeq) return;  // stale
+        if (!res.ok) {
+            const body = await res.json();
+            document.getElementById("batch-dashboard-body").innerHTML = `
+                <div class="alert alert-warning mb-0">
+                    <strong>无法扫描:</strong> ${_esc(body.error || "unknown")}<br>
+                    ${_esc(body.message || "")}
+                </div>`;
+            return;
+        }
+        const body = await res.json();
+        if (requestId !== _batchRequestSeq) return;
+        _batchState.dashboard = body;
+        renderBatchDashboard(body);
+    } catch (err) {
+        if (requestId !== _batchRequestSeq) return;
+        document.getElementById("batch-dashboard-body").innerHTML =
+            `<div class="text-danger py-3 text-center">网络错误: ${_esc(err.message)}</div>`;
+    }
+}
+
+
+function renderBatchDashboard(data) {
+    const c = data.counts || {};
+    const total = data.total || 0;
+    const canProceed = (c.will_link || 0) + (c.already_linked || 0) + (c.conflict || 0) > 0;
+
+    // counts cards
+    const cards = [
+        { key: "will_link", icon: "bi-check2-circle", color: "success" },
+        { key: "already_linked", icon: "bi-link-45deg", color: "info" },
+        { key: "conflict", icon: "bi-exclamation-triangle", color: "warning" },
+        { key: "needs_identify", icon: "bi-question-circle", color: "secondary" },
+        { key: "unsupported", icon: "bi-x-circle", color: "secondary" },
+        { key: "not_applicable", icon: "bi-dash-circle", color: "secondary" },
+    ].map((card) => `
+        <div class="col">
+            <div class="text-center p-2 border rounded bg-dark">
+                <i class="bi ${card.icon} text-${card.color}" style="font-size:1.5rem;"></i>
+                <div class="fw-bold mt-1">${c[card.key] || 0}</div>
+                <div class="small text-secondary">${_BATCH_GROUP_LABELS[card.key]}</div>
+            </div>
+        </div>
+    `).join("");
+
+    // 分组列表
+    const groups = ["will_link", "already_linked", "conflict", "needs_identify", "unsupported", "not_applicable"];
+    const byStatus = {};
+    (data.items || []).forEach((it) => {
+        if (!byStatus[it.status]) byStatus[it.status] = [];
+        byStatus[it.status].push(it);
+    });
+    const groupHtml = groups.filter(g => (byStatus[g] || []).length > 0).map(g => `
+        <details class="mb-2" ${g === "will_link" ? "open" : ""}>
+            <summary class="text-${g === "will_link" ? "success" : (g === "conflict" ? "warning" : "secondary")}">
+                ${_BATCH_GROUP_LABELS[g]}（${byStatus[g].length}）
+            </summary>
+            <ul class="list-unstyled small mt-2 ms-3" style="max-height:200px;overflow-y:auto;">
+                ${byStatus[g].slice(0, 100).map(it => `
+                    <li class="text-truncate" title="${_esc(it.path)}">
+                        <code>${_esc(it.name)}</code>
+                        ${it.title ? `<span class="text-secondary"> — ${_esc(it.title)}${it.year ? " ("+_esc(it.year)+")" : ""}</span>` : ""}
+                        ${it.reason ? `<span class="text-warning small"> · ${_esc(it.reason)}</span>` : ""}
+                    </li>
+                `).join("")}
+                ${byStatus[g].length > 100 ? `<li class="text-secondary">…还有 ${byStatus[g].length - 100} 项未显示</li>` : ""}
+            </ul>
+        </details>
+    `).join("");
+
+    const banner = data.limit_reached
+        ? `<div class="alert alert-warning small mb-3"><i class="bi bi-exclamation-triangle"></i>
+            目录文件过多，仅显示前 ${total} 个。请选更深子目录或提升 limit。</div>`
+        : "";
+
+    const guidance = canProceed
+        ? `<div class="small text-secondary mt-3">
+              点「下一步：审 plan」进入勾选确认。<i>仅 will_link / already_linked / conflict 进入下一步；needs_identify 请先去文件视图批量识别。</i>
+           </div>`
+        : `<div class="alert alert-info mb-0 small">
+              没有可整理的文件。${(c.needs_identify || 0) > 0 ? "请先去文件视图对未识别文件批量识别。" : ""}
+           </div>`;
+
+    document.getElementById("batch-dashboard-body").innerHTML = `
+        ${banner}
+        <div class="mb-3"><strong>目录:</strong> <code class="small">${_esc(data.base_path)}</code>
+            <span class="text-secondary ms-2">共 ${total} 个文件 · max_depth=${_esc(data.max_depth)}</span>
+        </div>
+        <div class="row row-cols-3 row-cols-md-6 g-2 mb-3">${cards}</div>
+        <div class="mt-3">${groupHtml}</div>
+        ${guidance}
+    `;
+    document.getElementById("batch-next-btn").style.display = canProceed ? "inline-block" : "none";
+}
+
+
+async function proceedToBatchPreview() {
+    if (!_batchState || !_batchState.dashboard) return;
+    const requestId = ++_batchRequestSeq;
+    _batchState.request_id = requestId;
+
+    // 从 dashboard 取所有可整理的 path（will_link / already_linked / conflict）
+    const candidatePaths = (_batchState.dashboard.items || [])
+        .filter(it => ["will_link", "already_linked", "conflict"].includes(it.status))
+        .map(it => it.path);
+
+    if (candidatePaths.length === 0) return;
+
+    document.getElementById("batch-preview-body").innerHTML =
+        '<div class="text-secondary py-4 text-center"><i class="bi bi-hourglass-split"></i> 计算目标路径...</div>';
+    document.getElementById("batch-next-btn").style.display = "none";
+    _showBatchStep("preview");
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/action/preview`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                kind: "organize",
+                items: candidatePaths.map(p => ({ src_path: p })),
+            }),
+        });
+        if (requestId !== _batchRequestSeq) return;
+        if (!res.ok) {
+            const body = await res.json();
+            document.getElementById("batch-preview-body").innerHTML = `
+                <div class="alert alert-danger mb-0">
+                    <strong>preview 失败:</strong> ${_esc(body.error || "unknown")}<br>
+                    ${_esc(body.message || "")}
+                </div>`;
+            return;
+        }
+        const body = await res.json();
+        if (requestId !== _batchRequestSeq) return;
+        if (body.items_count === 0) {
+            document.getElementById("batch-preview-body").innerHTML = `
+                <div class="alert alert-info mb-0">无可整理项目（全部已 link 或冲突）。</div>`;
+            return;
+        }
+        _batchState.action_id = body.action_id;
+        _batchState.signed_token = body.signed_token;
+        _batchState.payload_items = body.items || [];   // will_link + already_linked + conflict 的 plan
+        _batchState.preview_items = body.preview_items || [];
+        renderBatchPreview(body);
+    } catch (err) {
+        if (requestId !== _batchRequestSeq) return;
+        document.getElementById("batch-preview-body").innerHTML =
+            `<div class="text-danger py-3 text-center">网络错误: ${_esc(err.message)}</div>`;
+    }
+}
+
+
+function renderBatchPreview(body) {
+    // payload 里 items 顺序 = will_link + already_linked + conflict
+    // 用户在 UI 上只能勾 will_link（默认全勾），其它 readonly disabled
+    const items = body.items || [];   // payload items with full plan
+    const rows = items.map((it, idx) => {
+        const dst = it.computed_plan ? it.computed_plan.dst_path : "?";
+        // 状态：already_linked / conflict / will_link
+        let status = "will_link";
+        if (it.dst_status) {
+            if (it.dst_status.already_linked) status = "already_linked";
+            else if (it.dst_status.conflict) status = "conflict";
+        }
+        const checked = status === "will_link" ? "checked" : "";
+        const disabled = status === "will_link" ? "" : "disabled";
+        const seasonEp = it.media_type === "tv"
+            ? `<span class="text-secondary small">S${_esc(it.season_number)}E${_esc(it.episode_number)}</span>`
+            : "";
+        return `
+            <tr class="${status === "will_link" ? "" : "text-secondary"}">
+                <td><input type="checkbox" class="form-check-input batch-item-check"
+                           data-idx="${idx}" ${checked} ${disabled}></td>
+                <td>${_BATCH_STATUS_BADGE[status]}</td>
+                <td title="${_esc(it.src_path)}">
+                    <div class="text-truncate" style="max-width:300px;"><code class="small">${_esc(it.src_path.split("/").pop())}</code></div>
+                    <div class="small text-secondary text-truncate" style="max-width:300px;">
+                        ${_esc(it.title)}${it.year ? " ("+_esc(it.year)+")" : ""} ${seasonEp}
+                    </div>
+                </td>
+                <td title="${_esc(dst)}">
+                    <div class="text-truncate small" style="max-width:380px;">${_esc(dst)}</div>
+                </td>
+            </tr>
+        `;
+    }).join("");
+
+    const c = body.counts || {};
+    document.getElementById("batch-preview-body").innerHTML = `
+        <div class="mb-3">
+            <strong>共 ${items.length} 个可整理项</strong>
+            <span class="ms-3">✓ ${c.will_link || 0} 可整理</span>
+            <span class="ms-2">↻ ${c.already_linked || 0} 已 hardlinked</span>
+            <span class="ms-2">⚠ ${c.conflict || 0} 冲突</span>
+        </div>
+        <div class="d-flex gap-2 mb-2">
+            <button class="btn btn-sm btn-outline-light" onclick="batchToggleAll(true)">全选 will_link</button>
+            <button class="btn btn-sm btn-outline-light" onclick="batchToggleAll(false)">全不选</button>
+        </div>
+        <div class="table-responsive" style="max-height:50vh;overflow-y:auto;">
+            <table class="table table-sm table-dark table-hover small mb-0">
+                <thead class="sticky-top bg-dark">
+                    <tr>
+                        <th style="width:30px;"></th>
+                        <th style="width:90px;">状态</th>
+                        <th>源文件 → 识别</th>
+                        <th>目标路径</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+        <div class="small text-secondary mt-3">
+            <i class="bi bi-info-circle"></i> 操作通过 <strong>硬链接</strong>创建目标（不复制不移动），源 inode 不变 → qBit 保种继续。
+        </div>
+    `;
+    document.getElementById("batch-next-btn").style.display = "none";
+    document.getElementById("batch-confirm-btn").style.display = "inline-block";
+}
+
+
+function batchToggleAll(only_will_link) {
+    document.querySelectorAll(".batch-item-check").forEach((cb) => {
+        if (cb.disabled) return;  // already_linked / conflict 不动
+        cb.checked = only_will_link;
+    });
+}
+
+
+async function confirmBatchOrganize() {
+    if (!_batchState || !_batchState.action_id) return;
+    const requestId = ++_batchRequestSeq;
+    const myAction = _batchState.action_id;
+    _batchState.request_id = requestId;
+
+    // 收集勾选的 indices
+    const selected = Array.from(document.querySelectorAll(".batch-item-check:checked:not(:disabled)"))
+        .map(cb => parseInt(cb.dataset.idx, 10));
+
+    if (selected.length === 0) {
+        alert("没有勾选任何项目");
+        return;
+    }
+
+    document.getElementById("batch-confirm-btn").style.display = "none";
+    document.getElementById("batch-progress-body").innerHTML =
+        '<div class="text-secondary py-4 text-center"><i class="bi bi-hourglass-split"></i> 提交中...</div>';
+    _showBatchStep("progress");
+
+    try {
+        const res = await apiFetch(`${API_BASE}/api/action/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                action_id: myAction,
+                signed_token: _batchState.signed_token,
+                selected_indices: selected,
+            }),
+        });
+        if (requestId !== _batchRequestSeq || _batchState.action_id !== myAction) return;
+        const body = await res.json();
+
+        if (res.status === 202) {
+            // background path → polling
+            document.getElementById("batch-abort-btn").style.display = "inline-block";
+            renderBatchProgress({
+                status: "running", items_total: body.items_total,
+                items_completed: 0, status_counts: {},
+            });
+            startBatchPolling(myAction);
+        } else if (res.status === 200 && body.status === "succeeded") {
+            // inline path 直接显示终态
+            renderBatchProgress({
+                status: "succeeded",
+                items_total: body.result?.items_total || selected.length,
+                items_completed: body.result?.items_completed || selected.length,
+                status_counts: body.result?.status_counts || {},
+                result: body.result,
+            });
+        } else {
+            renderBatchProgress({
+                status: "failed",
+                error: body.error || body.detail || "unknown",
+            });
+        }
+    } catch (err) {
+        if (requestId !== _batchRequestSeq) return;
+        document.getElementById("batch-progress-body").innerHTML =
+            `<div class="text-danger py-3 text-center">网络错误: ${_esc(err.message)}</div>`;
+    }
+}
+
+
+function startBatchPolling(actionId) {
+    if (!_batchState) return;
+    const poll = async () => {
+        if (!_batchState || _batchState.action_id !== actionId) return;  // modal 关了
+        try {
+            const res = await apiFetch(`${API_BASE}/api/action/status?id=${encodeURIComponent(actionId)}`);
+            if (!_batchState || _batchState.action_id !== actionId) return;
+            if (!res.ok) {
+                renderBatchProgress({ status: "failed", error: "status_poll_failed" });
+                return;
+            }
+            const body = await res.json();
+            if (!_batchState || _batchState.action_id !== actionId) return;
+            renderBatchProgress(body);
+            if (body.status === "running") {
+                _batchState.polling_timer = setTimeout(poll, 2000);
+            } else {
+                document.getElementById("batch-abort-btn").style.display = "none";
+            }
+        } catch (err) {
+            if (_batchState && _batchState.action_id === actionId) {
+                _batchState.polling_timer = setTimeout(poll, 2000);
+            }
+        }
+    };
+    poll();
+}
+
+
+function renderBatchProgress(info) {
+    const status = info.status || "unknown";
+    const total = info.items_total || 0;
+    const done = info.items_completed || 0;
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    const counts = info.status_counts || {};
+    const currentItem = info.current_item;
+
+    const statusBanner = ({
+        running: '<div class="alert alert-info py-2 mb-3"><i class="bi bi-arrow-clockwise me-2"></i>正在批量整理…</div>',
+        succeeded: '<div class="alert alert-success py-2 mb-3"><i class="bi bi-check-circle me-2"></i>整理完成</div>',
+        failed: `<div class="alert alert-danger py-2 mb-3"><i class="bi bi-x-circle me-2"></i>失败: ${_esc(info.error || "")}</div>`,
+    })[status] || `<div class="alert alert-warning py-2 mb-3">状态: ${_esc(status)}</div>`;
+
+    const summary = (status === "succeeded" || status === "failed")
+        ? `
+            <div class="row row-cols-3 g-2 small">
+                <div class="col"><span class="badge bg-success">✓ ${counts.succeeded || 0}</span> 成功</div>
+                <div class="col"><span class="badge bg-info">↻ ${counts.already_linked || 0}</span> 已 link</div>
+                <div class="col"><span class="badge bg-danger">✗ ${counts.failed || 0}</span> 失败</div>
+                ${counts.skipped_by_user ? `<div class="col"><span class="badge bg-secondary">⊘ ${counts.skipped_by_user}</span> 未勾选</div>` : ""}
+                ${counts.skipped_by_abort ? `<div class="col"><span class="badge bg-secondary">■ ${counts.skipped_by_abort}</span> 中止跳过</div>` : ""}
+            </div>
+        `
+        : `
+            <div class="small text-secondary mb-2">已处理 ${done} / ${total}</div>
+            ${currentItem ? `<div class="small text-truncate text-info"><code>${_esc(currentItem)}</code></div>` : ""}
+        `;
+
+    const failedItems = (info.result?.items || []).filter(it => it.status === "failed");
+    const failedList = failedItems.length > 0 ? `
+        <details class="mt-3">
+            <summary class="text-danger">失败项（${failedItems.length}）</summary>
+            <ul class="small mt-2 ms-3" style="max-height:200px;overflow-y:auto;">
+                ${failedItems.map(it => `
+                    <li><code class="small">${_esc(it.src_path)}</code>
+                        <div class="text-warning small">${_esc(it.reason || "")}</div>
+                        ${it.hint ? `<div class="text-info small">提示: ${_esc(it.hint)}</div>` : ""}
+                    </li>`).join("")}
+            </ul>
+        </details>
+    ` : "";
+
+    document.getElementById("batch-progress-body").innerHTML = `
+        ${statusBanner}
+        <div class="progress mb-3" style="height:1.5rem;">
+            <div class="progress-bar ${status === 'running' ? 'progress-bar-striped progress-bar-animated' : ''}"
+                 style="width:${pct}%">${pct}%</div>
+        </div>
+        ${summary}
+        ${failedList}
+    `;
+
+    if (status !== "running" && _batchState && _batchState.polling_timer) {
+        clearTimeout(_batchState.polling_timer);
+        _batchState.polling_timer = null;
+    }
+    if (status !== "running") {
+        document.getElementById("batch-abort-btn").style.display = "none";
+        // 刷新文件列表（用户做完应该看到目录已被整理）
+        try { loadFiles(currentPath); } catch {}
+    }
+}
+
+
+async function abortBatchOrganize() {
+    if (!_batchState || !_batchState.action_id) return;
+    if (!confirm("中止 batch organize？已完成的项目会保留，未完成的项目会标 skipped_by_abort。")) return;
+    try {
+        await apiFetch(`${API_BASE}/api/action/abort`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action_id: _batchState.action_id }),
+        });
+    } catch (err) {
+        alert(`abort 失败: ${err.message}`);
+    }
 }

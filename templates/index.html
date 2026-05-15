@@ -1863,7 +1863,53 @@
     </div>
 </div>
 
+<!-- ── BATCH ORGANIZE MODAL (Phase 4B.4) — 3 step: dashboard / preview / progress ─── -->
+<div class="modal fade" id="organizeBatchModal" tabindex="-1" data-bs-backdrop="static">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-folder-symlink me-2" style="color:var(--teal);"></i>批量整理目录
+                    <small class="text-secondary ms-2" id="batch-modal-subtitle"></small>
+                </h5>
+                <button type="button" class="btn-close btn-close-white" id="batch-close-btn"
+                        data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <!-- Step 1: dir-preview dashboard -->
+                <div id="batch-step-dashboard" style="display:none;">
+                    <div id="batch-dashboard-body">
+                        <!-- JS 注入 counts + 分组 items -->
+                    </div>
+                </div>
+                <!-- Step 2: multi-item preview with checkbox -->
+                <div id="batch-step-preview" style="display:none;">
+                    <div id="batch-preview-body">
+                        <!-- JS 注入分组 + checkbox table -->
+                    </div>
+                </div>
+                <!-- Step 3: progress polling -->
+                <div id="batch-step-progress" style="display:none;">
+                    <div id="batch-progress-body">
+                        <!-- JS 注入进度条 + current_item + counts -->
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" id="batch-cancel-btn"
+                        data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="batch-next-btn"
+                        style="display:none;">下一步：审 plan</button>
+                <button type="button" class="btn btn-success" id="batch-confirm-btn"
+                        style="display:none;"><i class="bi bi-check2 me-1"></i>确认整理</button>
+                <button type="button" class="btn btn-danger" id="batch-abort-btn"
+                        style="display:none;"><i class="bi bi-stop-circle me-1"></i>中止</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script src="/static/app.js?v=2026-05-15c"></script>
+<script src="/static/app.js?v=2026-05-15d"></script>
 </body>
 </html>
