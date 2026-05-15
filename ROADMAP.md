@@ -161,6 +161,18 @@ Claude Desktop / Code 直接管 NAS：
 - 引入 ruff CI + lint
 - 平台兼容矩阵（QNAP / Synology / Linux 的 `stat` / `du` 差异 shim）
 
+### 9. NFO episode-specific 元数据补全（S，依赖：Phase 4 NFO writer）
+
+**问题**：Phase 4A NFO writer 写 episode `.nfo` 时，`<plot>` / `<rating>` / `<thumb>` 直接 copy series-level 字段（来自 `tv_shows` cache）。结果 S01E01 / S01E02 / ... 的 NFO 全部 plot 相同 = series 整体剧情简介，不是 episode 自己的剧情。Plex/Emby 仍能识别（靠 season+episode 编号），但显示的"本集简介"是 series 简介，体验降级。
+
+**修法**：metadata_cache 加 `tv_episode` 维度（已有 series + season，缺 episode 层），调 TMDB `/tv/{id}/season/{season}/episode/{ep}` 拿 per-episode `name` / `overview` / `still_path` / `vote_average`。NFO writer 检测 cached.media_type='tv' + cached.season_number + cached.episode_number → 优先用 episode-specific 字段，fallback series 字段。
+
+**验证**：本会话端到端 cross-check 已观察到这个 limitation（Stranger Things S04E01.nfo plot = series plot copy）— 见 cross-check 报告。SSH `cat <dst>/Season XX/*.nfo` 对比看 plot 是否 episode-specific。
+
+**为什么不急**：Plex/Emby 主屏看 series 卡片显示 series plot 是对的；只在点进单集详情时才显示 episode plot。多数用户体感不强。
+
+**前置**：Phase 4A NFO writer + tv_shows cache schema 已就位；Phase 3.x metadata_cache 接口已抽象。预计 0.5-1 天（TMDB 调用 + cache 落盘 + writer 字段切换 + 几个 unit test）。
+
 ---
 
 ## 不做的事（明确排除）
