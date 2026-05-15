@@ -200,7 +200,7 @@ _check_gunicorn_args()
 
 # Layer 3: fcntl.flock 跨进程文件锁 — fork-mode ground truth
 # 标准 gunicorn (无 --preload) 下每个 worker fork 后重新 import → 再次 import-time
-# 抢同一 .worker.lock → 第二个 worker 必失败。preload 模式被 Layer 2 拦住。
+# 抢同一 .worker.lock → 第二个 worker 必失败。
 _WORKER_LOCK_FILE = CONFIG_DIR / ".worker.lock"
 try:
     _worker_lock_fd = os.open(
@@ -219,6 +219,41 @@ except BlockingIOError:
         f"   Use gunicorn -w 1 (Phase 4C will add SQLite lease for multi-worker).\n"
     )
     sys.exit(1)
+
+
+# Layer 4: register_at_fork callback — preload 模式 ground truth (r6 BLOCKER)
+# 在 gunicorn --preload (无论 via 命令行 / config file / GUNICORN_CMD_ARGS) 下，
+# master 进程 import app + 抢 lock。fork 出的每个 worker 在 child 进程内触发
+# at_fork callback → close 继承 fd + 自己 reopen + flock → 跟 master 持有的
+# OFD 冲突 → fail → os._exit。
+# 只在 gunicorn 上下文下注册（pytest / flask dev 不触发，避免测试干扰）。
+def _enforce_singleton_after_fork() -> None:
+    global _worker_lock_fd
+    try:
+        os.close(_worker_lock_fd)
+    except OSError:
+        pass
+    try:
+        new_fd = os.open(
+            str(_WORKER_LOCK_FILE),
+            os.O_CREAT | os.O_WRONLY, 0o600,
+        )
+        _fcntl.flock(new_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        os.write(new_fd, f"{os.getpid()}\n".encode())
+        _worker_lock_fd = new_fd
+    except BlockingIOError:
+        sys.stderr.write(
+            f"ERROR: preload + multi-worker not supported. Worker {os.getpid()}\n"
+            f"   cannot reacquire {_WORKER_LOCK_FILE} (master still holds it).\n"
+            f"   Use gunicorn -c gunicorn.conf.py app:app (no --preload).\n"
+        )
+        os._exit(1)
+
+# 注册条件：sys.argv[0] 路径含 'gunicorn' (覆盖 gunicorn 直跑 + gunicorn entrypoint)
+# 不在 pytest / flask 直跑时注册（避免测试场景被 callback 干扰）
+_argv0 = sys.argv[0] if sys.argv else ""
+if "gunicorn" in os.path.basename(_argv0):
+    os.register_at_fork(after_in_child=_enforce_singleton_after_fork)
 
 SIGNING_KEY_FILE = CONFIG_DIR / ".signing_key"
 try:

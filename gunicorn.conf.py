@@ -19,3 +19,23 @@ preload_app = False
 # 改 timeout 是 OK 的（NAS Vault organize 后台 worker 不阻塞 HTTP request）
 timeout = 60
 keepalive = 5
+
+
+def on_starting(server):
+    """gunicorn r6 BLOCKER fix: hook 内读 server.cfg ground truth，拦下任何形式的
+    multi-worker / preload。即使 user 改 config file / env / 命令行覆盖了上面
+    workers/preload_app，hook 在 master 启动期跑，拒绝继续。
+    """
+    cfg = server.cfg
+    if cfg.workers != 1:
+        server.log.error(
+            f"NAS Vault requires workers=1, got {cfg.workers}; "
+            "see config_module-level constraint."
+        )
+        raise SystemExit(1)
+    if cfg.preload_app:
+        server.log.error(
+            "NAS Vault does not support preload_app=True (organize_runner / "
+            "scanner module-level state would be shared across workers)."
+        )
+        raise SystemExit(1)
