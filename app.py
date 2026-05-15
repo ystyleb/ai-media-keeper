@@ -1909,12 +1909,18 @@ def _ssh_create_nfo_if_absent(
         tmp_path = f"{nfo_path}.tmp.{uuid.uuid4().hex[:12]}"
         safe_nfo = shlex.quote(nfo_path)
         safe_tmp = shlex.quote(tmp_path)
-        verify_step = f" && grep -c 'tmdb' {safe_nfo}" if verify_tmdb else ""
-        # 1. 写 tmp（同 dir 不跨 fs，保证 ln 不会 EXDEV）
-        # 2. ln tmp final（dst 已存在则 ln 失败，atomic create-only）
-        # 3. 无论 ln 成败 rm tmp（成功后 final 是 tmp 的 hardlink；rm tmp 不影响 final）
-        # 4. 若 ln 失败 + dst 已存在 → echo NFO_EXISTS 让 Python 区分；exit ln_rc
+        # codex r4 NIT: grep -c 在 count=0 时 rc=1 让整个 shell rc!=0 进 create_failed 分支，
+        # 误归类。用 `|| echo 0` 兜底保证 rc=0，count 由 stdout 决定。
+        verify_step = f"; grep -c 'tmdb' {safe_nfo} || echo 0" if verify_tmdb else ""
+        # codex r4 BLOCKER: `ln src dir/` 会在 dir 内 link，没失败。先 `[ -d ]` 阻止：
+        # dst 是目录 → echo NFO_IS_DIR + exit 99，Python 转 'nfo_is_directory'
+        # 1. 检查 dst 不是 directory（race window 极窄但比 ln-into-dir 安全）
+        # 2. 写 tmp（同 dir 不跨 fs，保证 ln 不会 EXDEV）
+        # 3. ln tmp final（dst 已存在为 regular file 时 ln 失败，atomic create-only）
+        # 4. 无论 ln 成败 rm tmp（成功后 final 是 tmp 的 hardlink；rm tmp 不影响 final）
+        # 5. 若 ln 失败 + dst 已存在 → echo NFO_EXISTS 让 Python 区分；exit ln_rc
         cmd = (
+            f"if [ -d {safe_nfo} ]; then echo NFO_IS_DIR; exit 99; fi; "
             f"( printf '%s' {shlex.quote(xml_b64)} | base64 -d > {safe_tmp} && "
             f"ln {safe_tmp} {safe_nfo} ); LN_RC=$?; "
             f"rm -f {safe_tmp}; "
@@ -1925,6 +1931,8 @@ def _ssh_create_nfo_if_absent(
         )
         rc, out, err = ssh_exec(cmd, timeout=30)
         if rc != 0:
+            if "NFO_IS_DIR" in (out or ""):
+                return False, "nfo_is_directory"
             if "NFO_EXISTS" in (out or ""):
                 return False, "nfo_exists"
             return False, f"create_failed: {err.strip()[:200]}"

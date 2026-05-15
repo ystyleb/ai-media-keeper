@@ -927,6 +927,53 @@ def test_ssh_create_nfo_if_absent_returns_create_failed_when_ln_fails_other(monk
     assert "Permission denied" in reason
 
 
+def test_ssh_create_nfo_if_absent_rejects_directory_target(monkeypatch):
+    """codex r4 BLOCKER: dst 是目录（不是普通文件）时必须返 'nfo_is_directory'。
+    `ln src dir/` 默认在 dir 内创建 hardlink，不能让那种 silent ln-into-dir 发生。"""
+    def fake_ssh_exec(cmd, timeout=30):
+        # 模拟 shell `[ -d ] && exit 99` 行为
+        return (99, "NFO_IS_DIR\n", "")
+
+    monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
+    ok, reason = app_module._ssh_create_nfo_if_absent("/m/x.nfo", "<movie>x</movie>", verify_tmdb=False)
+    assert ok is False
+    assert reason == "nfo_is_directory"
+
+
+def test_ssh_create_nfo_if_absent_shell_cmd_includes_dir_check(monkeypatch):
+    """codex r4 IMPORTANT: shell 命令必须含 `[ -d ]` 预检 + atomic ln 序列。"""
+    captured = []
+
+    def fake_ssh_exec(cmd, timeout=30):
+        captured.append(cmd)
+        return (0, "1\n", "")
+
+    monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
+    ok, _ = app_module._ssh_create_nfo_if_absent("/m/x.nfo", "<movie>x</movie>", verify_tmdb=True)
+    assert ok
+    cmd = captured[0]
+    # 必含 [ -d ] 预检 + NFO_IS_DIR marker + atomic ln + grep 兜底（|| echo 0）
+    assert "[ -d " in cmd, f"missing dir check: {cmd}"
+    assert "NFO_IS_DIR" in cmd
+    assert "ln " in cmd
+    assert "grep -c 'tmdb'" in cmd
+    assert "|| echo 0" in cmd, "verify grep 必须有 || echo 0 兜底"
+
+
+def test_ssh_create_nfo_if_absent_count_zero_not_misclassified(monkeypatch):
+    """codex r4 NIT: grep -c 返 count=0 时不能被误归类成 create_failed。
+
+    实际 shell `... || echo 0` 让 rc 永远 0，stdout 末行是 count。"""
+    def fake_ssh_exec(cmd, timeout=30):
+        # 模拟 grep -c 找不到 → || echo 0 输出 "0\n"，整条 rc=0
+        return (0, "0\n", "")
+
+    monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
+    ok, reason = app_module._ssh_create_nfo_if_absent("/m/x.nfo", "<a/>", verify_tmdb=True)
+    assert ok is False
+    assert reason == "readback_missing_tmdbid"   # 不是 create_failed
+
+
 def test_executor_rejects_payload_missing_metadata_snapshot(monkeypatch):
     """codex r3 IMPORTANT: executor 强 validation — 缺 metadata_snapshot 立即 failed。
 
