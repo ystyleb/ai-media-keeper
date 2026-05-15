@@ -3761,22 +3761,104 @@ async function saveAutoOrganizeConfig() {
     }
 }
 
+// "需关注" virtual filter — 客户端排除 skipped_needs_identify (cron 噪音)，
+// 让 user 默认看真触发的 organize 结果。点 dropdown 切其他 filter 仍 work.
+const _AUTO_ORG_NEEDS_ATTENTION_EXCLUDED = "skipped_needs_identify";
+
+// 取 content_path 的"种子父目录"作为聚合 key —— qBit content_path 单文件种子 = 文件，
+// 多文件种子 = 目录；用 dirname 把单文件种子归到其父目录，多文件种子按自身归类.
+// 但更稳的做法：取前 4 级 (/share/pt/movie 而非具体子目录) 让 user 看到"哪个 download root"
+function _autoOrgGroupKey(contentPath) {
+    if (!contentPath) return "(unknown)";
+    const parts = contentPath.split("/").filter(Boolean);
+    // 取前 3 级目录：/share/pt/movie 这样的 download root
+    if (parts.length <= 3) return "/" + parts.join("/");
+    return "/" + parts.slice(0, 3).join("/");
+}
+
+async function _autoOrgRenderNeedsIdentifyBanner() {
+    const bannerEl = document.getElementById("autoOrg-needs-identify-banner");
+    if (!bannerEl) return;
+    try {
+        // 单独拉所有 needs_identify rows 做聚合
+        const res = await apiFetch(`${API_BASE}/api/auto-organize/runs?status=skipped_needs_identify&limit=500`);
+        const data = await res.json();
+        const runs = data.runs || [];
+        if (runs.length === 0) {
+            bannerEl.style.display = "none";
+            return;
+        }
+        // group by dirname
+        const groups = {};
+        for (const r of runs) {
+            const key = _autoOrgGroupKey(r.content_path);
+            groups[key] = (groups[key] || 0) + 1;
+        }
+        // 按 count desc 排
+        const sorted = Object.entries(groups).sort((a, b) => b[1] - a[1]);
+        const total = runs.length;
+        const lines = sorted
+            .filter(([_, n]) => n >= 3)  // 只显示 ≥3 条的目录 (≥3 才算"批量"problem)
+            .map(([dir, n]) => `<li><code>${escapeHtml(dir)}</code> — <strong>${n}</strong> 条未识别</li>`);
+        if (lines.length === 0) {
+            bannerEl.style.display = "none";
+            return;
+        }
+        bannerEl.innerHTML = `
+            <div class="d-flex align-items-start gap-2">
+                <i class="bi bi-info-circle" style="font-size:1.2em; flex-shrink:0;"></i>
+                <div style="flex:1;">
+                    <strong>共 ${total} 条种子未识别</strong>，按 download 根目录聚合：
+                    <ul class="mb-1 mt-1" style="padding-left:1.2rem;">${lines.join("")}</ul>
+                    <div class="text-secondary" style="font-size:.85em;">
+                        这些目录 NASVault 还没扫过 → cache miss → cron 标待识别。建议：
+                        ① 用顶部「扫库」按钮添加这些目录扫描识别 → ② 下个 cron 周期自动重试整理；
+                        或 ③ 单条点 reset 按钮立即重试（前提是已通过文件浏览器手动识别）。
+                    </div>
+                </div>
+            </div>
+        `;
+        bannerEl.style.display = "block";
+    } catch (err) {
+        // banner 失败不影响主历史 tab，silent
+        console.warn("[auto-organize] banner load failed", err);
+        bannerEl.style.display = "none";
+    }
+}
+
 async function loadAutoOrganizeHistory() {
     const listEl = document.getElementById("autoOrg-history-list");
     const statusEl = document.getElementById("autoOrg-history-filter");
     const summaryEl = document.getElementById("autoOrg-history-summary");
     const countBadgeEl = document.getElementById("autoOrg-history-count-badge");
     listEl.innerHTML = '<div class="text-secondary text-center py-4">加载中…</div>';
+    // 同时刷新 banner（独立 fetch needs_identify 数据；不阻塞主列表）
+    _autoOrgRenderNeedsIdentifyBanner();
     try {
-        const params = new URLSearchParams({ limit: "100" });
+        const params = new URLSearchParams({ limit: "200" });
         const filter = statusEl.value.trim();
-        if (filter) params.set("status", filter);
+        // "needs_attention" 是前端 virtual filter — 不传给后端，客户端排除 needs_identify
+        const isVirtualNeedsAttention = filter === "needs_attention";
+        if (filter && !isVirtualNeedsAttention) params.set("status", filter);
         const res = await apiFetch(`${API_BASE}/api/auto-organize/runs?${params}`);
         const data = await res.json();
-        countBadgeEl.textContent = data.total > 0 ? String(data.total) : "";
-        summaryEl.textContent = data.total > 0 ? `共 ${data.total} 条${filter ? "（已过滤）" : ""}` : "";
-        if (!data.runs || data.runs.length === 0) {
-            listEl.innerHTML = '<div class="text-secondary text-center py-4">暂无历史</div>';
+        let runs = data.runs || [];
+        let hiddenCount = 0;
+        if (isVirtualNeedsAttention) {
+            const before = runs.length;
+            runs = runs.filter(r => r.status !== _AUTO_ORG_NEEDS_ATTENTION_EXCLUDED);
+            hiddenCount = before - runs.length;
+        }
+        countBadgeEl.textContent = runs.length > 0 ? String(runs.length) : "";
+        if (isVirtualNeedsAttention && hiddenCount > 0) {
+            summaryEl.innerHTML = `共 ${runs.length} 条需关注 <span class="text-secondary">(${hiddenCount} 待识别已隐藏 — 切 dropdown 查看)</span>`;
+        } else {
+            summaryEl.textContent = data.total > 0 ? `共 ${data.total} 条${filter ? "（已过滤）" : ""}` : "";
+        }
+        if (runs.length === 0) {
+            listEl.innerHTML = isVirtualNeedsAttention && hiddenCount > 0
+                ? `<div class="text-secondary text-center py-4">无需关注的记录 (${hiddenCount} 条待识别已隐藏，切 dropdown 查看)</div>`
+                : '<div class="text-secondary text-center py-4">暂无历史</div>';
             return;
         }
         listEl.innerHTML = `
@@ -3791,7 +3873,7 @@ async function loadAutoOrganizeHistory() {
                   <th></th>
                 </tr>
               </thead>
-              <tbody>${data.runs.map(_renderAutoOrgHistoryRow).join("")}</tbody>
+              <tbody>${runs.map(_renderAutoOrgHistoryRow).join("")}</tbody>
             </table>
         `;
     } catch (err) {
@@ -3838,20 +3920,38 @@ function _renderAutoOrgHistoryRow(run) {
 }
 
 async function resetAutoOrgRun(qbit_hash) {
-    if (!confirm("确认 reset 这条记录？下个 cron 周期会重新尝试 organize。")) return;
+    if (!confirm("确认 reset 这条记录？\n会删除当前 row 并立即重新尝试 organize（无需等下个 cron 周期）。\n如 qBit 不可达，下周期 cron 仍会重试。")) return;
     try {
         const res = await apiFetch(`${API_BASE}/api/auto-organize/reset`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ qbit_hash }),
+            body: JSON.stringify({ qbit_hash, trigger_now: true }),
         });
         const data = await res.json();
         if (!data.ok) {
             alert("reset 失败：" + (data.message || data.error));
             return;
         }
-        addLog(`已 reset ${qbit_hash.slice(0, 8)} (was ${data.previous_status})`, "success");
-        loadAutoOrganizeHistory();
+        let logMsg = `已 reset ${qbit_hash.slice(0, 8)} (was ${data.previous_status})`;
+        const tr = data.trigger_result;
+        if (tr) {
+            if (tr.action === "started") {
+                logMsg += ` → 立即触发: 已启动 organize worker (action_id=${(tr.action_id || "").slice(0, 8)})`;
+            } else if (tr.action === "skipped") {
+                logMsg += ` → 立即触发: ${tr.status} (${tr.reason || ""})`;
+            } else if (tr.action === "locked") {
+                logMsg += ` → 立即触发: 单飞 lock 占用，下周期重试`;
+            } else if (tr.action === "qbit_torrent_not_found") {
+                logMsg += ` → 立即触发跳过: ${tr.message}`;
+            } else if (tr.action === "trigger_failed") {
+                logMsg += ` → 立即触发失败 (${tr.error?.slice(0, 60) || "?"})，下周期 cron 会重试`;
+            } else {
+                logMsg += ` → 立即触发: ${tr.action || tr.status || "?"}`;
+            }
+        }
+        addLog(logMsg, tr?.action === "started" ? "success" : "info");
+        // 1.5s 后刷新历史（让 worker 有时间初始化 row）
+        setTimeout(() => loadAutoOrganizeHistory(), 1500);
     } catch (err) {
         alert(`网络错误: ${err.message}`);
     }

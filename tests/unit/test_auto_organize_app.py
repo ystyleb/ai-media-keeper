@@ -638,3 +638,128 @@ def test_list_runs_invalid_status_filter_returns_400(client, token):
     assert resp.status_code == 400
     body = resp.get_json()
     assert body["error"] == "invalid_status_filter"
+
+
+# ─── reset trigger_now (UX improvement) ───
+
+
+def test_reset_without_trigger_now_does_not_call_qbit(client, token, monkeypatch):
+    """trigger_now=False (default) → 只 DELETE row 不调 qBit。"""
+    import time as _t
+    with app_module.app.test_request_context():
+        c = app_module.get_db()
+        c.execute(
+            "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,attempts,"
+            "created_at,completed_at) VALUES(?,?,?,?,?,?)",
+            ("h-no-trigger", "/x", "failed", 1, int(_t.time()), int(_t.time())),
+        )
+        c.commit()
+
+    qbit_called = False
+
+    def fake_get_torrents():
+        nonlocal qbit_called
+        qbit_called = True
+        return []
+
+    monkeypatch.setattr(app_module.qbit, "get_torrents", fake_get_torrents)
+    resp = client.post(
+        "/api/auto-organize/reset",
+        json={"qbit_hash": "h-no-trigger"},  # no trigger_now
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["trigger_result"] is None
+    assert qbit_called is False
+
+
+def test_reset_with_trigger_now_qbit_torrent_not_found(client, token, monkeypatch):
+    """trigger_now=True 但 qBit 没这个 hash → trigger_result.action='qbit_torrent_not_found'."""
+    import time as _t
+    with app_module.app.test_request_context():
+        c = app_module.get_db()
+        c.execute(
+            "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,attempts,"
+            "created_at,completed_at) VALUES(?,?,?,?,?,?)",
+            ("h-not-in-qbit", "/x", "failed", 1, int(_t.time()), int(_t.time())),
+        )
+        c.commit()
+
+    monkeypatch.setattr(app_module.qbit, "get_torrents", lambda: [
+        {"hash": "different-hash", "name": "other"},
+    ])
+    resp = client.post(
+        "/api/auto-organize/reset",
+        json={"qbit_hash": "h-not-in-qbit", "trigger_now": True},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["trigger_result"]["action"] == "qbit_torrent_not_found"
+
+
+def test_reset_with_trigger_now_qbit_down_returns_trigger_failed(client, token, monkeypatch):
+    """trigger_now=True 但 qBit 502 → trigger_result.action='trigger_failed'，reset 仍 ok."""
+    import time as _t
+    with app_module.app.test_request_context():
+        c = app_module.get_db()
+        c.execute(
+            "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,attempts,"
+            "created_at,completed_at) VALUES(?,?,?,?,?,?)",
+            ("h-qbit-down", "/x", "failed", 1, int(_t.time()), int(_t.time())),
+        )
+        c.commit()
+
+    def boom():
+        raise RuntimeError("qBit login failed: 502")
+
+    monkeypatch.setattr(app_module.qbit, "get_torrents", boom)
+    resp = client.post(
+        "/api/auto-organize/reset",
+        json={"qbit_hash": "h-qbit-down", "trigger_now": True},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = resp.get_json()
+    assert body["ok"] is True  # reset 仍成功
+    assert body["trigger_result"]["action"] == "trigger_failed"
+    assert "502" in body["trigger_result"]["error"]
+
+
+def test_reset_with_trigger_now_dispatches(client, token, monkeypatch):
+    """trigger_now=True + qBit 有 hash → 调 dispatch_one + 返结果."""
+    import time as _t
+    with app_module.app.test_request_context():
+        c = app_module.get_db()
+        c.execute(
+            "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,attempts,"
+            "created_at,completed_at) VALUES(?,?,?,?,?,?)",
+            ("h-dispatch", "/x", "failed", 1, int(_t.time()), int(_t.time())),
+        )
+        c.commit()
+
+    monkeypatch.setattr(app_module.qbit, "get_torrents", lambda: [
+        {"hash": "h-dispatch", "name": "X", "category": "Movies",
+         "state": "seeding", "progress": 1.0,
+         "content_path": "/d/x.mkv"},
+    ])
+    # mock dispatch_one 返 started
+    captured = {}
+
+    def fake_dispatch(conn, torrent, **kw):
+        captured["called_with_hash"] = torrent["hash"]
+        return {"action": "started", "qbit_hash": torrent["hash"],
+                "action_id": "act-trig-1"}
+
+    monkeypatch.setattr(app_module.qbit_auto, "dispatch_one", fake_dispatch)
+    resp = client.post(
+        "/api/auto-organize/reset",
+        json={"qbit_hash": "h-dispatch", "trigger_now": True},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["trigger_result"]["action"] == "started"
+    assert body["trigger_result"]["action_id"] == "act-trig-1"
+    assert captured["called_with_hash"] == "h-dispatch"

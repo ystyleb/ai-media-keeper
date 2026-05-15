@@ -4841,15 +4841,22 @@ def list_auto_organize_runs():
 @app.route("/api/auto-organize/reset", methods=["POST"])
 @require_token
 def reset_auto_organize_run():
-    """User 手动 reset 单 row (failed / skipped_* → 删除，下周期 cron 重新尝试).
+    """User 手动 reset 单 row (failed / skipped_* → 删除).
 
-    Body: {"qbit_hash": str}
+    Body: {"qbit_hash": str, "trigger_now": bool (optional, default False)}
+
+    - trigger_now=False（默认）：仅 DELETE row，下周期 cron 重新尝试（最多等 5min）
+    - trigger_now=True：DELETE 后立即调 qbit.get_torrents() 找 hash 对应种子 → dispatch_one
+      → 5s 出结果。qBit 不可达 / 种子不存在 → trigger_result 字段说明，但 reset 仍 ok
+
     只允许删除 terminal 状态的 row (不能删 organizing / pending — 可能有副作用未完成).
     """
     data = request.json or {}
     qbit_hash = (data.get("qbit_hash") or "").strip()
     if not qbit_hash:
         return jsonify({"ok": False, "error": "qbit_hash required"}), 400
+    trigger_now = bool(data.get("trigger_now", False))
+
     db = get_db()
     row = qbit_auto.get_run(db, qbit_hash)
     if row is None:
@@ -4863,8 +4870,41 @@ def reset_auto_organize_run():
         }), 409
     db.execute("DELETE FROM auto_organize_runs WHERE qbit_hash = ?", (qbit_hash,))
     db.commit()
-    return jsonify({"ok": True, "qbit_hash": qbit_hash,
-                    "previous_status": row["status"]})
+
+    trigger_result = None
+    if trigger_now:
+        try:
+            torrents = qbit.get_torrents()
+            target = next((t for t in torrents if t.get("hash") == qbit_hash), None)
+            if target is None:
+                trigger_result = {
+                    "action": "qbit_torrent_not_found",
+                    "message": "qBit 中找不到该 hash 对应的种子（已删 / hash 不匹配）",
+                }
+            else:
+                cfg = load_qbit_auto_organize_config()
+                threshold = cfg.get("confidence_threshold", 0.85)
+                trigger_result = qbit_auto.dispatch_one(
+                    db, target,
+                    list_video_paths_fn=lambda cp: _list_video_paths(
+                        cp, max_depth=3, limit=MAX_ORGANIZE_BATCH_ITEMS,
+                    ),
+                    confidence_threshold=threshold,
+                    build_and_start_organize_fn=_build_and_start_auto_organize,
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"[auto-organize] trigger_now failed for {qbit_hash}")
+            trigger_result = {
+                "action": "trigger_failed",
+                "error": f"{type(e).__name__}: {e}",
+                "message": "立即触发失败（qBit 不可达？）；下周期 cron 仍会重试",
+            }
+    return jsonify({
+        "ok": True,
+        "qbit_hash": qbit_hash,
+        "previous_status": row["status"],
+        "trigger_result": trigger_result,
+    })
 
 
 @app.route("/api/watch/sync", methods=["POST"])
