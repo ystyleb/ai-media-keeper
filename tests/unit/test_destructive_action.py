@@ -396,3 +396,77 @@ def test_canonical_json_is_stable(payload):
     p1 = {"a": 1, "b": [3, 2, 1], "c": {"y": 2, "x": 1}}
     p2 = {"c": {"x": 1, "y": 2}, "b": [3, 2, 1], "a": 1}
     assert da._payload_hash(p1) == da._payload_hash(p2)
+
+
+# ── Phase 4B.0：TTL + update_running_result ──────────────────────
+
+
+def test_organize_ttl_extended_to_1800():
+    """Phase 4B：organize TTL 从 600s → 1800s（给 N=500 plan 审核 30 min）。"""
+    assert da.TTL_BY_KIND["organize"] == 1800
+
+
+def test_organize_running_timeout_extended_to_1800():
+    """Phase 4B：organize running_timeout 60s → 1800s。N=500 confirm 跑 5-8 min，
+    reaper 必须比 executor 慢，不能误标 needs_manual_recovery。"""
+    assert da.RUNNING_TIMEOUT_BY_KIND["organize"] == 1800
+
+
+def test_update_running_result_writes_partial_progress(conn, secret, payload):
+    """在 status='running' 时增量写 result_json，不改 status/completed_at。"""
+    # Step 1: preview + atomic consume 进入 running 状态
+    res = da.create_preview(conn, kind="delete", payload=payload, server_secret=secret)
+    pre = conn.execute(
+        "SELECT payload_hash FROM destructive_actions WHERE action_id = ?",
+        (res.action_id,),
+    ).fetchone()
+    row = da._atomic_consume(conn, res.action_id, pre["payload_hash"], da._now())
+    assert row is not None
+    assert row["status"] == "running"
+
+    # Step 2: progressive write
+    partial = {"items_total": 100, "items_completed": 42, "current": "/a/b.mkv"}
+    ok = da.update_running_result(conn, res.action_id, partial)
+    assert ok is True
+
+    # Step 3: 验证 result_json 落盘 + status / completed_at 不变
+    after = conn.execute(
+        "SELECT status, completed_at, result_json FROM destructive_actions "
+        "WHERE action_id = ?",
+        (res.action_id,),
+    ).fetchone()
+    assert after["status"] == "running"
+    assert after["completed_at"] is None
+    assert "items_completed" in after["result_json"]
+    assert "42" in after["result_json"]
+
+
+def test_update_running_result_skips_terminal_rows(conn, secret, payload):
+    """status != 'running' 时 update 不生效，返回 False。防御踩 terminal 状态。"""
+    res = da.create_preview(conn, kind="delete", payload=payload, server_secret=secret)
+    # 直接 mark terminal（绕过 confirm 流程）
+    da._mark_terminal(
+        conn, res.action_id, status="succeeded", result={"x": 1}, error=None
+    )
+    ok = da.update_running_result(conn, res.action_id, {"items_completed": 99})
+    assert ok is False
+    # 原 result 不被覆盖
+    row = conn.execute(
+        "SELECT result_json FROM destructive_actions WHERE action_id = ?",
+        (res.action_id,),
+    ).fetchone()
+    assert '"x":1' in row["result_json"]
+    assert "99" not in row["result_json"]
+
+
+def test_update_running_result_skips_pending_rows(conn, secret, payload):
+    """status='pending'（未 consume）也不应被增量写。"""
+    res = da.create_preview(conn, kind="delete", payload=payload, server_secret=secret)
+    ok = da.update_running_result(conn, res.action_id, {"foo": "bar"})
+    assert ok is False
+
+
+def test_update_running_result_missing_action_returns_false(conn):
+    """action_id 不存在 → False，不抛错。"""
+    ok = da.update_running_result(conn, "nonexistent-action-id", {"x": 1})
+    assert ok is False

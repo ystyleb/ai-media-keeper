@@ -28,21 +28,24 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 # kind → TTL（秒）。archive 长操作给 30 min，delete 5 min。
+# Phase 4B：organize 从 600s → 1800s，给批量目录 organize 用户审 N=500 plan 的时间。
 TTL_BY_KIND: dict[str, int] = {
     "delete": 300,
     "nfo_write": 1800,
     "archive": 1800,
     "purge_provider": 600,
-    "organize": 600,
+    "organize": 1800,
 }
 
 # crash recovery 阈值：running 持续超过此值视为 crash
+# Phase 4B：organize 从 60s → 1800s，批量 confirm 跑 N=500 文件约 5-8 min，
+# 加 safety buffer 设 30 min。reaper 是 ground-truth 兜底，不能跑得比 executor 还快。
 RUNNING_TIMEOUT_BY_KIND: dict[str, int] = {
     "delete": 60,
     "nfo_write": 120,
     "archive": 1800,
     "purge_provider": 120,
-    "organize": 60,
+    "organize": 1800,
 }
 
 
@@ -311,6 +314,30 @@ def _mark_terminal(
         ),
     )
     conn.commit()
+
+
+def update_running_result(
+    conn: sqlite3.Connection,
+    action_id: str,
+    partial_result: dict[str, Any],
+) -> bool:
+    """Phase 4B 契约 #9：background worker 增量写 result_json（progressive progress）。
+
+    仅在 status='running' 时生效；其它状态（pending / succeeded / failed /
+    needs_manual_recovery）的 row 不动，避免踩 terminal 状态。返回 True = 真更新；
+    False = row 已 terminal / 不存在 / 仍是 pending。
+    """
+    cur = conn.execute(
+        """
+        UPDATE destructive_actions
+           SET result_json = ?
+         WHERE action_id   = ?
+           AND status      = 'running'
+        """,
+        (_canonical_json(partial_result), action_id),
+    )
+    conn.commit()
+    return cur.rowcount == 1
 
 
 def confirm(

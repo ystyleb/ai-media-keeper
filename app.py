@@ -196,6 +196,13 @@ EMBY_KEY_FILE = CONFIG_DIR / ".emby_key"
 EMBY_CONFIG_FILE = CONFIG_DIR / "emby.json"
 ORGANIZE_CONFIG_FILE = CONFIG_DIR / "organize.json"
 
+# Phase 4B：批量目录 organize 上限。N=500 时 payload_json ≈ 750KB（SQLite TEXT
+# 单 row 无硬限制，但渐进式 result_json 更新会重写整 row，500 次写放大 ~50s），
+# 选 500 是用户体感「最多 500 文件单次整理」+ 不爆 commit 耗时的折中。
+MAX_ORGANIZE_BATCH_ITEMS = 500
+# ≤ 此阈值的 confirm 走 inline 同步（响应 < 3s）；超过走 background worker + polling。
+ORGANIZE_BATCH_INLINE_THRESHOLD = 5
+
 
 def load_tmdb_key() -> str:
     """env > config/.tmdb_key > 空"""
