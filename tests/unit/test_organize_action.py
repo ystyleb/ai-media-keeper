@@ -1623,3 +1623,131 @@ def test_action_abort_rejects_non_running_action(client, token, monkeypatch):
     )
     assert resp.status_code == 409
     assert resp.get_json()["current_status"] == "succeeded"
+
+
+# ── codex r1 修复测试 ──
+
+
+def test_confirm_inline_organize_respects_selected_indices(client, token, monkeypatch):
+    """codex r1 BLOCKER 1: inline path (≤5 items) selected_indices 也生效。"""
+    _patch_organize_config(monkeypatch)
+    n = 3
+    src_paths = [f"/dl/m{i}.mkv" for i in range(n)]
+
+    def fake_stat(paths):
+        return {p: ({"exists": True, "inode": 1000 + i,
+                     "size_bytes": 1024, "mtime": 1000}
+                    if p in src_paths
+                    else {"exists": False})
+                for i, p in enumerate(paths)}
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
+    _patch_cache(monkeypatch, _CachedStub(
+        title="Movie", media_type="movie", year=2024, tmdb_id="111",
+    ))
+
+    inline_calls = []
+    def fake_one_item(item, expected_metadata):
+        inline_calls.append(item["src_path"])
+        return {"src_path": item["src_path"], "status": "succeeded"}
+    monkeypatch.setattr(app_module, "_organize_executor_one_item", fake_one_item)
+
+    resp = client.post(
+        "/api/action/preview",
+        json={"kind": "organize",
+              "items": [{"src_path": p} for p in src_paths]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = resp.get_json()
+    action_id, signed = body["action_id"], body["signed_token"]
+
+    # 只勾 index 0 + 2
+    resp2 = client.post(
+        "/api/action/confirm",
+        json={"action_id": action_id, "signed_token": signed,
+              "selected_indices": [0, 2]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 200
+    result = resp2.get_json()["result"]
+    counts = result["status_counts"]
+    assert counts["succeeded"] == 2
+    assert counts["skipped_by_user"] == 1
+    # 真正调用的只有 m0 + m2
+    assert inline_calls == [src_paths[0], src_paths[2]]
+
+
+def test_confirm_selected_indices_out_of_range_returns_400(client, token, monkeypatch):
+    """codex r1 IMP6: selected_indices 含越界 index → 400。"""
+    _patch_organize_config(monkeypatch)
+    monkeypatch.setattr(app_module, "_ssh_stat_paths",
+                        lambda paths: _src_stat("/dl/x.mkv"))
+    _patch_cache(monkeypatch, _CachedStub(
+        title="Movie", media_type="movie", year=2024, tmdb_id="111",
+    ))
+    resp = client.post(
+        "/api/action/preview",
+        json={"kind": "organize", "items": [{"src_path": "/dl/x.mkv"}]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = resp.get_json()
+
+    # selected_indices=[5] 但 payload 只有 1 item → 越界
+    resp2 = client.post(
+        "/api/action/confirm",
+        json={"action_id": body["action_id"], "signed_token": body["signed_token"],
+              "selected_indices": [5]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 400
+    assert resp2.get_json()["error"] == "selected_indices_out_of_range"
+
+
+def test_confirm_concurrent_organize_rollbacks_to_pending(client, token, monkeypatch):
+    """codex r1 NIT1: 并发 organize 撞上 → rollback_to_pending（不浪费 preview）."""
+    from services import organize_runner
+    _patch_organize_config(monkeypatch)
+
+    n = app_module.ORGANIZE_BATCH_INLINE_THRESHOLD + 2
+    src_paths = [f"/dl/m{i}.mkv" for i in range(n)]
+    monkeypatch.setattr(app_module, "_ssh_stat_paths",
+                        lambda paths: {p: ({"exists": True, "inode": 1000 + i,
+                                            "size_bytes": 1024, "mtime": 1000}
+                                           if p in src_paths
+                                           else {"exists": False})
+                                       for i, p in enumerate(paths)})
+    _patch_cache(monkeypatch, _CachedStub(
+        title="Movie", media_type="movie", year=2024, tmdb_id="111",
+    ))
+    # 模拟 start_organize_executor 抛 ConcurrentOrganizeError
+    def fake_start(**_kw):
+        raise organize_runner.ConcurrentOrganizeError("another in progress")
+    monkeypatch.setattr(organize_runner, "start_organize_executor", fake_start)
+    monkeypatch.setattr(organize_runner, "get_active_action_id", lambda: "other-action")
+
+    resp = client.post(
+        "/api/action/preview",
+        json={"kind": "organize",
+              "items": [{"src_path": p} for p in src_paths]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = resp.get_json()
+    action_id, signed = body["action_id"], body["signed_token"]
+
+    resp2 = client.post(
+        "/api/action/confirm",
+        json={"action_id": action_id, "signed_token": signed},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 409
+    assert resp2.get_json()["active_action_id"] == "other-action"
+
+    # action 应该被 rollback_to_pending，可以再 confirm
+    # （用 get_db 查 status 验证）
+    with app_module.app.test_request_context():
+        c = app_module.get_db()
+        row = c.execute(
+            "SELECT status, consumed_at FROM destructive_actions WHERE action_id = ?",
+            (action_id,),
+        ).fetchone()
+    assert row["status"] == "pending"
+    assert row["consumed_at"] is None

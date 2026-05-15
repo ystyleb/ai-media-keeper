@@ -2221,17 +2221,37 @@ def _organize_executor_one_item(item: dict, expected_metadata: dict | None) -> d
     }
 
 
-def _organize_executor(payload: dict) -> dict:
+def _organize_executor(payload: dict, selected_indices: list[int] | None = None) -> dict:
     """Phase 4A.3 inline 入口：循环调 _organize_executor_one_item。
 
     Phase 4B：保留作为 inline (≤ ORGANIZE_BATCH_INLINE_THRESHOLD) 路径。
+    codex r1 BLOCKER 1: inline 路径也支持 selected_indices（≤5 文件用户也可能勾子集）
+    codex r1 IMP5: 单 item 异常被 catch 标 failed，跟 background 行为对齐。
     """
     items = payload["items"]
+    selected_set: set[int] | None = (
+        set(selected_indices) if selected_indices is not None else None
+    )
     results: list[dict] = []
-    for it in items:
-        results.append(
-            _organize_executor_one_item(it, it.get("metadata_snapshot"))
-        )
+    for idx, it in enumerate(items):
+        src_path = it.get("src_path")
+        if selected_set is not None and idx not in selected_set:
+            results.append({
+                "src_path": src_path, "status": "skipped_by_user", "index": idx,
+            })
+            continue
+        try:
+            r = _organize_executor_one_item(it, it.get("metadata_snapshot"))
+            r.setdefault("src_path", src_path)
+            r.setdefault("status", "failed")
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"[organize/inline] item {src_path!r} crashed")
+            r = {
+                "src_path": src_path, "status": "failed",
+                "reason": f"executor_crashed: {type(e).__name__}: {e}",
+            }
+        r["index"] = idx
+        results.append(r)
 
     counts: dict[str, int] = {}
     for r in results:
@@ -2243,6 +2263,7 @@ def _organize_executor(payload: dict) -> dict:
         "total_succeeded": counts.get("succeeded", 0),
         "total_already_linked": counts.get("already_linked", 0),
         "total_failed": counts.get("failed", 0),
+        "total_skipped_by_user": counts.get("skipped_by_user", 0),
     }
 
 
@@ -2747,6 +2768,27 @@ def action_confirm():
     if pre is None:
         return jsonify({"error": "action_not_found", "action_id": action_id}), 404
 
+    # 4B.3 / codex r1 IMP6: selected_indices 校验（inline 和 background 都用）
+    selected_indices_raw = data.get("selected_indices")
+    selected_indices: list[int] | None = None
+    if selected_indices_raw is not None:
+        if not isinstance(selected_indices_raw, list) or \
+           not all(isinstance(i, int) for i in selected_indices_raw):
+            return jsonify({"error": "selected_indices must be list[int]"}), 400
+        if pre["kind"] != "organize":
+            return jsonify({"error": "selected_indices only valid for organize"}), 400
+        try:
+            payload_for_check = json.loads(pre["payload_json"])
+        except (json.JSONDecodeError, TypeError):
+            return jsonify({"error": "payload_corrupted", "action_id": action_id}), 500
+        items_count = len(payload_for_check.get("items", []))
+        if any(i < 0 or i >= items_count for i in selected_indices_raw):
+            return jsonify({
+                "error": "selected_indices_out_of_range",
+                "valid_range": [0, items_count - 1],
+            }), 400
+        selected_indices = selected_indices_raw
+
     if pre["kind"] == "organize":
         try:
             payload = json.loads(pre["payload_json"])
@@ -2755,13 +2797,6 @@ def action_confirm():
         items = payload.get("items", [])
         if len(items) > ORGANIZE_BATCH_INLINE_THRESHOLD:
             # Background path: 手动 consume + verify token + start worker，返 202
-            selected_indices = data.get("selected_indices")
-            if selected_indices is not None and (
-                not isinstance(selected_indices, list) or
-                not all(isinstance(i, int) for i in selected_indices)
-            ):
-                return jsonify({"error": "selected_indices must be list[int]"}), 400
-
             # Stage 1: atomic consume
             row = destructive_action._atomic_consume(
                 db, action_id, pre["payload_hash"], int(time.time())
@@ -2788,6 +2823,8 @@ def action_confirm():
                 return jsonify({"error": "invalid_signed_token"}), 401
 
             # Stage 3: 起 background worker
+            # codex r1 NIT1: ConcurrentOrganizeError → rollback_to_pending 不消耗 row
+            # codex r1 IMP1: broad Exception catch — 任何 start failure 都不让 row 卡 reaper
             try:
                 organize_runner.start_organize_executor(
                     db_path=DB_PATH,
@@ -2796,15 +2833,24 @@ def action_confirm():
                     execute_one_item=_organize_executor_one_item,
                     selected_indices=selected_indices,
                 )
-            except organize_runner.ConcurrentOrganizeError as e:
-                destructive_action._mark_terminal(
-                    db, action_id, status="failed", result=None,
-                    error=f"concurrent_organize: {e}",
-                )
+            except organize_runner.ConcurrentOrganizeError:
+                # 没启 worker，user 可以稍后 retry；回滚 row 到 pending 不浪费 preview
+                destructive_action._rollback_to_pending(db, action_id)
                 return jsonify({
                     "error": "another_organize_running",
                     "active_action_id": organize_runner.get_active_action_id(),
+                    "hint": "另一个 organize 在跑；中止它后重试当前 preview 即可。",
                 }), 409
+            except Exception as e:  # noqa: BLE001
+                logger.exception(f"[action/confirm] start_organize_executor failed for {action_id}")
+                destructive_action._mark_terminal(
+                    db, action_id, status="failed", result=None,
+                    error=f"worker_start_failed: {type(e).__name__}: {e}",
+                )
+                return jsonify({
+                    "error": "worker_start_failed",
+                    "detail": f"{type(e).__name__}: {e}",
+                }), 500
 
             return jsonify({
                 "action_id": action_id,
@@ -2813,14 +2859,20 @@ def action_confirm():
                 "polling_url": f"/api/action/status?id={action_id}",
             }), 202
 
-    # Default path: inline confirm（Phase 4A 行为）
+    # Default path: inline confirm（Phase 4A 行为；4B 加 selected_indices 闭包绑定）
+    # codex r1 BLOCKER 1: inline 路径也尊重 selected_indices（≤5 item 用户可勾子集）
+    def _wrapped_executor(pl: dict) -> dict:
+        if pl.get("kind") == "organize":
+            return _organize_executor(pl, selected_indices=selected_indices)
+        return _route_executor_by_kind(pl)
+
     try:
         out = destructive_action.confirm(
             db,
             action_id=action_id,
             signed_token=signed_token,
             server_secret=SERVER_SECRET,
-            executor=_route_executor_by_kind,
+            executor=_wrapped_executor,
         )
     except destructive_action.ActionNotFound:
         return jsonify({"error": "action_not_found", "action_id": action_id}), 404

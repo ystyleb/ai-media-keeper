@@ -13,6 +13,14 @@ DB 写争用 + qBit racing）。
   - abort 信号用 module-level dict（spike 阶段 — 用户不在意 cross-restart 恢复，
     reaper 在 RUNNING_TIMEOUT_BY_KIND['organize']=1800s 后兜底）
 
+[code-enforced single-worker constraint]（codex r1 BLOCKER 2 / IMP4）：
+此模块的 _active_lock / _abort_flags 都是**进程内**状态，gunicorn 多 worker
+场景下两个进程会各自 start worker 互不感知，且 abort 信号可能落到错进程。
+项目级约束已经强制单 worker（destructive_action.load_server_secret 在
+WORKER_COUNT > 1 时拒绝启动），所以此约束跟现有架构对齐。
+真要多 worker 时切换到 SQLite lease（destructive_actions 表加 worker_id 列
++ guarded UPDATE claim）— 留 Phase 4C 后置。
+
 依赖注入：execute_one_item callable 接受 (payload_item, expected_metadata)，
 返 dict result。这样 SSH / NFO write / qBit 副作用都解耦，单元测试 mock 即可。
 """
@@ -137,15 +145,24 @@ def _worker_main(
     execute_one_item: ExecuteOneItem,
     selected_indices: list[int] | None,
 ) -> None:
-    """Worker thread 主循环：顺序处理 items，每个 item 完成后 progressive 写 result_json。"""
+    """Worker thread 主循环：顺序处理 items，每个 item 完成后 progressive 写 result_json。
+
+    codex r1 IMP2 修复：open_connection 移入 try 块，并把 conn=None 初始化在外面
+    防止 open_connection 抛错时 active lock 永久卡住（finally 无条件 _clear_active）。
+
+    codex r1 IMP7 修复：注释 fix — 实际上每 item 最多写 2 次 result_json（开始前
+    写 current_item 给 polling 看 + 结束后写完成结果）。total ~2N commit per action。
+    SQLite WAL + DEFERRED 下 N=500 增 ~50s commit 成本可接受。
+    """
     selected_set: set[int] | None = (
         set(selected_indices) if selected_indices is not None else None
     )
     items = payload.get("items", [])
     total = len(items)
 
-    conn = destructive_action.open_connection(db_path)
+    conn: sqlite3.Connection | None = None
     try:
+        conn = destructive_action.open_connection(db_path)
         results: list[dict] = []
         status_counts: dict[str, int] = {}
 
@@ -241,11 +258,18 @@ def _worker_main(
                 f"{final_result['total_failed']} failed"
             )
 
-        destructive_action._mark_terminal(
+        # codex r1 IMP3: 用 mark_terminal_if_running guard，避免覆盖 reaper 已写入
+        # 的 needs_manual_recovery / 其他进程已 mark 的 terminal 状态
+        flipped = destructive_action.mark_terminal_if_running(
             conn, action_id, status="succeeded",
             result=final_result, error=None,
         )
-        if recovery_hint:
+        if not flipped:
+            logger.warning(
+                f"[organize_runner] action {action_id} already terminal at finish "
+                f"(reaper may have intervened); not overwriting"
+            )
+        elif recovery_hint:
             conn.execute(
                 "UPDATE destructive_actions SET recovery_hint = ? WHERE action_id = ?",
                 (recovery_hint, action_id),
@@ -255,18 +279,21 @@ def _worker_main(
 
     except Exception as e:  # noqa: BLE001
         logger.exception(f"[organize_runner] action {action_id} worker crashed")
-        try:
-            destructive_action._mark_terminal(
-                conn, action_id, status="failed", result=None,
-                error=f"worker_crashed: {type(e).__name__}: {e}",
-            )
-        except sqlite3.Error:
-            pass
+        if conn is not None:
+            try:
+                destructive_action.mark_terminal_if_running(
+                    conn, action_id, status="failed", result=None,
+                    error=f"worker_crashed: {type(e).__name__}: {e}",
+                )
+            except sqlite3.Error:
+                pass
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        # codex r1 IMP2: 无条件清 active lock，否则 open_connection 抛错时 lock 永久卡住
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
         _clear_active(action_id)
         _clear_abort(action_id)
 

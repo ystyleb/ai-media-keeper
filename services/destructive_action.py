@@ -340,6 +340,39 @@ def update_running_result(
     return cur.rowcount == 1
 
 
+def mark_terminal_if_running(
+    conn: sqlite3.Connection,
+    action_id: str,
+    status: str,
+    result: dict[str, Any] | None,
+    error: str | None,
+) -> bool:
+    """Phase 4B 契约 #9（codex r1 IMP3）：guarded version of _mark_terminal —
+    只在 status='running' 时切到 terminal，避免覆盖 reaper 已写入的
+    needs_manual_recovery / 别处已 mark 的 failed。
+
+    返回是否真翻转了状态。False = 已被 reaper 抢先标或别处已 terminal。
+    """
+    cur = conn.execute(
+        """
+        UPDATE destructive_actions
+           SET status       = ?,
+               completed_at = ?,
+               error        = ?,
+               result_json  = ?
+         WHERE action_id    = ?
+           AND status       = 'running'
+        """,
+        (
+            status, _now(), error,
+            _canonical_json(result) if result else None,
+            action_id,
+        ),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
 def confirm(
     conn: sqlite3.Connection,
     *,

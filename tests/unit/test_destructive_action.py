@@ -470,3 +470,57 @@ def test_update_running_result_missing_action_returns_false(conn):
     """action_id 不存在 → False，不抛错。"""
     ok = da.update_running_result(conn, "nonexistent-action-id", {"x": 1})
     assert ok is False
+
+
+def test_mark_terminal_if_running_flips_running_to_succeeded(conn, secret, payload):
+    """status='running' 时正常翻成 succeeded，返 True。"""
+    res = da.create_preview(conn, kind="delete", payload=payload, server_secret=secret)
+    pre = conn.execute(
+        "SELECT payload_hash FROM destructive_actions WHERE action_id = ?",
+        (res.action_id,),
+    ).fetchone()
+    row = da._atomic_consume(conn, res.action_id, pre["payload_hash"], da._now())
+    assert row is not None
+
+    ok = da.mark_terminal_if_running(
+        conn, res.action_id, status="succeeded",
+        result={"items": [{"x": 1}]}, error=None,
+    )
+    assert ok is True
+    after = conn.execute(
+        "SELECT status, completed_at FROM destructive_actions WHERE action_id = ?",
+        (res.action_id,),
+    ).fetchone()
+    assert after["status"] == "succeeded"
+    assert after["completed_at"] is not None
+
+
+def test_mark_terminal_if_running_no_op_when_already_terminal(conn, secret, payload):
+    """row 已 terminal（reaper 抢标 needs_manual_recovery）→ 不被覆盖，返 False。"""
+    res = da.create_preview(conn, kind="delete", payload=payload, server_secret=secret)
+    # reaper 直接标 terminal
+    conn.execute(
+        "UPDATE destructive_actions SET status='needs_manual_recovery' "
+        "WHERE action_id = ?", (res.action_id,),
+    )
+    conn.commit()
+
+    ok = da.mark_terminal_if_running(
+        conn, res.action_id, status="succeeded", result={"x": 1}, error=None,
+    )
+    assert ok is False
+    # 原 status 不变
+    after = conn.execute(
+        "SELECT status FROM destructive_actions WHERE action_id = ?",
+        (res.action_id,),
+    ).fetchone()
+    assert after["status"] == "needs_manual_recovery"
+
+
+def test_mark_terminal_if_running_no_op_for_pending(conn, secret, payload):
+    """pending 状态 → 不 flip（必须先 consume 才能进 running 再 terminal）。"""
+    res = da.create_preview(conn, kind="delete", payload=payload, server_secret=secret)
+    ok = da.mark_terminal_if_running(
+        conn, res.action_id, status="succeeded", result={"x": 1}, error=None,
+    )
+    assert ok is False
