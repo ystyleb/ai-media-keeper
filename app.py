@@ -1888,8 +1888,229 @@ def _archive_executor(payload: dict) -> dict:
     )
 
 
+def _ssh_atomic_write_nfo(
+    nfo_path: str, xml: str, *, existing: bool = False, verify_tmdb: bool = True
+) -> tuple[bool, str]:
+    """SSH 原子写 NFO：base64 over SSH → 写 .tmp → mv 覆盖 → grep verify。
+
+    existing=True 时把旧 nfo cp 到 .bak（覆盖之前的 .bak）。
+    verify_tmdb=True 时 grep 'tmdb' 验证 NFO 含 uniqueid（payload 不含 tmdb_id 时
+    传 False 跳过此 check，否则会假阴性）。
+    返回 (success, reason_or_empty)。
+    """
+    try:
+        xml_b64 = base64.b64encode(xml.encode("utf-8")).decode("ascii")
+        safe_nfo = shlex.quote(nfo_path)
+        safe_tmp = shlex.quote(nfo_path + ".tmp")
+        safe_bak = shlex.quote(nfo_path + ".bak")
+        backup_step = (
+            f"[ -e {safe_nfo} ] && cp -p {safe_nfo} {safe_bak}; "
+            if existing else ""
+        )
+        verify_step = f" && grep -c 'tmdb' {safe_nfo}" if verify_tmdb else ""
+        cmd = (
+            f"{backup_step}"
+            f"printf '%s' {shlex.quote(xml_b64)} | base64 -d > {safe_tmp} && "
+            f"mv {safe_tmp} {safe_nfo}{verify_step}"
+        )
+        rc, out, err = ssh_exec(cmd, timeout=30)
+        if rc != 0:
+            return False, f"write_failed: {err.strip()[:200]}"
+        if verify_tmdb:
+            count = int(out.strip().splitlines()[-1]) if out.strip() else 0
+            if count < 1:
+                return False, "readback_missing_tmdbid"
+        return True, ""
+    except Exception as e:  # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _build_nfo_payload_for_organize(cached, nfo_kind: str):
+    """根据 cached metadata + nfo_kind 构造 NFOPayload。
+
+    nfo_kind ∈ {'movie', 'episode', 'tvshow'} (nfo_writer 协议)
+    """
+    return nfo_writer.NFOPayload(
+        media_type=nfo_kind,
+        title=cached.title,
+        original_title=cached.original_title,
+        year=cached.year,
+        plot=cached.overview,
+        tmdb_id=cached.tmdb_id,
+        imdb_id=cached.imdb_id,
+        rating=cached.vote_average,
+        genres=cached.genres or [],
+        cast=cached.cast or [],
+        runtime_minutes=cached.runtime_minutes,
+        poster_url=cached.poster_url,
+        season=cached.season_number if nfo_kind == "episode" else None,
+        episode=cached.episode_number if nfo_kind == "episode" else None,
+        episode_title=cached.episode_title if nfo_kind == "episode" else None,
+        episode_overview=cached.episode_overview if nfo_kind == "episode" else None,
+        episode_air_date=cached.episode_air_date if nfo_kind == "episode" else None,
+        episode_still_url=cached.episode_still_url if nfo_kind == "episode" else None,
+    )
+
+
+def _write_organize_nfo(src_path: str, target_nfo_path: str, nfo_kind: str) -> str:
+    """读 cache → 构造 NFOPayload → build_nfo → atomic write。
+
+    返回 status string: 'created' / 'failed: <reason>' / 'no_cache'。
+    Pattern D: 失败不抛 — 调用方根据 status 决定要不要告知用户「文件已整理但 NFO 失败」。
+    """
+    cached, _ = metadata_cache.get_by_path(get_db(), src_path)
+    if cached is None:
+        return "no_cache"
+    try:
+        payload = _build_nfo_payload_for_organize(cached, nfo_kind)
+        xml = nfo_writer.build_nfo(payload)
+    except Exception as e:  # noqa: BLE001
+        return f"failed: build_nfo {type(e).__name__}: {e}"
+    ok, reason = _ssh_atomic_write_nfo(
+        target_nfo_path, xml,
+        existing=False,
+        verify_tmdb=bool(cached.tmdb_id),
+    )
+    return "created" if ok else f"failed: {reason}"
+
+
+def _organize_executor(payload: dict) -> dict:
+    """Phase 4A.3: confirm 阶段 — Pattern C 双 inode 锚定 + Pattern D NFO 独立 status。
+
+    流程：
+      1. Re-stat src（防 mv 偷换）— src inode 锚 #1
+      2. Check dst（已存在 + inode 同 → already_linked；已存在 + inode 异 → failed）
+      3. mkdir -p dst_dir
+      4. ln src dst
+      5. Verify dst inode == src inode — Pattern C 锚 #2（保证真 hardlink 不是 cp）
+      6. 写 episode/movie NFO + tvshow.nfo（仅 tv 且未存在）
+
+    失败回滚：mkdir 后失败 + dst_dir 是空目录 → rmdir 释放；
+              ln verify 失败 → rm dst + rmdir 空目录。
+    """
+    items = payload["items"]
+    results: list[dict] = []
+
+    for it in items:
+        src_path = it["src_path"]
+        plan = it["computed_plan"]
+        media_type = it["media_type"]
+        src_snap_pre = it["src_snapshot"]
+
+        src_now = _ssh_stat_paths([src_path]).get(src_path, {"exists": False})
+        if not src_now.get("exists"):
+            results.append({
+                "src_path": src_path, "status": "failed",
+                "reason": "src_missing_at_confirm",
+            })
+            continue
+        # Pattern C 锚 #1
+        if src_now.get("inode") != src_snap_pre.get("inode"):
+            results.append({
+                "src_path": src_path, "status": "failed",
+                "reason": "src_inode_changed_since_preview",
+                "preview_inode": src_snap_pre.get("inode"),
+                "current_inode": src_now.get("inode"),
+            })
+            continue
+
+        dst_path = plan["dst_path"]
+        dst_now = _ssh_stat_paths([dst_path]).get(dst_path, {"exists": False})
+
+        if dst_now.get("exists") and dst_now.get("inode") == src_now.get("inode"):
+            results.append({
+                "src_path": src_path, "status": "already_linked",
+                "dst_path": dst_path,
+                "shared_inode": src_now.get("inode"),
+            })
+            continue
+        if dst_now.get("exists"):
+            results.append({
+                "src_path": src_path, "status": "failed",
+                "reason": "dst_exists_different_inode",
+                "dst_path": dst_path,
+                "dst_inode": dst_now.get("inode"),
+                "src_inode": src_now.get("inode"),
+            })
+            continue
+
+        # 1. mkdir -p
+        rc, _, err = _ssh_mkdir_p(plan["dst_dir"])
+        if rc != 0:
+            results.append({
+                "src_path": src_path, "status": "failed",
+                "reason": f"mkdir_failed: {err.strip()[:200]}",
+            })
+            continue
+
+        # 2. ln src dst
+        rc, _, err = _ssh_ln(src_path, dst_path)
+        if rc != 0:
+            # 回滚：dst_dir 如果是空目录，best-effort rmdir 释放
+            ssh_exec(f"rmdir {shlex.quote(plan['dst_dir'])} 2>/dev/null", timeout=5)
+            results.append({
+                "src_path": src_path, "status": "failed",
+                "reason": f"ln_failed: {err.strip()[:200]}",
+            })
+            continue
+
+        # 3. Pattern C 锚 #2: verify dst inode == src inode
+        verify = _ssh_stat_paths([dst_path]).get(dst_path, {"exists": False})
+        if not verify.get("exists") or verify.get("inode") != src_now.get("inode"):
+            # 不该发生：unlink dst + rmdir 空目录
+            ssh_exec(f"rm -f {shlex.quote(dst_path)}", timeout=5)
+            ssh_exec(f"rmdir {shlex.quote(plan['dst_dir'])} 2>/dev/null", timeout=5)
+            results.append({
+                "src_path": src_path, "status": "failed",
+                "reason": "ln_verify_failed_inode_mismatch",
+                "expected_inode": src_now.get("inode"),
+                "actual_inode": verify.get("inode"),
+            })
+            continue
+
+        # 4. 写 NFO（Pattern D：失败不回滚 hardlink）
+        nfo_kind = "episode" if media_type == "tv" else "movie"
+        nfo_status = _write_organize_nfo(src_path, plan["nfo_path"], nfo_kind)
+
+        tvshow_nfo_status = "skipped"
+        if media_type == "tv" and plan.get("tvshow_nfo_path"):
+            tvshow_stat = _ssh_stat_paths([plan["tvshow_nfo_path"]]).get(
+                plan["tvshow_nfo_path"], {"exists": False}
+            )
+            if tvshow_stat.get("exists"):
+                tvshow_nfo_status = "already_exists"
+            else:
+                tvshow_nfo_status = _write_organize_nfo(
+                    src_path, plan["tvshow_nfo_path"], "tvshow",
+                )
+
+        results.append({
+            "src_path": src_path,
+            "dst_path": dst_path,
+            "status": "succeeded",
+            "src_inode": src_now.get("inode"),
+            "dst_inode": verify.get("inode"),
+            "nfo_path": plan["nfo_path"],
+            "nfo_status": nfo_status,
+            "tvshow_nfo_path": plan.get("tvshow_nfo_path"),
+            "tvshow_nfo_status": tvshow_nfo_status,
+        })
+
+    counts: dict[str, int] = {}
+    for r in results:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    logger.info(f"[action/organize] done: {counts}")
+    return {
+        "items": results,
+        "status_counts": counts,
+        "total_succeeded": counts.get("succeeded", 0),
+        "total_already_linked": counts.get("already_linked", 0),
+        "total_failed": counts.get("failed", 0),
+    }
+
+
 def _route_executor_by_kind(payload: dict) -> dict:
-    """Phase 3.5: 支持 'delete' + 'nfo_write' + 'archive' (stub)。"""
+    """Phase 4A.3: 支持 'delete' + 'nfo_write' + 'archive' (stub) + 'organize'."""
     kind = payload.get("kind")
     if kind == "archive":
         return _archive_executor(payload)
@@ -1897,6 +2118,8 @@ def _route_executor_by_kind(payload: dict) -> dict:
         return _delete_executor(payload)
     if kind == "nfo_write":
         return _nfo_write_executor(payload)
+    if kind == "organize":
+        return _organize_executor(payload)
     raise ValueError(f"unsupported kind: {kind!r}")
 
 
