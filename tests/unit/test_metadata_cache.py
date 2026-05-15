@@ -610,3 +610,108 @@ def test_split_tmdb_ids_helper_enforces_mutual_exclusion():
     assert metadata_cache._split_tmdb_ids("part", "999") == (None, None, None)
     assert metadata_cache._split_tmdb_ids(None, "x") == (None, None, None)
     assert metadata_cache._split_tmdb_ids("movie", None) == (None, None, None)
+
+
+# ── Phase 4B.1：get_many_by_path batch helper ──────────────────────
+
+
+def test_get_many_empty_paths_returns_empty_dict(conn):
+    result = metadata_cache.get_many_by_path(conn, [])
+    assert result == {}
+
+
+def test_get_many_all_miss_returns_none_for_each(conn):
+    """没 seed 任何 row → 三个 path 都 (None, miss)。"""
+    result = metadata_cache.get_many_by_path(conn, ["/a", "/b", "/c"])
+    assert len(result) == 3
+    assert all(cached is None and status == "miss"
+               for cached, status in result.values())
+
+
+def test_get_many_mixed_hit_and_miss(conn):
+    """seed 2 个 path，查 3 个 → 2 hit + 1 miss。"""
+    res = _make_result(top=_make_candidate())
+    metadata_cache.upsert_identification(
+        conn, path="/share/movie.mkv",
+        stat={"inode": 100, "size_bytes": 1000, "mtime": 2000},
+        identify_result=res,
+    )
+    metadata_cache.upsert_identification(
+        conn, path="/share/tv.s01e01.mkv",
+        stat={"inode": 200, "size_bytes": 2000, "mtime": 3000},
+        identify_result=res,
+    )
+    result = metadata_cache.get_many_by_path(
+        conn, ["/share/movie.mkv", "/share/tv.s01e01.mkv", "/share/missing.mkv"]
+    )
+    assert result["/share/movie.mkv"][1] == "hit"
+    assert result["/share/movie.mkv"][0] is not None
+    assert result["/share/tv.s01e01.mkv"][1] == "hit"
+    assert result["/share/missing.mkv"][0] is None
+    assert result["/share/missing.mkv"][1] == "miss"
+
+
+def test_get_many_detects_stale_on_mtime_change(conn):
+    """current_stats 不一致 → 标 stale。"""
+    res = _make_result(top=_make_candidate())
+    metadata_cache.upsert_identification(
+        conn, path="/share/a.mkv",
+        stat={"inode": 100, "size_bytes": 1000, "mtime": 2000},
+        identify_result=res,
+    )
+    current = {"/share/a.mkv": {"inode": 100, "mtime": 9999}}  # mtime 变了
+    result = metadata_cache.get_many_by_path(
+        conn, ["/share/a.mkv"], current_stats=current
+    )
+    cached, status = result["/share/a.mkv"]
+    assert status == "stale"
+    assert cached is not None  # stale 仍返回 cached（caller 可判旧值）
+
+
+def test_get_many_detects_stale_on_inode_change(conn):
+    res = _make_result(top=_make_candidate())
+    metadata_cache.upsert_identification(
+        conn, path="/share/a.mkv",
+        stat={"inode": 100, "size_bytes": 1000, "mtime": 2000},
+        identify_result=res,
+    )
+    current = {"/share/a.mkv": {"inode": 9999, "mtime": 2000}}  # inode 变了
+    result = metadata_cache.get_many_by_path(
+        conn, ["/share/a.mkv"], current_stats=current
+    )
+    assert result["/share/a.mkv"][1] == "stale"
+
+
+def test_get_many_skips_stale_check_when_path_not_in_current_stats(conn):
+    """current_stats 没传该 path 的 stat → 不做 stale 检测，按 hit 返回。
+    （场景：src 文件已被删，SSH stat 返 exists=False，不进 current_stats）"""
+    res = _make_result(top=_make_candidate())
+    metadata_cache.upsert_identification(
+        conn, path="/share/a.mkv",
+        stat={"inode": 100, "size_bytes": 1000, "mtime": 2000},
+        identify_result=res,
+    )
+    result = metadata_cache.get_many_by_path(
+        conn, ["/share/a.mkv"], current_stats={},  # 空 current_stats
+    )
+    assert result["/share/a.mkv"][1] == "hit"
+
+
+def test_get_many_handles_more_than_chunk_size():
+    """750 paths > 500 chunk_size → 拆 2 chunk，正确返回。
+
+    SQLite SQLITE_MAX_VARIABLE_NUMBER 默认 999；用 750 path 强制走 2 chunk。
+    """
+    from services import destructive_action as da
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".db") as f:
+        c = da.open_connection(f.name)
+        da.init_schema(c, SCHEMA_PATH)
+        from db import migrations
+        migrations.phase3_migrate(c)
+        paths = [f"/share/file_{i:04d}.mkv" for i in range(750)]
+        result = metadata_cache.get_many_by_path(c, paths)
+        assert len(result) == 750
+        for p in paths:
+            assert result[p] == (None, "miss")
+        c.close()

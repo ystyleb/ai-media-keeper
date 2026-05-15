@@ -2898,6 +2898,176 @@ def metadata_list_videos():
     })
 
 
+@app.route("/api/organize/dir-preview", methods=["GET"])
+@require_token
+def organize_dir_preview():
+    """Phase 4B：批量目录 organize 第一步 dashboard。
+
+    扫描目录里所有视频文件，按 organize 可行性分类。只读 — 不签名、
+    不落 destructive_actions row。
+
+    Query: ?path=<dir>&max_depth=2&limit=500
+
+    Returns:
+      {
+        base_path, max_depth, limit_reached, total,
+        counts: {will_link, already_linked, conflict, needs_identify, unsupported, not_applicable},
+        items: [{path, name, size_bytes, size_human, status, title?, year?, media_type?,
+                 tmdb_id?, confidence?, dst_path?, reason?, season_number?, episode_number?}, ...]
+      }
+    """
+    path = request.args.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "path required"}), 400
+    try:
+        path = validate_path(path)
+    except Exception:
+        return jsonify({"error": f"invalid path: {path}"}), 400
+
+    max_depth = max(1, min(5, int(request.args.get("max_depth", "2"))))
+    limit = max(1, min(MAX_ORGANIZE_BATCH_ITEMS, int(request.args.get("limit", "500"))))
+
+    # organize roots 必须配（不然 plan 算不出 dst_path）
+    org_cfg = load_organize_config()
+    movies_root = (org_cfg.get("movies_root") or "").strip()
+    tv_root = (org_cfg.get("tv_root") or "").strip()
+    if not (movies_root and tv_root):
+        return jsonify({
+            "error": "organize_roots_not_configured",
+            "message": "请先在 UI 配置 MOVIES_ROOT / TV_ROOT 后再批量整理",
+        }), 400
+
+    raw_paths = _list_video_paths(path, max_depth=max_depth, limit=limit)
+    limit_reached = len(raw_paths) > limit
+    raw_paths = raw_paths[:limit]
+
+    counts = {
+        "will_link": 0, "already_linked": 0, "conflict": 0,
+        "needs_identify": 0, "unsupported": 0, "not_applicable": 0,
+    }
+    if not raw_paths:
+        return jsonify({
+            "base_path": path, "max_depth": max_depth, "limit_reached": False,
+            "counts": counts, "items": [], "total": 0,
+        })
+
+    # 批量 SSH stat 所有 src（一次 round-trip）
+    src_stats = _ssh_stat_paths(raw_paths)
+
+    # 批量查 cache（一次 SQL IN）
+    db = get_db()
+    current_stats = {
+        p: {"inode": s.get("inode"), "mtime": s.get("mtime")}
+        for p, s in src_stats.items() if s.get("exists")
+    }
+    cache_map = metadata_cache.get_many_by_path(db, raw_paths, current_stats=current_stats)
+
+    # compute plan + 累积 dst paths
+    plans_by_path: dict[str, organize_svc.OrganizePlan] = {}
+    plan_errors: dict[str, str] = {}
+    dst_stat_paths: list[str] = []
+    for p in raw_paths:
+        cached, cache_status = cache_map.get(p, (None, "miss"))
+        if cached is None or cache_status == "stale":
+            continue
+        if cached.media_type not in ("movie", "tv"):
+            continue
+        try:
+            plan = organize_svc.compute_organize_plan(p, cached, movies_root, tv_root)
+            plans_by_path[p] = plan
+            dst_stat_paths.append(plan.dst_path)
+        except organize_svc.OrganizeNotApplicable as e:
+            plan_errors[p] = str(e)
+
+    # 批量 stat 所有 dst（一次 round-trip）
+    dst_stats = _ssh_stat_paths(dst_stat_paths) if dst_stat_paths else {}
+
+    items = []
+    for p in raw_paths:
+        src_stat = src_stats.get(p, {"exists": False})
+        cached, cache_status = cache_map.get(p, (None, "miss"))
+        name = p.rsplit("/", 1)[-1]
+        size_bytes = src_stat.get("size_bytes", 0)
+        item: dict = {
+            "path": p, "name": name,
+            "size_bytes": size_bytes,
+            "size_human": human_size(size_bytes),
+        }
+
+        # 源不存在（race / scanner cache 滞后）
+        if not src_stat.get("exists"):
+            item["status"] = "not_applicable"
+            item["reason"] = "src_missing"
+            counts["not_applicable"] += 1
+            items.append(item)
+            continue
+
+        # cache miss / stale → 需要先识别
+        if cached is None or cache_status == "stale":
+            item["status"] = "needs_identify"
+            item["reason"] = "stale_cache" if cache_status == "stale" else "no_cache"
+            counts["needs_identify"] += 1
+            items.append(item)
+            continue
+
+        # 已识别但不支持 organize（extra / part / unknown）
+        if cached.media_type not in ("movie", "tv"):
+            item["status"] = "unsupported"
+            item["media_type"] = cached.media_type
+            item["title"] = cached.title
+            item["reason"] = f"media_type={cached.media_type!r}"
+            counts["unsupported"] += 1
+            items.append(item)
+            continue
+
+        # compute_plan 抛 OrganizeNotApplicable（如 tv 缺 season/episode）
+        if p in plan_errors:
+            item["status"] = "not_applicable"
+            item["media_type"] = cached.media_type
+            item["title"] = cached.title
+            item["year"] = cached.year
+            item["reason"] = plan_errors[p]
+            counts["not_applicable"] += 1
+            items.append(item)
+            continue
+
+        # 算出 plan → 查 dst 状态
+        plan = plans_by_path[p]
+        item["media_type"] = plan.media_type
+        item["title"] = plan.title
+        item["year"] = plan.year
+        item["tmdb_id"] = plan.tmdb_id
+        item["confidence"] = cached.metadata_confidence  # 给 Phase 4C 用
+        item["dst_path"] = plan.dst_path
+        if plan.media_type == "tv":
+            item["season_number"] = plan.season_number
+            item["episode_number"] = plan.episode_number
+
+        dst_stat = dst_stats.get(plan.dst_path, {"exists": False})
+        src_inode = src_stat.get("inode")
+        if dst_stat.get("exists"):
+            if dst_stat.get("inode") == src_inode:
+                item["status"] = "already_linked"
+                counts["already_linked"] += 1
+            else:
+                item["status"] = "conflict"
+                item["conflict_inode"] = dst_stat.get("inode")
+                counts["conflict"] += 1
+        else:
+            item["status"] = "will_link"
+            counts["will_link"] += 1
+        items.append(item)
+
+    return jsonify({
+        "base_path": path,
+        "max_depth": max_depth,
+        "limit_reached": limit_reached,
+        "counts": counts,
+        "items": items,
+        "total": len(items),
+    })
+
+
 @app.route("/api/metadata/identify", methods=["POST"])
 @require_token
 def metadata_identify():

@@ -398,6 +398,56 @@ def get_by_path(
     return cached, "hit"
 
 
+def get_many_by_path(
+    conn: sqlite3.Connection,
+    paths: list[str],
+    *,
+    current_stats: dict[str, dict] | None = None,
+) -> dict[str, tuple[CachedMetadata | None, str]]:
+    """Phase 4B：批量读 cache。替代 N 次 get_by_path 单 SQL，给 dir-preview 用。
+
+    Args:
+        paths: 查询的 path 列表（list 而非 set 防止丢顺序）
+        current_stats: optional path → {"inode": int, "mtime": int} dict，
+                       用作 stale 检测（行为同 get_by_path 的 current_*）
+
+    Returns:
+        dict[path → (CachedMetadata | None, status)]，status ∈ {'hit', 'miss', 'stale'}。
+        miss 对应 cached=None。每个 input path 都会在返回 dict 里出现。
+
+    SQLite SQLITE_MAX_VARIABLE_NUMBER 默认 999，500-chunk 安全。
+    """
+    if not paths:
+        return {}
+
+    # 默认所有 path 都 miss；命中的 path 在循环里 overwrite
+    result: dict[str, tuple[CachedMetadata | None, str]] = {p: (None, "miss") for p in paths}
+
+    chunk_size = 500
+    for i in range(0, len(paths), chunk_size):
+        chunk = paths[i : i + chunk_size]
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"SELECT * FROM media_files WHERE path IN ({placeholders})",
+            chunk,
+        ).fetchall()
+        for row in rows:
+            cached = _row_to_cached(row)
+            status = "hit"
+            if current_stats:
+                stat = current_stats.get(cached.path)
+                if stat:
+                    cm = stat.get("mtime")
+                    ci = stat.get("inode")
+                    if cm is not None and cached.mtime is not None and cached.mtime != cm:
+                        status = "stale"
+                    elif ci is not None and cached.inode is not None and cached.inode != ci:
+                        status = "stale"
+            result[cached.path] = (cached, status)
+
+    return result
+
+
 def delete_by_path(conn: sqlite3.Connection, path: str) -> bool:
     """删除某条 cache（用户强制重识别 / 文件已删除）。返回是否删了行。"""
     cur = conn.execute("DELETE FROM media_files WHERE path = ?", (path,))
