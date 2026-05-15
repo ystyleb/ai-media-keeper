@@ -5,7 +5,25 @@
 
 ---
 
-## 已完成（截至 2026-05-14）
+## 已完成（截至 2026-05-15）
+
+### Phase 4 Phase A: 下载后 organize（hardlink + 独立目录 + NFO）
+
+PT 玩家的核心工作流：下载完文件留在 `/downloads/` 占位保种，手动 hardlink 到媒体库太繁琐 + 易错（特殊字符 / TV 季集编号 / NFO 单独写）。Phase 4A 把这块自动化。**手动触发版**（验证识别精度后再考虑批量 → Phase 4B / 自动监听 → Phase 4C）。
+
+- **4A.0 schema migration**：`destructive_actions.kind` CHECK 加 `'organize'`（重建表 + 数据迁移 idempotent，269 行无损迁移真机验过）；`config/organize.json` 配置文件 + load/save helper
+- **4A.1 services/organize.py**：`sanitize_for_path`（替换 `/\:*?"<>|` 控制字符为 `-`，合并多空格，去 SMB 末尾 dot/space）+ `compute_organize_plan` 推 movie/tv 目标路径 + `(YYYY)` 双重年份去重 + TV `tvshow.nfo` 落 series 根而非 season 目录。19 unit tests
+- **4A.2 SSH helpers**：`_ssh_mkdir_p` + `_ssh_ln`（含 `[ -d ]` pre-check + `[ ! -f ]` post-stat 防 silent ln-into-dir race；BusyBox 兼容不依赖 `-T` flag；race-into-dir 时返 `DST_NOT_REGULAR` marker，不自动 cleanup 防误删 — orphan 留给 user SSH 手工查）
+- **4A.3 organize executor + preview validator**：
+  * `_do_action_preview` kind=`organize`：校验 movies_root/tv_root → SSH stat src + metadata_cache.get_by_path → `compute_organize_plan` → SSH stat dst 看 already_linked / conflict
+  * `_organize_executor`：Pattern C 双 inode 锚定（src + dst verify）+ Pattern D NFO 独立 status（hardlink ok + NFO 失败 = 部分成功，不回滚 hardlink）+ metadata_snapshot 强 validation
+  * `_ssh_create_nfo_if_absent`：atomic create-only NFO 写入（`ln tmp final` + `[ -d ]` pre-check + `[ ! -f ]` post-stat），dst 已存在则 ln 失败返 `nfo_exists` skip 不覆盖
+  * 18+ contract tests（preview + confirm + race coverage + metadata_snapshot 校验）
+- **4A.4 整理 UI**：详情面板「整理到媒体库」按钮（仅 media_type ∈ {movie, tv} 显示）+ organizeModal preview/confirm 双段。预览显示源/识别/目标/NFO/tvshow.nfo + already_linked/conflict 状态徽章。confirm 后 per-item 结果：成功（含 src/dst inode 共享 + qBit 保种提示）/ 部分成功（hardlink ok + NFO 失败单独 warning）/ already_linked（idempotent skip）/ failed + reason + hint（orphan path 提示）。修复 stale response race 用 request id guard + action snapshot binding
+- **4A.5 媒体库目标根配置**：topbar 加「媒体库」按钮 + organizeConfigModal（MOVIES_ROOT / TV_ROOT input + 测试 + 保存）+ 后端 3 routes（GET/POST/test 都强制绝对路径校验）
+- **8 轮 backend codex review 收敛**：累计 14 BLOCKER + 10+ IMPORTANT 全修。最深教训：POSIX 没有 atomic verify-then-unlink primitive → 接受「race-into-dir orphan + hint user 自助查」策略，比自动 cleanup 误删风险小
+- **2 轮 UI codex review 收敛**：UI race（modal stale response / confirm 响应绑定）+ error mapping 完整覆盖
+- **379 unit tests pass**（284 → 379，+95 涵盖 organize 全链路）
 
 ### Phase 3: 重复检测 + Emby 观看进度 + Archive stub
 

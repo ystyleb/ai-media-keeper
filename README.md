@@ -1,10 +1,19 @@
 # AI Media Keeper
 
-AI 原生的影视资源管理器（Phase 2）。Web 版的 NAS 媒体库，专为 **QNAP / Synology / 任意 Linux NAS** 设计，针对 **PT 玩家做硬链接 + qBittorrent 种子的联动删除 + AI 自动识别媒体元数据**优化。
+AI 原生的影视资源管理器（Phase 4A）。Web 版的 NAS 媒体库，专为 **QNAP / Synology / 任意 Linux NAS** 设计，针对 **PT 玩家做硬链接 + qBittorrent 种子的联动删除 + AI 自动识别媒体元数据 + 下载完成后一键整理到媒体库**优化。
 
-> **解决的痛点**：用 SMB / Samba 删一部已经在 qBittorrent 做种的剧时，种子会变成 errored 状态扣保种率；手动到 qBit 里再删一遍又麻烦。这个工具一次操作把硬盘文件 + 关联硬链接 + qBit 种子（含下载文件）一起干掉，磁盘空间真正释放。同时 AI 自动识别电影/剧集 → 海报 + 简介 + 评分 + 演员，按 TMDB 浏览整个媒体库。
+> **解决的痛点**：用 SMB / Samba 删一部已经在 qBittorrent 做种的剧时，种子会变成 errored 状态扣保种率；手动到 qBit 里再删一遍又麻烦。这个工具一次操作把硬盘文件 + 关联硬链接 + qBit 种子（含下载文件）一起干掉，磁盘空间真正释放。同时 AI 自动识别电影/剧集 → 海报 + 简介 + 评分 + 演员，按 TMDB 浏览整个媒体库。下载完后一键整理 → atomic hardlink 到媒体库 + 写 NFO，保种不断 + Plex/Emby 立即识别。
 
 ## 核心功能
+
+### 整理到媒体库（Phase 4A 新增）
+- 🚚 **下载完一键整理**：详情面板「整理到媒体库」按钮 → preview 显示「源/识别/目标路径/NFO」→ confirm 后 atomic hardlink。源文件 inode 不变 → qBittorrent 继续保种
+- 🎬 **自动目录约定**：电影 → `MOVIES_ROOT/<Title (Year)>/<basename>.mkv`，剧集 → `TV_ROOT/<Series (Year)>/Season NN/<basename>.mkv`，`tvshow.nfo` 落 series 根（Plex/Emby 标准结构）
+- 📝 **NFO 自动生成**：从 TMDB cache 构造 NFOPayload → 写 `<movie>` / `<episodedetails>` / `<tvshow>`（含 uniqueid + plot + cast + genres + rating）。已有 NFO 不覆盖（atomic create-only ln 保证）
+- ⚙️ **MOVIES_ROOT / TV_ROOT UI 配置**：topbar 「媒体库」按钮 → modal 输入两个根 + SSH 测试目录可写 + 落盘 `config/organize.json`
+- 🔒 **契约 #6 双 inode 锚定**：preview 抓 src inode → confirm 阶段（a）验 src inode 不变（防 mv 偷换）+（b）ln 后验 dst inode == src inode（保证真 hardlink 不是 cp）
+- 🛡️ **race 防护**：`[ -d dst ]` pre-check + `[ ! -f dst ]` post-stat 防 silent ln-into-dir；冲突时不自动 cleanup（POSIX 无 atomic verify-then-unlink），返 orphan path hint 让 user SSH 手工查
+- 📊 **部分成功语义**：hardlink ok + NFO 失败 = `status='succeeded' + nfo_status='failed: ...'`，UI 单独 warning 提示「可手工补 NFO」，不回滚 hardlink
 
 ### 媒体管理
 - 🎬 **AI 自动识别**：guessit 解析文件名 → TMDB 搜索候选 → DeepSeek V4 grounded select（**契约 #3：LLM 永远只从真实候选里选 ID，不生成 ID**）

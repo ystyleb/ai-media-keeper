@@ -3634,9 +3634,14 @@ async function openOrganize(srcPath) {
     }
     if (!organizeModal) {
         organizeModal = new bootstrap.Modal(document.getElementById("organizeModal"));
-        // codex r1 B2: modal 关闭时 invalidate 当前 action，防止 race-confirm
+        // codex r1 B2 + r2 I2: modal 关闭时 invalidate 当前 action + bump
+        // request seq（这样 inflight preview response 也被丢弃，不会污染下次 open）
+        // + 隐藏 confirm 按钮（防止下次 open 时残留可点）。
         document.getElementById("organizeModal").addEventListener("hidden.bs.modal", () => {
             _organizeAction = null;
+            ++_organizeRequestSeq;
+            const btn = document.getElementById("organize-confirm-btn");
+            if (btn) btn.style.display = "none";
         });
     }
     // codex r1 B2: 递增 request id；response 返回时不匹配就丢弃
@@ -3661,6 +3666,8 @@ async function openOrganize(srcPath) {
         }
         if (!res.ok) {
             const body = await res.json();
+            // codex r2 I2: !res.ok 分支也要补 seq check 防 stale error 覆盖新 preview
+            if (requestId !== _organizeRequestSeq) return;
             renderOrganizeError(body);
             return;
         }
@@ -3765,6 +3772,9 @@ const _CONFIRM_ERROR_MSG = {
 
 async function confirmOrganize() {
     if (!_organizeAction) return;
+    // codex r2 I1: snapshot action - 响应返回时只在仍匹配当前 _organizeAction 时
+    // render/改 button state，防 A confirm 晚到污染 B 新 modal
+    const myAction = _organizeAction;
     const btn = document.getElementById("organize-confirm-btn");
     btn.disabled = true;
     btn.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>执行中...';
@@ -3774,11 +3784,16 @@ async function confirmOrganize() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                action_id: _organizeAction.action_id,
-                signed_token: _organizeAction.signed_token,
+                action_id: myAction.action_id,
+                signed_token: myAction.signed_token,
             }),
         });
         const body = await res.json();
+        // codex r2 I1: response 到达时 modal 可能已被关闭/重开
+        if (_organizeAction !== myAction) {
+            console.warn("[organize] stale confirm response (modal reopened), discarding");
+            return;
+        }
         // codex r1 IMPORTANT 1: 区分 contract-level error (res.ok=false) vs item-level result
         if (!res.ok) {
             const code = body.error || "unknown";
@@ -3793,12 +3808,16 @@ async function confirmOrganize() {
         }
         renderOrganizeResult(body);
     } catch (err) {
+        if (_organizeAction !== myAction) return;
         document.getElementById("organize-modal-body").innerHTML +=
             `<div class="alert alert-danger mt-3">网络错误: ${_esc(err.message)}</div>`;
     } finally {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="bi bi-check2 me-1"></i>确认整理';
-        btn.style.display = "none";   // 不允许重复点
+        // codex r2 I1: 仅 action 仍匹配当前才动 button（防 B 的 confirm 按钮被错误隐藏）
+        if (_organizeAction === myAction) {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-check2 me-1"></i>确认整理';
+            btn.style.display = "none";   // 不允许重复点
+        }
     }
 }
 
