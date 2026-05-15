@@ -58,10 +58,20 @@ def _patch_organize_config(monkeypatch, movies_root="/media/movies", tv_root="/m
 
 
 def _patch_cache(monkeypatch, cached_or_none):
-    """Patch metadata_cache.get_by_path to return (cached, 'hit')."""
+    """Patch metadata_cache.get_many_by_path to return (cached, 'hit') for every path.
+
+    Phase 4B：preview 改用 batch helper get_many_by_path 替代 N 次 get_by_path。
+    我们 patch batch version 让每个 query 都拿到同一个 cached stub。
+    """
+    status = "hit" if cached_or_none else "miss"
+    monkeypatch.setattr(
+        app_module.metadata_cache, "get_many_by_path",
+        lambda conn, paths, *, current_stats=None: {p: (cached_or_none, status) for p in paths},
+    )
+    # 同时 patch 旧 get_by_path（confirm 路径仍走它）
     monkeypatch.setattr(
         app_module.metadata_cache, "get_by_path",
-        lambda conn, path, current_mtime=None, current_inode=None: (cached_or_none, "hit"),
+        lambda conn, path, current_mtime=None, current_inode=None: (cached_or_none, status),
     )
 
 
@@ -91,8 +101,12 @@ def test_preview_no_items_returns_400(client, token, monkeypatch):
     assert "items required" in resp.get_json()["error"]
 
 
-def test_preview_src_missing_returns_400(client, token, monkeypatch):
-    """SSH stat 说文件不存在 → 400 src_missing."""
+def test_preview_src_missing_marks_not_applicable(client, token, monkeypatch):
+    """Phase 4B：SSH stat 说文件不存在 → 200 + items_count=0 + preview_items[0].status='not_applicable'.
+
+    旧 4A.3 行为是 400 src_missing fail-fast；Phase 4B 改 partial admission，让
+    batch 用户在 dashboard 看到分类，单 item 用户拿到 items_count=0 提示。
+    """
     _patch_organize_config(monkeypatch)
     monkeypatch.setattr(
         app_module, "_ssh_stat_paths",
@@ -103,14 +117,17 @@ def test_preview_src_missing_returns_400(client, token, monkeypatch):
         json={"kind": "organize", "items": [{"src_path": "/dl/missing.mkv"}]},
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 200
     body = resp.get_json()
-    assert body["error"] == "src_missing"
-    assert body["src_path"] == "/dl/missing.mkv"
+    assert body["items_count"] == 0
+    assert "action_id" not in body  # 不签名
+    assert body["preview_items"][0]["status"] == "not_applicable"
+    assert body["preview_items"][0]["reason"] == "src_missing"
+    assert body["counts"]["not_applicable"] == 1
 
 
-def test_preview_src_not_identified_returns_400(client, token, monkeypatch):
-    """cache miss → 400 src_not_identified."""
+def test_preview_src_not_identified_marks_needs_identify(client, token, monkeypatch):
+    """Phase 4B：cache miss → 200 + needs_identify（旧 4A 是 400 src_not_identified）."""
     _patch_organize_config(monkeypatch)
     monkeypatch.setattr(
         app_module, "_ssh_stat_paths",
@@ -122,12 +139,15 @@ def test_preview_src_not_identified_returns_400(client, token, monkeypatch):
         json={"kind": "organize", "items": [{"src_path": "/dl/x.mkv"}]},
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert resp.status_code == 400
-    assert resp.get_json()["error"] == "src_not_identified"
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["items_count"] == 0
+    assert body["preview_items"][0]["status"] == "needs_identify"
+    assert body["counts"]["needs_identify"] == 1
 
 
-def test_preview_tv_missing_episode_returns_400(client, token, monkeypatch):
-    """TV 但 episode_number=None → OrganizeNotApplicable → 400."""
+def test_preview_tv_missing_episode_marks_not_applicable(client, token, monkeypatch):
+    """Phase 4B：TV 但 episode_number=None → 200 + not_applicable + reason 提示。"""
     _patch_organize_config(monkeypatch)
     monkeypatch.setattr(app_module, "_ssh_stat_paths", lambda paths: _src_stat("/dl/x.mkv"))
     _patch_cache(monkeypatch, _CachedStub(
@@ -139,14 +159,16 @@ def test_preview_tv_missing_episode_returns_400(client, token, monkeypatch):
         json={"kind": "organize", "items": [{"src_path": "/dl/x.mkv"}]},
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 200
     body = resp.get_json()
-    assert body["error"] == "organize_not_applicable"
-    assert "season + episode" in body["reason"]
+    assert body["items_count"] == 0
+    item = body["preview_items"][0]
+    assert item["status"] == "not_applicable"
+    assert "season + episode" in item["reason"]
 
 
-def test_preview_unsupported_media_type_returns_400(client, token, monkeypatch):
-    """cache.media_type='anime' 不支持 → 400 src_not_identified（合并到未识别情形）."""
+def test_preview_unsupported_media_type_marks_unsupported(client, token, monkeypatch):
+    """Phase 4B：cache.media_type='anime' → 200 + unsupported 分类。"""
     _patch_organize_config(monkeypatch)
     monkeypatch.setattr(app_module, "_ssh_stat_paths", lambda paths: _src_stat("/dl/x.mkv"))
     _patch_cache(monkeypatch, _CachedStub(title="X", media_type="anime"))
@@ -155,9 +177,11 @@ def test_preview_unsupported_media_type_returns_400(client, token, monkeypatch):
         json={"kind": "organize", "items": [{"src_path": "/dl/x.mkv"}]},
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert resp.status_code == 400
-    # media_type 不在 {movie, tv} → 视为 not_identified（preview 不在这里区分两种 reject reason）
-    assert resp.get_json()["error"] == "src_not_identified"
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["items_count"] == 0
+    assert body["preview_items"][0]["status"] == "unsupported"
+    assert body["counts"]["unsupported"] == 1
 
 
 def test_preview_movie_happy_path_returns_token_and_plan(client, token, monkeypatch):
@@ -1204,3 +1228,210 @@ def test_confirm_nfo_appearing_after_preview_atomic_ln_handles_race(client, toke
     # 验证 write helper 收到 expected_metadata（cache drift guard 可用）
     assert "expected_metadata" in write_calls[0][2]
     assert item["nfo_status"] == "skipped: nfo_exists"
+
+
+# ── Phase 4B.2 multi-item / partial admission / batch optim tests ──
+
+
+def test_preview_batch_too_large_returns_400(client, token, monkeypatch):
+    """Phase 4B：> MAX_ORGANIZE_BATCH_ITEMS 直接 400 防爆 payload。"""
+    _patch_organize_config(monkeypatch)
+    too_many = [{"src_path": f"/dl/{i}.mkv"}
+                for i in range(app_module.MAX_ORGANIZE_BATCH_ITEMS + 1)]
+    resp = client.post(
+        "/api/action/preview",
+        json={"kind": "organize", "items": too_many},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["error"] == "batch_too_large"
+    assert body["limit"] == app_module.MAX_ORGANIZE_BATCH_ITEMS
+
+
+def test_preview_mixed_batch_classifies_correctly(client, token, monkeypatch):
+    """3 个 src 各代表 will_link / needs_identify / already_linked → counts 准确,
+    payload 只装可算 plan 的 2 个（will_link + already_linked），needs_identify 不进。"""
+    _patch_organize_config(monkeypatch)
+
+    paths = ["/dl/will.mkv", "/dl/needs.mkv", "/dl/linked.mkv"]
+    src_inodes = {"/dl/will.mkv": 100, "/dl/needs.mkv": 200, "/dl/linked.mkv": 300}
+
+    def fake_stat(qpaths):
+        # 第一次调用：src batch；第二次：dst batch
+        out = {}
+        for p in qpaths:
+            if p in src_inodes:
+                out[p] = {"exists": True, "inode": src_inodes[p],
+                          "size_bytes": 1024, "mtime": 1000}
+            elif "linked" in p and p.endswith("linked.mkv"):
+                # dst path for /dl/linked.mkv → 同 inode
+                out[p] = {"exists": True, "inode": 300,
+                          "size_bytes": 1024, "mtime": 1000}
+            else:
+                out[p] = {"exists": False}
+        return out
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
+
+    def fake_get_many(conn, qpaths, *, current_stats=None):
+        out = {}
+        for p in qpaths:
+            if "needs" in p:
+                out[p] = (None, "miss")
+            else:
+                out[p] = (_CachedStub(
+                    title="Linked Movie" if "linked" in p else "Will Link",
+                    media_type="movie", year=2020,
+                    tmdb_id="222" if "linked" in p else "111",
+                ), "hit")
+        return out
+    monkeypatch.setattr(app_module.metadata_cache, "get_many_by_path", fake_get_many)
+
+    resp = client.post(
+        "/api/action/preview",
+        json={"kind": "organize",
+              "items": [{"src_path": p} for p in paths]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["counts"]["will_link"] == 1
+    assert body["counts"]["needs_identify"] == 1
+    assert body["counts"]["already_linked"] == 1
+    # payload 含 will_link + already_linked 共 2 个 (needs_identify 不进 payload)
+    assert body["items_count"] == 2
+    # preview_items 全集 3 个
+    assert len(body["preview_items"]) == 3
+    status_by_src = {pv["src_path"]: pv["status"] for pv in body["preview_items"]}
+    assert status_by_src["/dl/will.mkv"] == "will_link"
+    assert status_by_src["/dl/needs.mkv"] == "needs_identify"
+    assert status_by_src["/dl/linked.mkv"] == "already_linked"
+
+
+def test_preview_signed_token_locks_only_payload_items(client, token, monkeypatch):
+    """preview 只签 payload_items（已算出 plan 的）；needs_identify 不影响 signed_token。
+
+    Invariant: 同 payload_items hash 两次 preview 应不同 action_id（不同 random uuid）
+    但 payload_hash 应相同（保证签名稳定）。
+    """
+    _patch_organize_config(monkeypatch)
+    monkeypatch.setattr(
+        app_module, "_ssh_stat_paths",
+        lambda paths: {p: {"exists": True, "inode": 100,
+                           "size_bytes": 1024, "mtime": 1000}
+                       for p in paths},
+    )
+    _patch_cache(monkeypatch, _CachedStub(
+        title="M", media_type="movie", year=2020, tmdb_id="111",
+    ))
+
+    resp = client.post(
+        "/api/action/preview",
+        json={"kind": "organize", "items": [{"src_path": "/dl/m.mkv"}]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert "action_id" in body
+    assert "signed_token" in body
+    assert body["items_count"] == 1
+
+
+def test_preview_duplicate_dst_within_batch_marks_conflict(client, token, monkeypatch):
+    """同一 batch 两 src 映射到同一 dst_path（罕见但要 detect）→
+    第一个 will_link，第二个 conflict + reason=duplicate_dst_path_within_batch。
+    """
+    _patch_organize_config(monkeypatch)
+
+    # 两个不同 src 文件，识别成同一部 movie 同一 title/year → 同一 dst_dir，
+    # 同一 dst_path（如果 basename 也一样）。模拟 basename 一致的极端 case。
+    paths = ["/dl/sub1/movie.mkv", "/dl/sub2/movie.mkv"]
+    src_inodes = {paths[0]: 100, paths[1]: 200}
+
+    def fake_stat(qpaths):
+        out = {}
+        for p in qpaths:
+            if p in src_inodes:
+                out[p] = {"exists": True, "inode": src_inodes[p],
+                          "size_bytes": 1024, "mtime": 1000}
+            else:
+                out[p] = {"exists": False}
+        return out
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
+    _patch_cache(monkeypatch, _CachedStub(
+        title="Same Movie", media_type="movie", year=2020, tmdb_id="111",
+    ))
+
+    resp = client.post(
+        "/api/action/preview",
+        json={"kind": "organize",
+              "items": [{"src_path": p} for p in paths]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = resp.get_json()
+    assert body["counts"]["will_link"] == 1
+    assert body["counts"]["conflict"] == 1
+    # 第一个 sub1/movie.mkv 应该 will_link，第二个 sub2/movie.mkv 应该 conflict
+    pv1 = next(pv for pv in body["preview_items"] if pv["src_path"] == paths[0])
+    pv2 = next(pv for pv in body["preview_items"] if pv["src_path"] == paths[1])
+    assert pv1["status"] == "will_link"
+    assert pv2["status"] == "conflict"
+    assert pv2["reason"] == "duplicate_dst_path_within_batch"
+
+
+def test_preview_batch_uses_minimal_ssh_calls(client, token, monkeypatch):
+    """N items：SSH stat 调用应当只 2 次（src + dst batch），而非 N×2 次。
+
+    防止任何回归把 batch 优化丢掉。
+    """
+    _patch_organize_config(monkeypatch)
+    n = 10
+    paths = [f"/dl/m{i}.mkv" for i in range(n)]
+
+    stat_calls = {"n": 0}
+    def fake_stat(qpaths):
+        stat_calls["n"] += 1
+        return {p: {"exists": True, "inode": 100 + i,
+                    "size_bytes": 1024, "mtime": 1000}
+                if i < n else {"exists": False}
+                for i, p in enumerate(qpaths)}
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
+    _patch_cache(monkeypatch, _CachedStub(
+        title="M", media_type="movie", year=2020, tmdb_id="111",
+    ))
+
+    resp = client.post(
+        "/api/action/preview",
+        json={"kind": "organize",
+              "items": [{"src_path": p} for p in paths]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    # 严格 2 次：src batch + dst batch
+    assert stat_calls["n"] == 2
+
+
+def test_preview_all_unidentified_returns_zero_no_token(client, token, monkeypatch):
+    """全部 needs_identify → items_count=0 + 不签名（不创建 destructive_actions row）."""
+    _patch_organize_config(monkeypatch)
+    monkeypatch.setattr(
+        app_module, "_ssh_stat_paths",
+        lambda paths: {p: {"exists": True, "inode": 100,
+                           "size_bytes": 1024, "mtime": 1000}
+                       for p in paths},
+    )
+    _patch_cache(monkeypatch, None)  # 全部 miss
+
+    resp = client.post(
+        "/api/action/preview",
+        json={"kind": "organize",
+              "items": [{"src_path": f"/dl/{i}.mkv"} for i in range(5)]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["items_count"] == 0
+    assert "action_id" not in body
+    assert "signed_token" not in body
+    assert body["counts"]["needs_identify"] == 5
+    assert body["message"] == "无可整理文件"

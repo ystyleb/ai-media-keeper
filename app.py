@@ -2453,10 +2453,23 @@ def _do_action_preview(kind: str, raw_data: dict):
             ),
         })
     if kind == "organize":
-        # Phase 4A.3: hardlink + 独立目录 + .nfo 整理到媒体库。契约 #1 双段 + Pattern C 双 inode 锚定。
+        # Phase 4A.3 + Phase 4B：partial admission 多 item preview。
+        # 契约 #1 双段 + Pattern C 双 inode 锚定 + 契约 #8 分类状态。
+        # signed_token 仅锁 will_link 子集；其它状态 item 进 preview_items 给 UI
+        # 显示但不入 payload，不可 confirm。
         items_in = raw_data.get("items") or []
         if not isinstance(items_in, list) or not items_in:
             return jsonify({"error": "items required for organize"}), 400
+
+        # 4B.2: soft cap 防 user 选 /share/ 根扫出 10000 文件爆 payload
+        if len(items_in) > MAX_ORGANIZE_BATCH_ITEMS:
+            return jsonify({
+                "error": "batch_too_large",
+                "message": f"批量整理最多 {MAX_ORGANIZE_BATCH_ITEMS} 个文件，"
+                           f"请选更深子目录或减少范围",
+                "limit": MAX_ORGANIZE_BATCH_ITEMS,
+                "got": len(items_in),
+            }), 400
 
         # [code-enforced] 必须配置 MOVIES_ROOT / TV_ROOT
         org_cfg = load_organize_config()
@@ -2468,60 +2481,151 @@ def _do_action_preview(kind: str, raw_data: dict):
                 "message": "请先在 UI 配置 MOVIES_ROOT / TV_ROOT 后再 organize",
             }), 400
 
-        db = get_db()
-        src_paths = [
-            (it.get("src_path") or "").strip()
-            for it in items_in
-            if (it.get("src_path") or "").strip()
-        ]
-        if len(src_paths) != len(items_in):
-            return jsonify({"error": "src_path required per item"}), 400
+        # 收集 src_paths，逐 item 校验 src_path 字段存在
+        src_paths: list[str] = []
+        for it in items_in:
+            sp = (it.get("src_path") or "").strip()
+            if not sp:
+                return jsonify({"error": "src_path required per item"}), 400
+            src_paths.append(sp)
+
+        # 4B.2: batch SSH stat src（一次 round-trip 而非 N 次）
         src_stat_now = _ssh_stat_paths(src_paths)
 
-        plans: list[dict] = []
-        for it in items_in:
-            src_path = (it.get("src_path") or "").strip()
-            src_stat = src_stat_now.get(src_path, {"exists": False})
+        # 4B.2: batch query metadata cache（一次 SQL IN 而非 N 次单 SELECT）
+        db = get_db()
+        current_stats = {
+            p: {"inode": s.get("inode"), "mtime": s.get("mtime")}
+            for p, s in src_stat_now.items() if s.get("exists")
+        }
+        cache_map = metadata_cache.get_many_by_path(
+            db, src_paths, current_stats=current_stats
+        )
+
+        # Pass 1：算出每个 src 的 plan（如能算）+ 累积 dst paths 给 batch dst stat
+        plans_by_src: dict[str, organize_svc.OrganizePlan] = {}
+        plan_errors: dict[str, str] = {}
+        dst_check_paths: list[str] = []
+        for sp in src_paths:
+            src_stat = src_stat_now.get(sp, {"exists": False})
             if not src_stat.get("exists"):
-                return jsonify({"error": "src_missing", "src_path": src_path}), 400
-
-            cached, _status = metadata_cache.get_by_path(
-                db, src_path,
-                current_mtime=src_stat.get("mtime"),
-                current_inode=src_stat.get("inode"),
-            )
-            if cached is None or cached.media_type not in ("movie", "tv"):
-                return jsonify({
-                    "error": "src_not_identified",
-                    "src_path": src_path,
-                    "message": "请先识别此文件再 organize（详情面板 → 识别）",
-                }), 400
-
+                continue
+            cached, cache_status = cache_map.get(sp, (None, "miss"))
+            if cached is None or cache_status == "stale":
+                continue
+            if cached.media_type not in ("movie", "tv"):
+                continue
             try:
                 plan = organize_svc.compute_organize_plan(
-                    src_path, cached, movies_root, tv_root,
+                    sp, cached, movies_root, tv_root
                 )
+                plans_by_src[sp] = plan
+                dst_check_paths.extend([plan.dst_dir, plan.dst_path, plan.nfo_path])
+                if plan.tvshow_nfo_path:
+                    dst_check_paths.append(plan.tvshow_nfo_path)
             except organize_svc.OrganizeNotApplicable as e:
-                return jsonify({
-                    "error": "organize_not_applicable",
-                    "src_path": src_path,
-                    "reason": str(e),
-                }), 400
+                plan_errors[sp] = str(e)
 
-            dst_check_paths = [plan.dst_dir, plan.dst_path, plan.nfo_path]
-            if plan.tvshow_nfo_path:
-                dst_check_paths.append(plan.tvshow_nfo_path)
-            dst_stat = _ssh_stat_paths(dst_check_paths)
+        # batch SSH stat 所有 dst（一次 round-trip 而非 N×4 次）
+        dst_stat = _ssh_stat_paths(dst_check_paths) if dst_check_paths else {}
 
-            dst_path_now = dst_stat.get(plan.dst_path, {"exists": False})
+        # Pass 2：对每个 src 算最终 status + 构造 plan item / preview_item。
+        # 4B 设计：
+        #   - **可算 plan** 的 items（will_link + already_linked + conflict）都进 payload
+        #     给 executor 处理（4A 行为：executor 会按 dst 实际状态 idempotent skip / fail）
+        #   - **不可算 plan** 的（needs_identify / unsupported / not_applicable）只进
+        #     preview_items 给 UI 显示，不签名、不进 payload
+        # batch-level duplicate dst_path detection：同 batch 两 src → 同 dst_path
+        # → 第一个 will_link，后续 conflict (reason=duplicate_dst_path_within_batch)
+        seen_dst_paths: set[str] = set()
+        preview_items: list[dict] = []
+        payload_items: list[dict] = []
+        counts = {
+            "will_link": 0, "already_linked": 0, "conflict": 0,
+            "needs_identify": 0, "unsupported": 0, "not_applicable": 0,
+        }
+
+        for sp in src_paths:
+            src_stat = src_stat_now.get(sp, {"exists": False})
+            cached, cache_status = cache_map.get(sp, (None, "miss"))
+
+            base_item = {
+                "src_path": sp,
+                "name": sp.rsplit("/", 1)[-1],
+            }
+
+            # src 不存在
+            if not src_stat.get("exists"):
+                preview_items.append({
+                    **base_item, "status": "not_applicable",
+                    "reason": "src_missing",
+                })
+                counts["not_applicable"] += 1
+                continue
+
+            # cache miss / stale
+            if cached is None or cache_status == "stale":
+                preview_items.append({
+                    **base_item, "status": "needs_identify",
+                    "reason": "stale_cache" if cache_status == "stale" else "no_cache",
+                })
+                counts["needs_identify"] += 1
+                continue
+
+            # 不支持的 media_type（extra / part / unknown）
+            if cached.media_type not in ("movie", "tv"):
+                preview_items.append({
+                    **base_item, "status": "unsupported",
+                    "media_type": cached.media_type,
+                    "title": cached.title,
+                    "reason": f"media_type={cached.media_type!r}",
+                })
+                counts["unsupported"] += 1
+                continue
+
+            # compute_plan 抛 OrganizeNotApplicable
+            if sp in plan_errors:
+                preview_items.append({
+                    **base_item, "status": "not_applicable",
+                    "media_type": cached.media_type,
+                    "title": cached.title, "year": cached.year,
+                    "reason": plan_errors[sp],
+                })
+                counts["not_applicable"] += 1
+                continue
+
+            plan = plans_by_src[sp]
+            dst_now = dst_stat.get(plan.dst_path, {"exists": False})
+            src_inode = src_stat.get("inode")
             already_linked = bool(
-                dst_path_now.get("exists")
-                and dst_path_now.get("inode") == src_stat.get("inode")
+                dst_now.get("exists") and dst_now.get("inode") == src_inode
             )
-            dst_conflict = bool(dst_path_now.get("exists") and not already_linked)
+            dst_conflict_with_fs = bool(dst_now.get("exists") and not already_linked)
 
-            plans.append({
-                "src_path": src_path,
+            # batch 内 dst 重名检测
+            duplicate_in_batch = plan.dst_path in seen_dst_paths
+            if not duplicate_in_batch:
+                seen_dst_paths.add(plan.dst_path)
+
+            # 算状态
+            if duplicate_in_batch:
+                item_status = "conflict"
+                conflict_reason = "duplicate_dst_path_within_batch"
+            elif already_linked:
+                item_status = "already_linked"
+                conflict_reason = None
+            elif dst_conflict_with_fs:
+                item_status = "conflict"
+                conflict_reason = "dst_exists_different_inode"
+            else:
+                item_status = "will_link"
+                conflict_reason = None
+
+            counts[item_status] += 1
+
+            # payload item（含全部 4A executor 需要的 snapshot + plan）
+            plan_item = {
+                "src_path": sp,
                 "src_snapshot": {
                     "inode": src_stat.get("inode"),
                     "size_bytes": src_stat.get("size_bytes"),
@@ -2539,10 +2643,8 @@ def _do_action_preview(kind: str, raw_data: dict):
                     "nfo_path": plan.nfo_path,
                     "tvshow_nfo_path": plan.tvshow_nfo_path,
                 },
-                # codex I1: NFO 内容应该按 preview 时的 metadata 写。preview→confirm
-                # 之间 cache 可能被 re-identify 改了（不同 tmdb_id / 不同剧），但
-                # hardlink 已落在按旧 metadata 算的目录里——如果 NFO 用新 metadata 写
-                # 就会跟目录位置不一致。confirm 用此 snapshot 跟 cache 重读对比，
+                # codex I1: NFO 内容按 preview 时的 metadata 写。preview→confirm 之间
+                # cache 若被 re-identify 改了，confirm 用此 snapshot 跟 cache 重读对比，
                 # 不一致 → skip NFO (status='skipped: cache_drift')。
                 "metadata_snapshot": {
                     "tmdb_id": plan.tmdb_id,
@@ -2554,24 +2656,57 @@ def _do_action_preview(kind: str, raw_data: dict):
                 },
                 "dst_status": {
                     "dst_dir_exists": dst_stat.get(plan.dst_dir, {}).get("exists", False),
-                    "dst_path_exists": dst_path_now.get("exists", False),
+                    "dst_path_exists": dst_now.get("exists", False),
                     "nfo_path_exists": dst_stat.get(plan.nfo_path, {}).get("exists", False),
                     "tvshow_nfo_exists": (
                         dst_stat.get(plan.tvshow_nfo_path, {}).get("exists", False)
                         if plan.tvshow_nfo_path else False
                     ),
                     "already_linked": already_linked,
-                    "conflict": dst_conflict,
+                    "conflict": dst_conflict_with_fs or duplicate_in_batch,
                 },
+            }
+            if duplicate_in_batch:
+                plan_item["dst_status"]["conflict_reason"] = conflict_reason
+            payload_items.append(plan_item)
+
+            # preview_items 的紧凑视图（给 UI dashboard 用）
+            pv = {
+                **base_item, "status": item_status,
+                "media_type": plan.media_type, "title": plan.title,
+                "year": plan.year, "tmdb_id": plan.tmdb_id,
+                "dst_path": plan.dst_path,
+                "nfo_path": plan.nfo_path,
+                "tvshow_nfo_path": plan.tvshow_nfo_path,
+                "season_number": plan.season_number,
+                "episode_number": plan.episode_number,
+                "size_bytes": src_stat.get("size_bytes"),
+            }
+            if item_status == "already_linked":
+                pv["shared_inode"] = src_inode
+            elif item_status == "conflict":
+                pv["conflict_inode"] = dst_now.get("inode")
+                pv["reason"] = conflict_reason
+            preview_items.append(pv)
+
+        # 4B.2: payload_items 为空（全部 needs_identify / unsupported / not_applicable）
+        # → 不签名、不落 destructive_actions row。
+        if not payload_items:
+            return jsonify({
+                "kind": "organize",
+                "items_count": 0,
+                "preview_items": preview_items,
+                "counts": counts,
+                "message": "无可整理文件",
             })
 
         payload = {
             "kind": "organize",
-            "items": plans,
+            "items": payload_items,
             "snapshot": {"captured_at": int(time.time())},
         }
         res = destructive_action.create_preview(
-            get_db(),
+            db,
             kind="organize",
             payload=payload,
             server_secret=SERVER_SECRET,
@@ -2582,8 +2717,11 @@ def _do_action_preview(kind: str, raw_data: dict):
             "signed_token": res.signed_token,
             "expires_at": res.expires_at,
             "kind": "organize",
-            "items": plans,
-            "items_count": len(plans),
+            "items_count": len(payload_items),
+            "preview_items": preview_items,
+            "counts": counts,
+            # 4A 兼容：单文件 organize UI 用 'items' 字段读 plan
+            "items": payload_items,
         })
     return jsonify({"error": f"kind '{kind}' not supported in spike"}), 400
 
