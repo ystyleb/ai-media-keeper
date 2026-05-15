@@ -2038,9 +2038,8 @@ def _organize_executor(payload: dict) -> dict:
         src_snap_pre = it["src_snapshot"]
         # codex I1: preview 阶段签进 payload 的 metadata 快照，confirm 用 cache 重读对比
         expected_metadata = it.get("metadata_snapshot") or {}
-        # codex B1: preview 阶段 dst NFO 是否已存在（已存在 → executor skip 不覆盖）
-        nfo_existed_pre = bool(it.get("dst_status", {}).get("nfo_path_exists"))
-        tvshow_nfo_existed_pre = bool(it.get("dst_status", {}).get("tvshow_nfo_exists"))
+        # codex r2 B1: preview 阶段的 nfo_path_exists / tvshow_nfo_exists 仅作 UI hint，
+        # 不用来跳过写入 — confirm 时会 re-stat（preview→confirm 之间新出现的 NFO 也要保护）
 
         src_now = _ssh_stat_paths([src_path]).get(src_path, {"exists": False})
         if not src_now.get("exists"):
@@ -2110,25 +2109,32 @@ def _organize_executor(payload: dict) -> dict:
             })
             continue
 
-        # 4. 写 NFO（Pattern D：失败不回滚 hardlink；codex B1: 已有 NFO 不覆盖）
+        # 4. 写 NFO（Pattern D：失败不回滚 hardlink；codex r2 B1: confirm 时 re-stat
+        #    防 preview 不存在但 confirm 时新出现的 NFO 被覆盖）
         nfo_kind = "episode" if media_type == "tv" else "movie"
+        nfo_paths_now = _ssh_stat_paths(
+            [plan["nfo_path"]]
+            + ([plan["tvshow_nfo_path"]] if plan.get("tvshow_nfo_path") else [])
+        )
+        nfo_exists_at_confirm = bool(
+            nfo_paths_now.get(plan["nfo_path"], {}).get("exists")
+        )
         nfo_status = _write_organize_nfo(
             src_path, plan["nfo_path"], nfo_kind,
-            target_exists=nfo_existed_pre,
+            target_exists=nfo_exists_at_confirm,
             expected_metadata=expected_metadata,
         )
 
         tvshow_nfo_status = "skipped"
         if media_type == "tv" and plan.get("tvshow_nfo_path"):
-            # tvshow.nfo: 用 preview 阶段的 exists flag；不重读（保 confirm 行为 deterministic）
-            if tvshow_nfo_existed_pre:
-                tvshow_nfo_status = "already_exists"
-            else:
-                tvshow_nfo_status = _write_organize_nfo(
-                    src_path, plan["tvshow_nfo_path"], "tvshow",
-                    target_exists=False,
-                    expected_metadata=expected_metadata,
-                )
+            tvshow_exists_at_confirm = bool(
+                nfo_paths_now.get(plan["tvshow_nfo_path"], {}).get("exists")
+            )
+            tvshow_nfo_status = _write_organize_nfo(
+                src_path, plan["tvshow_nfo_path"], "tvshow",
+                target_exists=tvshow_exists_at_confirm,
+                expected_metadata=expected_metadata,
+            )
 
         results.append({
             "src_path": src_path,

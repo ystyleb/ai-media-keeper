@@ -723,7 +723,8 @@ def test_confirm_nfo_failure_does_not_rollback_hardlink(client, token, monkeypat
 
 
 def test_confirm_existing_nfo_not_overwritten(client, token, monkeypatch):
-    """codex r1 B1: preview 时 nfo_path_exists=True → executor skip 不覆盖."""
+    """codex r1 B1 + r2 BLOCKER: preview 时 nfo 已存在 + confirm re-stat 也存在 →
+    executor skip 不覆盖。"""
     _patch_organize_config(monkeypatch)
     _patch_cache(monkeypatch, _full_cached_movie())
 
@@ -731,23 +732,24 @@ def test_confirm_existing_nfo_not_overwritten(client, token, monkeypatch):
     src_stat = {"exists": True, "inode": 50, "size_bytes": 1, "mtime": 1}
     dst_path = "/media/movies/The Movie (2024)/movie.mkv"
     nfo_path = "/media/movies/The Movie (2024)/movie.nfo"
+    existing_nfo = {"exists": True, "inode": 88, "size_bytes": 100, "mtime": 1}
 
-    # preview: src 存在 + nfo 已存在
-    def preview_stat(paths):
+    # preview + confirm: nfo 一直存在（用户/Plex 手工写的）
+    def stat_fn(paths):
         result = {}
         for p in paths:
             if p == src:
                 result[p] = src_stat
             elif p == nfo_path:
-                result[p] = {"exists": True, "inode": 88, "size_bytes": 100, "mtime": 1}
+                result[p] = existing_nfo
             else:
                 result[p] = {"exists": False}
         return result
 
-    monkeypatch.setattr(app_module, "_ssh_stat_paths", preview_stat)
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", stat_fn)
     action_id, signed = _do_preview_and_get_token(client, token, src)
 
-    # confirm
+    # confirm 阶段：需要 dst 在 verify 时同 inode
     call_n = {"n": 0}
 
     def confirm_stat(paths):
@@ -758,6 +760,8 @@ def test_confirm_existing_nfo_not_overwritten(client, token, monkeypatch):
                 result[p] = src_stat
             elif p == dst_path and call_n["n"] >= 3:
                 result[p] = src_stat
+            elif p == nfo_path:
+                result[p] = existing_nfo   # nfo 一直存在 — confirm re-stat 也要看到
             else:
                 result[p] = {"exists": False}
         return result
@@ -770,7 +774,6 @@ def test_confirm_existing_nfo_not_overwritten(client, token, monkeypatch):
 
     def fake_write(src_p, nfo, kind, *, target_exists=False, **kw):
         write_calls.append((nfo, kind, target_exists))
-        # target_exists=True 时 helper 自己返 skipped；这里模拟之
         return "skipped: nfo_exists" if target_exists else "created"
 
     monkeypatch.setattr(app_module, "_write_organize_nfo", fake_write)
@@ -877,7 +880,10 @@ def test_write_organize_nfo_cache_drift_skipped(monkeypatch):
 
 
 def test_ssh_atomic_write_nfo_tmp_filename_has_unique_suffix(monkeypatch):
-    """codex r1 I2: 同 nfo_path 并发写时 tmp 文件名必须 unique（不能用固定 .tmp）。"""
+    """codex r1 I2 + r2 IMPORTANT #2: 同 nfo_path 并发写时 tmp 文件名必须 unique 且
+    格式为 .tmp.<12 hex chars>。提取实际 tmp path 严格断言（不能仅比 cmd 字符串）。"""
+    import re
+
     captured_cmds = []
 
     def fake_ssh_exec(cmd, timeout=30):
@@ -888,11 +894,84 @@ def test_ssh_atomic_write_nfo_tmp_filename_has_unique_suffix(monkeypatch):
     ok1, _ = app_module._ssh_atomic_write_nfo("/m/x.nfo", "<movie>x</movie>", verify_tmdb=False)
     ok2, _ = app_module._ssh_atomic_write_nfo("/m/x.nfo", "<movie>y</movie>", verify_tmdb=False)
     assert ok1 and ok2
-    # 两次 atomic_write 用了不同 tmp 后缀
-    tmp1 = [c for c in captured_cmds if ".tmp." in c][0]
-    tmp2 = [c for c in captured_cmds if ".tmp." in c][-1]
-    # 两次的 tmp 后缀（uuid hex）应不同
-    assert tmp1 != tmp2
 
-    # 确认 tmp 后缀格式：含 .tmp. 而不是 .tmp 结尾
-    assert all(".tmp." in c for c in captured_cmds if "mv " in c and "base64" not in c)
+    # 从 cmd 里提取 `mv <tmp> <dst>` 的 tmp path（shlex.quote 对无特殊字符 path 是 no-op，
+    # 所以 quote 可能有可能无 — regex 让单引号可选）。
+    tmp_re = re.compile(r"mv\s+'?([^\s']+\.tmp\.[0-9a-f]{12})'?\s+'?/m/x\.nfo'?")
+    tmps = []
+    for c in captured_cmds:
+        m = tmp_re.search(c)
+        if m:
+            tmps.append(m.group(1))
+
+    assert len(tmps) == 2, f"expected 2 mv commands with tmp paths; got {tmps}, cmds={captured_cmds}"
+    # 两次 tmp path 必须真不同
+    assert tmps[0] != tmps[1]
+    # 必须严格匹配 /m/x.nfo.tmp.<12 hex>
+    pat = re.compile(r"^/m/x\.nfo\.tmp\.[0-9a-f]{12}$")
+    assert pat.match(tmps[0]) and pat.match(tmps[1])
+
+
+def test_confirm_nfo_appearing_after_preview_is_skipped(client, token, monkeypatch):
+    """codex r2 BLOCKER: preview 时 nfo 不存在 → confirm 前被 Plex/user/另一个 action
+    创建 → executor 必须 re-stat 看到它存在并 skip（不能信 preview 时的旧 flag）。"""
+    _patch_organize_config(monkeypatch)
+    _patch_cache(monkeypatch, _full_cached_movie())
+
+    src = "/dl/movie.mkv"
+    src_stat = {"exists": True, "inode": 600, "size_bytes": 1, "mtime": 1}
+    dst_path = "/media/movies/The Movie (2024)/movie.mkv"
+    nfo_path = "/media/movies/The Movie (2024)/movie.nfo"
+
+    # preview: nfo 不存在
+    def preview_stat(paths):
+        return {p: (src_stat if p == src else {"exists": False}) for p in paths}
+
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", preview_stat)
+    action_id, signed = _do_preview_and_get_token(client, token, src)
+
+    # confirm: src + nfo 同时存在（preview→confirm 之间 nfo 被新创建）
+    call_n = {"n": 0}
+
+    def confirm_stat(paths):
+        call_n["n"] += 1
+        result = {}
+        for p in paths:
+            if p == src:
+                result[p] = src_stat
+            elif p == dst_path and call_n["n"] >= 3:
+                result[p] = src_stat   # ln 成功后同 inode
+            elif p == nfo_path:
+                # 关键：confirm 时 nfo 已存在（race-created）
+                result[p] = {"exists": True, "inode": 8888, "size_bytes": 500, "mtime": 2}
+            else:
+                result[p] = {"exists": False}
+        return result
+
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", confirm_stat)
+    monkeypatch.setattr(app_module, "_ssh_mkdir_p", lambda p: (0, "", ""))
+    monkeypatch.setattr(app_module, "_ssh_ln", lambda s, d: (0, "", ""))
+
+    write_calls = []
+
+    def fake_write(src_p, nfo, kind, *, target_exists=False, **kw):
+        write_calls.append((nfo, kind, target_exists))
+        return "skipped: nfo_exists" if target_exists else "created"
+
+    monkeypatch.setattr(app_module, "_write_organize_nfo", fake_write)
+
+    resp = client.post(
+        "/api/action/confirm",
+        json={"action_id": action_id, "signed_token": signed},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    item = resp.get_json()["result"]["items"][0]
+    assert item["status"] == "succeeded"
+    # 关键断言 (r2 BLOCKER): write helper 必须收到 target_exists=True
+    # 即使 preview payload 的 nfo_path_exists=False（preview 时不存在）
+    assert len(write_calls) == 1
+    assert write_calls[0][2] is True, (
+        f"expected target_exists=True (confirm re-stat saw new NFO), "
+        f"got {write_calls[0]}"
+    )
+    assert item["nfo_status"] == "skipped: nfo_exists"
