@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom global styles — keep minimal, prefer utility classes inline */
+@layer base {
+  html {
+    @apply text-sm;
+  }
+  body {
+    @apply bg-slate-900 text-slate-100;
+  }
+}
+
+@layer components {
+  /* Status bar segment */
+  .sb-seg {
+    @apply px-3 py-1 inline-flex items-center gap-1 cursor-pointer hover:bg-slate-700;
+  }
+  .sb-dot-ok    { @apply w-2 h-2 rounded-full bg-statusbar-ok; }
+  .sb-dot-warn  { @apply w-2 h-2 rounded-full bg-statusbar-warn; }
+  .sb-dot-err   { @apply w-2 h-2 rounded-full bg-statusbar-err; }
+  .sb-dot-gray  { @apply w-2 h-2 rounded-full bg-statusbar-gray; }
+
+  /* Sidebar nav item */
+  .nav-item {
+    @apply flex items-center justify-between px-4 py-2 text-sidebar-fg hover:text-sidebar-fg_active hover:bg-slate-800 rounded;
+  }
+  .nav-item.active {
+    @apply text-sidebar-fg_active bg-slate-800;
+  }
+  .nav-badge {
+    @apply text-xs bg-statusbar-warn text-slate-900 rounded-full px-2 py-0.5 font-semibold;
+  }
+}
