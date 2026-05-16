@@ -18,6 +18,9 @@ config/
 .claude/
 *.local.json
 
+# Git worktrees (subagent isolated workspaces)
+.worktrees/
+
 # 编辑器
 .vscode/
 .idea/
