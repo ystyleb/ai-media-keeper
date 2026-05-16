@@ -19,7 +19,16 @@
         {% include "_sidebar.html" %}
 
         <main class="flex-1 flex flex-col overflow-hidden">
-            {% include "_topbar.html" %}
+            <header class="bg-slate-800 border-b border-slate-700 px-4 py-2 flex items-center justify-between">
+                <div class="text-slate-300 text-sm">
+                    {% block breadcrumb %}
+                    <span class="text-slate-500">/</span>
+                    {% endblock %}
+                </div>
+                <div class="text-xs text-slate-400">
+                    {% block topbar_right %}{% endblock %}
+                </div>
+            </header>
 
             <div id="main-content" class="flex-1 overflow-auto p-4">
                 {% block main %}
