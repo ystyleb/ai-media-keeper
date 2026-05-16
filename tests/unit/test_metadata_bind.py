@@ -139,8 +139,17 @@ def test_bind_non_numeric_tmdb_id_returns_400(client, token):
 
 
 def test_bind_file_missing_returns_404(client, token):
-    """SSH stat 报 exists=False → 不写 cache，防错位到已删文件。"""
-    with patch.object(app_module, "_ssh_stat_paths", return_value=_stat_missing()):
+    """SSH stat 报 exists=False → 不写 cache，防错位到已删文件。
+
+    必须 mock get_tmdb_provider — provider 检查在 SSH stat 之前；CI 无 TMDB key
+    时若不 mock，提前在 provider 检查返 400（参考 [[testing-and-fixtures]] CI vs
+    本地 env config 差异）。
+    """
+    fake_provider = object()  # 占位，本测试不会真调到它
+    with (
+        patch.object(app_module, "_ssh_stat_paths", return_value=_stat_missing()),
+        patch.object(app_module, "get_tmdb_provider", return_value=fake_provider),
+    ):
         resp = client.post(
             "/api/metadata/bind",
             json={"path": _p("missing.mkv"), "tmdb_id": "603", "media_type": "movie"},

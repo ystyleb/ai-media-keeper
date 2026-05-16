@@ -4261,6 +4261,22 @@ def metadata_bind():
     except Exception:
         return jsonify({"error": f"invalid path: {path_in}"}), 400
 
+    # season/episode 纯输入校验（不依赖 provider / SSH） — 提到 provider 检查之前
+    # codex r1 BLOCKER: 跟 tmdb_id 同样的 SDK path injection 攻击面 —
+    # season/episode 直接进 lookup_by_id → 拼到 `/tv/{id}/season/{N}/episode/{N}` URL
+    # 非 int / bool / 负数 / 超大值 → 400 拒掉
+    season_arg = data.get("season")
+    episode_arg = data.get("episode")
+    for label, val in (("season", season_arg), ("episode", episode_arg)):
+        if val is None:
+            continue
+        if isinstance(val, bool) or not isinstance(val, int) or val < 0 or val > 9999:
+            return jsonify(
+                {
+                    "error": f"{label} must be a non-negative integer ≤ 9999",
+                }
+            ), 400
+
     provider = get_tmdb_provider()
     if provider is None:
         return jsonify({"error": "TMDB API key not configured"}), 400
@@ -4273,20 +4289,6 @@ def metadata_bind():
 
     # season/episode override：优先 body 传入，否则用 guessit parse
     parse = identify_svc.parse_filename(path)
-    season_arg = data.get("season")
-    episode_arg = data.get("episode")
-    # codex r1 BLOCKER: 跟 tmdb_id 同样的 SDK path injection 攻击面 —
-    # season/episode 直接进 lookup_by_id → 拼到 `/tv/{id}/season/{N}/episode/{N}` URL
-    # 非 int / bool / 负数 / 超大值 → 400 拒掉
-    for label, val in (("season", season_arg), ("episode", episode_arg)):
-        if val is None:
-            continue
-        if isinstance(val, bool) or not isinstance(val, int) or val < 0 or val > 9999:
-            return jsonify(
-                {
-                    "error": f"{label} must be a non-negative integer ≤ 9999",
-                }
-            ), 400
     if media_type == "tv":
         if season_arg is None:
             season_arg = parse.season
