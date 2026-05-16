@@ -1,0 +1,17 @@
+<aside class="w-56 bg-sidebar-bg text-sidebar-fg flex flex-col">
+    <div class="px-4 py-3 text-lg font-bold text-sidebar-fg-active border-b border-slate-700">
+        🗄️ NASVault
+    </div>
+
+    <nav class="flex-1 px-2 py-3 space-y-1" id="sidebar-nav"
+         hx-get="/ui/sidebar/badges"
+         hx-trigger="load, every 60s"
+         hx-swap="innerHTML">
+        <!-- Initial render: server-side included; HTMX poll 覆盖 -->
+        {% include "partials/sidebar/badges.html" %}
+    </nav>
+
+    <div class="px-4 py-2 text-xs text-slate-500 border-t border-slate-700">
+        v{{ app_version | default('dev') }}
+    </div>
+</aside>

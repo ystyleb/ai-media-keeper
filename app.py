@@ -866,6 +866,9 @@ def human_size(size_bytes: int) -> str:
 
 @app.route("/")
 def index():
+    # Phase A.2: ?layout=v2 短路 — 让浏览器切到新 layout 骨架验证（Task 4 接回鉴权后移除）
+    if request.args.get("layout") == "v2":
+        return render_template("base.html", badges={}, providers=[], workers=[])
     # frontend-ui.md lesson: HTML 加 no-store，否则浏览器缓存老模板 + 新 JS 不匹配
     # （cache_bust URL 是 templates 渲染的，浏览器缓存 HTML 时 URL 也被冻结，
     # 但 /static/app.js 仍走 304 拉新内容 → 老 HTML + 新 JS 跑炸 bootstrap 找不到元素）

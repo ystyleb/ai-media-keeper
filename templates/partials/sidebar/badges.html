@@ -1,0 +1,15 @@
+<a href="/" class="nav-item" hx-boost="true"><span>🏠 概览</span></a>
+<a href="/files" class="nav-item" hx-boost="true"><span>📁 文件</span></a>
+<a href="/library" class="nav-item" hx-boost="true">
+    <span>🎬 媒体库</span>
+    {% if badges.library | default(0) > 0 %}<span class="nav-badge">{{ badges.library }}</span>{% endif %}
+</a>
+<a href="/dedup" class="nav-item" hx-boost="true">
+    <span>🔍 重复检测</span>
+    {% if badges.dedup | default(0) > 0 %}<span class="nav-badge">{{ badges.dedup }}</span>{% endif %}
+</a>
+<a href="/organize" class="nav-item" hx-boost="true">
+    <span>📦 整理</span>
+    {% if badges.organize | default(0) > 0 %}<span class="nav-badge">{{ badges.organize }}</span>{% endif %}
+</a>
+<a href="/settings" class="nav-item" hx-boost="true"><span>⚙️ 设置</span></a>

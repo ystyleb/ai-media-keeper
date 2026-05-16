@@ -1,0 +1,19 @@
+<footer class="bg-statusbar-bg text-statusbar-fg text-xs flex items-center border-t border-slate-700">
+    <div id="status-providers"
+         hx-get="/ui/status/providers"
+         hx-trigger="load, every 60s"
+         hx-swap="innerHTML"
+         class="flex items-center">
+        {% include "partials/status/providers.html" %}
+    </div>
+
+    <div class="border-l border-slate-700 h-4 mx-2"></div>
+
+    <div id="status-workers"
+         hx-get="/ui/status/workers"
+         hx-trigger="load, every 5s"
+         hx-swap="innerHTML"
+         class="flex items-center">
+        {% include "partials/status/workers.html" %}
+    </div>
+</footer>

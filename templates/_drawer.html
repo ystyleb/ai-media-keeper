@@ -1,0 +1,20 @@
+<aside id="drawer"
+       x-show="drawerOpen"
+       x-transition:enter="transition ease-out duration-200"
+       x-transition:enter-start="translate-x-full"
+       x-transition:enter-end="translate-x-0"
+       x-transition:leave="transition ease-in duration-150"
+       x-transition:leave-start="translate-x-0"
+       x-transition:leave-end="translate-x-full"
+       @keydown.escape.window="drawerOpen = false"
+       class="w-[768px] max-w-[50%] bg-slate-800 border-l border-slate-700 flex flex-col overflow-hidden"
+       style="display: none;">
+    <header class="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+        <h2 class="text-slate-100 font-semibold" id="drawer-title">Drawer</h2>
+        <button @click="drawerOpen = false" class="text-slate-400 hover:text-slate-100">✕</button>
+    </header>
+    <div class="flex-1 overflow-auto p-4" id="drawer-content">
+        <!-- Phase C: HTMX 把 fragments 渲到这里 -->
+        <p class="text-slate-500">Phase A: drawer 容器就绪，内容待 Phase C 实现。</p>
+    </div>
+</aside>
