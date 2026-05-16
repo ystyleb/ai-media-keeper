@@ -1,19 +1,17 @@
-<!DOCTYPE html>
-<html lang="zh-CN" data-bs-theme="dark">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NAS Vault</title>
+{% extends "base.html" %}
 
+{% block title %}文件 · NASVault{% endblock %}
+
+{% block head_extra %}
+    <!-- Bootstrap CSS — 老 modal 需要 (Phase C drawer 取代后删) -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
-
     <style>
-        /* ─── DESIGN TOKENS ─────────────────────────────────────── */
+        /* ─── DESIGN TOKENS ─────────────────────────────────────────── */
         :root {
             /* Backgrounds */
             --bg:         #0d1117;
@@ -108,119 +106,61 @@
         /* ─── RESET ──────────────────────────────────────────────── */
         *, *::before, *::after { box-sizing: border-box; }
 
-        html, body {
-            height: 100%;
-            margin: 0;
-            background: var(--bg);
-            color: var(--text-1);
-            font-family: var(--font-ui);
-            font-size: 14px;
-            line-height: 1.6;
-            -webkit-font-smoothing: antialiased;
-            overflow: hidden;
-        }
-
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: var(--border-med); }
 
-        /* ─── TOPBAR ─────────────────────────────────────────────── */
-        .topbar {
-            position: fixed;
-            top: 0; left: 0; right: 0;
-            height: var(--topbar-h);
+        /* ─── Phase A transitional: override base.html #main-content ──
+           base.html 加了 p-4 + overflow-auto; 老布局需要 overflow:hidden
+           + 零 padding（.app-body 自管 layout）。Phase C 清理后删此块。 */
+        #main-content {
+            padding: 0 !important;
+            overflow: hidden !important;
+            display: flex !important;
+            flex-direction: column !important;
+        }
+
+        /* ─── Provider 状态点（绿=ok / 灰=未配置 / 黄=auth_failed / 红=unreachable / 浅灰=unknown） */
+        .tb-state-dot {
+            display: inline-block; width: 7px; height: 7px;
+            border-radius: 50%; margin-left: 2px;
+            background: #888; flex-shrink: 0;
+        }
+        .tb-state-dot[data-state="ok"]            { background: #34c759; }
+        .tb-state-dot[data-state="not_configured"]{ background: #888; }
+        .tb-state-dot[data-state="auth_failed"]   { background: #ff9500; box-shadow: 0 0 4px rgba(255,149,0,0.5); }
+        .tb-state-dot[data-state="unreachable"]   { background: #ff3b30; box-shadow: 0 0 4px rgba(255,59,48,0.5); }
+        .tb-state-dot[data-state="unknown"]       { background: #555; opacity: 0.5; }
+
+        /* ─── Provider 异常 banner ─── */
+        .provider-banner {
+            z-index: 999;
+            display: flex; align-items: center; gap: 10px;
+            padding: 8px 16px;
+            background: rgba(255, 149, 0, 0.95); color: #1a1a1a;
+            font-size: 13px; font-weight: 500;
+            border-bottom: 1px solid rgba(0,0,0,0.1);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            flex-shrink: 0;
+        }
+        .provider-banner.severe { background: rgba(255, 59, 48, 0.95); color: #fff; }
+        .provider-banner-icon { font-size: 16px; }
+        .provider-banner-text { flex: 1; white-space: pre-wrap; }
+        .provider-banner-btn {
+            background: rgba(0,0,0,0.12); border: none; color: inherit;
+            padding: 4px 10px; border-radius: 4px; cursor: pointer;
+            font-size: 12px; font-weight: 500;
+        }
+        .provider-banner-btn:hover { background: rgba(0,0,0,0.22); }
+
+        /* ─── 临时按钮区（Phase A — Phase B settings 页面迁走后删） ─── */
+        .phase-a-actions {
+            display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+            padding: 8px 12px;
             background: var(--surface);
             border-bottom: 1px solid var(--border);
-            display: flex;
-            align-items: center;
-            padding: 0 16px;
-            gap: 12px;
-            z-index: 1000;
-            overflow: hidden;
-        }
-
-        .brand {
-            display: flex; align-items: center; gap: 8px;
-            text-decoration: none; flex-shrink: 0;
-        }
-        .brand-icon {
-            width: 26px; height: 26px;
-            background: var(--blue);
-            border-radius: 6px;
-            display: flex; align-items: center; justify-content: center;
-            color: var(--bg); font-size: 13px;
-        }
-        .brand-name {
-            font-size: 15px; font-weight: 700;
-            color: var(--text-1); letter-spacing: -0.3px;
-        }
-        .brand-name span { color: var(--blue); }
-
-        /* Disk strip */
-        .topbar-disks {
-            flex: 1;
-            overflow-x: auto; overflow-y: hidden;
-            scrollbar-width: none; min-width: 0;
-            height: 100%;
-            display: flex; align-items: center;
-        }
-        .topbar-disks::-webkit-scrollbar { display: none; }
-
-        #disk-cards {
-            display: flex !important;
-            flex-wrap: nowrap !important;
-            gap: 8px; align-items: center;
-            width: max-content;
-        }
-        #disk-cards .col-md-6 {
-            width: auto !important; flex: 0 0 auto !important;
-            padding: 0 !important; margin: 0 !important;
-        }
-        #disk-cards .card.disk-card {
-            border-radius: var(--r) !important;
-            border-color: var(--border) !important;
-            background: var(--surface-2) !important;
-            min-width: 158px; max-width: 200px;
-            height: 38px;
-            transition: border-color 0.15s !important;
-        }
-        #disk-cards .card.disk-card:hover {
-            border-color: var(--border-med) !important;
-            transform: none !important;
-        }
-        #disk-cards .card-body {
-            padding: 5px 10px !important;
-            display: flex; flex-direction: column; justify-content: center;
-            gap: 3px;
-        }
-        #disk-cards .progress {
-            height: 3px !important;
-            border-radius: 2px !important;
-            background: var(--surface-3) !important;
-            margin: 0 !important;
-        }
-        #disk-cards small {
-            font-size: 11px !important;
-            line-height: 1.2 !important;
-            font-family: var(--font-mono) !important;
-            color: var(--text-3) !important;
-        }
-        #disk-cards .fw-bold {
-            font-size: 11px !important;
-            line-height: 1.2 !important;
-            color: var(--text-1) !important;
-            font-weight: 600 !important;
-            font-family: var(--font-ui) !important;
-            letter-spacing: 0.2px;
-        }
-        #disk-cards .text-success { color: var(--green) !important; }
-        #disk-cards .text-warning { color: var(--amber) !important; }
-        #disk-cards .text-danger  { color: var(--red) !important; }
-
-        /* Topbar actions */
-        .topbar-actions {
-            display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+            flex-shrink: 0;
         }
         .tb-btn {
             display: inline-flex; align-items: center; gap: 5px;
@@ -249,40 +189,7 @@
         }
         .tb-btn-icon:hover { color: var(--text-1); border-color: var(--border-med); }
 
-        /* Provider 状态点（绿=ok / 灰=未配置 / 黄=auth_failed / 红=unreachable / 浅灰=unknown） */
-        .tb-state-dot {
-            display: inline-block; width: 7px; height: 7px;
-            border-radius: 50%; margin-left: 2px;
-            background: #888; flex-shrink: 0;
-        }
-        .tb-state-dot[data-state="ok"]            { background: #34c759; }
-        .tb-state-dot[data-state="not_configured"]{ background: #888; }
-        .tb-state-dot[data-state="auth_failed"]   { background: #ff9500; box-shadow: 0 0 4px rgba(255,149,0,0.5); }
-        .tb-state-dot[data-state="unreachable"]   { background: #ff3b30; box-shadow: 0 0 4px rgba(255,59,48,0.5); }
-        .tb-state-dot[data-state="unknown"]       { background: #555; opacity: 0.5; }
-
-        /* Provider 异常 banner */
-        .provider-banner {
-            position: fixed; left: 0; right: 0; top: var(--topbar-h);
-            z-index: 999;
-            display: flex; align-items: center; gap: 10px;
-            padding: 8px 16px;
-            background: rgba(255, 149, 0, 0.95); color: #1a1a1a;
-            font-size: 13px; font-weight: 500;
-            border-bottom: 1px solid rgba(0,0,0,0.1);
-            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-        }
-        .provider-banner.severe { background: rgba(255, 59, 48, 0.95); color: #fff; }
-        .provider-banner-icon { font-size: 16px; }
-        .provider-banner-text { flex: 1; white-space: pre-wrap; }
-        .provider-banner-btn {
-            background: rgba(0,0,0,0.12); border: none; color: inherit;
-            padding: 4px 10px; border-radius: 4px; cursor: pointer;
-            font-size: 12px; font-weight: 500;
-        }
-        .provider-banner-btn:hover { background: rgba(0,0,0,0.22); }
-
-        /* ─── 视图切换 tab（文件/库） ──────────────────────────── */
+        /* ─── 视图切换 tab（文件/库/重复） ──────────────────────────── */
         .view-toggle {
             display: inline-flex; gap: 0;
             border: 1px solid var(--border); border-radius: var(--r);
@@ -300,8 +207,6 @@
         }
 
         /* ─── 库视图布局 ───────────────────────────────────────── */
-        /* 用 absolute fill 避免 flex-within-flex 的 sizing 边角问题。
-           .main-panel position:relative （见 .main-panel 那条规则下面） */
         #dedup-panel {
             display: none;
             position: absolute;
@@ -356,7 +261,6 @@
             display: none;
         }
         .dedup-series-body.open { display: block; }
-        /* Inside series body, nested dedup-group needs no extra border */
         .dedup-series-body .dedup-group {
             border: none;
             border-top: 1px solid var(--border);
@@ -519,8 +423,7 @@
         /* ─── APP LAYOUT ─────────────────────────────────────────── */
         .app-body {
             display: flex;
-            height: 100vh;
-            padding-top: var(--topbar-h);
+            flex: 1;
             overflow: hidden;
         }
 
@@ -745,7 +648,7 @@
         #empty-state { padding: 80px 0 !important; color: var(--text-2) !important; }
         #empty-state .bi { color: var(--text-3) !important; }
 
-        /* ─── SIDEBAR ────────────────────────────────────────────── */
+        /* ─── SIDEBAR (right panel, 老 app 内部 sidebar) ────────── */
         .sidebar {
             width: var(--sidebar-w); flex-shrink: 0;
             display: flex; flex-direction: column;
@@ -1006,83 +909,58 @@
             background: var(--teal-dim) !important;
         }
     </style>
-</head>
+{% endblock %}
 
-<body>
+{% block breadcrumb %}
+<span class="text-slate-400 text-sm">📁 文件</span>
+{% endblock %}
 
-<!-- ── TOPBAR ──────────────────────────────────────────────────── -->
-<header class="topbar">
-    <a class="brand" href="#">
-        <div class="brand-icon">
-            <i class="bi bi-hdd-network-fill"></i>
-        </div>
-        <span class="brand-name">NAS<span>Vault</span></span>
-    </a>
+{% block main %}
 
-    <div class="topbar-disks">
-        <div id="disk-cards">
-            <!-- JS: renderDiskCards() -->
-        </div>
+<!-- Phase A transitional: 临时按钮区，Phase B 拆 settings page 时迁出 -->
+<div class="phase-a-actions" data-bs-theme="dark">
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#aiConfigModal">
+        <i class="bi bi-stars"></i> AI 配置
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#embyConfigModal">
+        <i class="bi bi-tv"></i> Emby
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#qbitConfigModal">
+        <i class="bi bi-gear"></i> qBit
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#nasConfigModal">
+        <i class="bi bi-hdd-network"></i> NAS
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#organizeConfigModal">
+        <i class="bi bi-folder-symlink"></i> 媒体库根
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#autoOrganizeConfigModal">
+        <i class="bi bi-magic"></i> 自动整理
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#scanModal">
+        <i class="bi bi-radar"></i> 全库扫描
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#batchIdentifyModal">
+        <i class="bi bi-stars"></i> 批量识别
+    </button>
+    <div class="view-toggle" role="tablist" style="margin-left:auto;">
+        <button id="view-tab-files" class="tb-btn view-tab active" onclick="switchView('files')">
+            <i class="bi bi-folder2"></i> 文件
+        </button>
+        <button id="view-tab-library" class="tb-btn view-tab" onclick="switchView('library')">
+            <i class="bi bi-collection-play"></i> 库
+        </button>
+        <button id="view-tab-dedup" class="tb-btn view-tab" onclick="switchView('dedup')">
+            <i class="bi bi-files"></i> 重复
+        </button>
     </div>
-
-    <div class="topbar-actions">
-        <button class="tb-btn-icon" onclick="refreshDisk()" title="刷新磁盘">
-            <i class="bi bi-arrow-clockwise"></i>
-        </button>
-        <button class="tb-btn" onclick="showHardlinks()">
-            <i class="bi bi-link-45deg"></i>
-            硬链接
-        </button>
-        <button class="tb-btn" onclick="showNASConfig()">
-            <i class="bi bi-hdd-network"></i>
-            NAS
-        </button>
-        <button id="tb-qbit" class="tb-btn" onclick="showQBitConfig()">
-            <i class="bi bi-gear"></i>
-            qBit
-            <span class="tb-state-dot" data-state="unknown" title="加载中"></span>
-        </button>
-        <button id="tb-ai" class="tb-btn" onclick="showAIConfig()">
-            <i class="bi bi-stars"></i>
-            AI
-            <span class="tb-state-dot" data-state="unknown" title="加载中"></span>
-        </button>
-        <button id="tb-emby" class="tb-btn" onclick="showEmbyConfig()" title="配置 Emby + 同步已看记录">
-            <i class="bi bi-tv"></i>
-            Emby
-            <span class="tb-state-dot" data-state="unknown" title="加载中"></span>
-        </button>
-        <button class="tb-btn" onclick="showOrganizeConfig()" title="配置媒体库 hardlink 目标根 (MOVIES_ROOT/TV_ROOT)">
-            <i class="bi bi-folder-symlink"></i>
-            媒体库
-        </button>
-        <button class="tb-btn" onclick="showAutoOrganizeConfig()" title="qBit 下载完成后自动 organize (Phase 4C)">
-            <i class="bi bi-magic"></i>
-            自动整理
-        </button>
-        <button class="tb-btn" onclick="openScanModal()" title="后台扫描全库 + 自动识别元数据">
-            <i class="bi bi-radar"></i>
-            扫库
-        </button>
-        <div class="view-toggle" role="tablist" style="margin-left:8px;">
-            <button id="view-tab-files" class="tb-btn view-tab active" onclick="switchView('files')">
-                <i class="bi bi-folder2"></i>
-                文件
-            </button>
-            <button id="view-tab-library" class="tb-btn view-tab" onclick="switchView('library')">
-                <i class="bi bi-collection-play"></i>
-                库
-            </button>
-            <button id="view-tab-dedup" class="tb-btn view-tab" onclick="switchView('dedup')">
-                <i class="bi bi-files"></i>
-                重复
-            </button>
-        </div>
-    </div>
-</header>
+    <button class="tb-btn-icon" onclick="refreshDisk()" title="刷新磁盘">
+        <i class="bi bi-arrow-clockwise"></i>
+    </button>
+</div>
 
 <!-- Provider 状态异常 banner（仅 auth_failed/unreachable 时由 JS 显示） -->
-<div id="provider-banner" class="provider-banner" style="display:none;">
+<div id="provider-banner" class="provider-banner" style="display:none;" data-bs-theme="dark">
     <span class="provider-banner-icon"><i class="bi bi-exclamation-triangle-fill"></i></span>
     <span id="provider-banner-text" class="provider-banner-text"></span>
     <button class="provider-banner-btn" onclick="loadProvidersStatus(true)" title="重新检测 provider 状态">
@@ -1095,7 +973,7 @@
 
 
 <!-- ── APP BODY ────────────────────────────────────────────────── -->
-<div class="app-body">
+<div class="app-body" data-bs-theme="dark">
 
     <!-- LEFT: FILE PANEL ──────────────────────────────────────── -->
     <div class="main-panel">
@@ -1317,6 +1195,8 @@
 
 </div><!-- /.app-body -->
 
+
+<!-- ── 12 MODALS ────────────────────────────────────────────────── -->
 
 <!-- ── DELETE MODAL ────────────────────────────────────────────── -->
 <div class="modal fade" id="deleteModal" tabindex="-1">
@@ -2024,7 +1904,8 @@
     </div>
 </div>
 
+<!-- Bootstrap 5 JS bundle (老 modal 仍要工作) -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/static/app.js?v=2026-05-15g"></script>
-</body>
-</html>
+
+{% endblock %}
