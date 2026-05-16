@@ -2253,21 +2253,45 @@ def _write_organize_nfo(
       'failed: no_cache' / 'failed: <reason>'。
     Pattern D: 失败不抛 — 调用方根据 status 决定要不要告知用户「文件已整理但 NFO 失败」。
     """
-    cached, _ = metadata_cache.get_by_path(get_db(), src_path)
-    if cached is None:
-        return "failed: no_cache"
-
-    # 防 cache 漂移：preview 跟 confirm 之间 metadata 被改了 → 不写 NFO（避免目录跟 NFO 不一致）
-    if expected_metadata is not None:
-        for key, expected in expected_metadata.items():
-            actual = getattr(cached, key, None)
-            if expected != actual:
-                return f"skipped: cache_drift ({key} {expected!r}→{actual!r})"
-
+    # codex r2 IMPORTANT: cache read / enrich / build payload 整段都包 Pattern D 边界
+    # —— hardlink 已成功，任何 DB / build error 都必须转 nfo_status='failed: ...'，
+    # 不能 leak 到 executor 让整个 item 被记 'executor_crashed'（破坏 Pattern D 语义）。
     try:
+        cached, _ = metadata_cache.get_by_path(get_db(), src_path)
+        if cached is None:
+            return "failed: no_cache"
+
+        # 防 cache 漂移：preview 跟 confirm 之间 metadata 被改了 → 不写 NFO（避免目录跟 NFO 不一致）
+        if expected_metadata is not None:
+            for key, expected in expected_metadata.items():
+                actual = getattr(cached, key, None)
+                if expected != actual:
+                    return f"skipped: cache_drift ({key} {expected!r}→{actual!r})"
+
+        # ROADMAP #9: tv episode NFO 写回前 lazy enrich episode-specific 字段
+        # （scanner 阶段没拉 episode 详情，到这里如果还缺就主动调一次 TMDB）。
+        # 失败返回原 cached，<plot> 仍 fallback 到 series overview（旧行为，不退化）。
+        if nfo_kind == "episode":
+            cached, drift_detected = metadata_cache.ensure_episode_details(
+                get_db(), get_tmdb_provider(), cached,
+            )
+            # codex r2 BLOCKER: enrich 内 guarded UPDATE rowcount=0 显式 signal drift
+            # → 不能信任 refreshed cached（可能 refresh 失败回退到旧 snapshot），
+            # 直接 short-circuit，不依赖第二次 drift check 来兜底。
+            if drift_detected:
+                return "skipped: cache_drift (during episode enrich)"
+            # 第二道 drift check 抓 enrich helper 没覆盖的主字段（title/year）变化
+            if expected_metadata is not None:
+                for key, expected in expected_metadata.items():
+                    actual = getattr(cached, key, None)
+                    if expected != actual:
+                        return f"skipped: cache_drift ({key} {expected!r}→{actual!r})"
+
         payload = _build_nfo_payload_for_organize(cached, nfo_kind)
         xml = nfo_writer.build_nfo(payload)
     except Exception as e:  # noqa: BLE001
+        # DB error / build error 等 → Pattern D 返 nfo_status='failed: ...'
+        # 不让 hardlink success 的 organize item 变 'executor_crashed'
         return f"failed: build_nfo {type(e).__name__}: {e}"
     ok, reason = _ssh_create_nfo_if_absent(
         target_nfo_path, xml,

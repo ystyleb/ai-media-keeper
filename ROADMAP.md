@@ -192,17 +192,20 @@ Claude Desktop / Code 直接管 NAS：
 - 引入 ruff CI + lint
 - 平台兼容矩阵（QNAP / Synology / Linux 的 `stat` / `du` 差异 shim）
 
-### 9. NFO episode-specific 元数据补全（S，依赖：Phase 4 NFO writer）
+### 9. NFO episode-specific 元数据补全（✅ 2026-05-16 完成）
 
-**问题**：Phase 4A NFO writer 写 episode `.nfo` 时，`<plot>` / `<rating>` / `<thumb>` 直接 copy series-level 字段（来自 `tv_shows` cache）。结果 S01E01 / S01E02 / ... 的 NFO 全部 plot 相同 = series 整体剧情简介，不是 episode 自己的剧情。Plex/Emby 仍能识别（靠 season+episode 编号），但显示的"本集简介"是 series 简介，体验降级。
+**问题（已修）**：Phase 4A NFO writer 写 episode `.nfo` 时，`<plot>` / `<aired>` / `<thumb>` 直接 copy series-level 字段。结果 S01E01 / S01E02 / ... 的 NFO 全部 plot 相同 = series 整体剧情。Plex/Emby 仍能识别（靠 season+episode 编号），但"本集简介"是 series 简介，体验降级。
 
-**修法**：metadata_cache 加 `tv_episode` 维度（已有 series + season，缺 episode 层），调 TMDB `/tv/{id}/season/{season}/episode/{ep}` 拿 per-episode `name` / `overview` / `still_path` / `vote_average`。NFO writer 检测 cached.media_type='tv' + cached.season_number + cached.episode_number → 优先用 episode-specific 字段，fallback series 字段。
+**修法**：`services/metadata_cache.py` 加 `ensure_episode_details(conn, provider, cached) -> (CachedMetadata, drift_detected)` helper — 当 cached tv episode 缺 `episode_overview/air_date/still_url` 时 lazy 调 TMDB `/tv/{id}/season/{N}/episode/{N}` 补全，guarded UPDATE 防 lookup 期间 cache drift。`_write_organize_nfo` 在 build payload 前调用，build NFO 时优先用 episode-specific 字段。
 
-**验证**：本会话端到端 cross-check 已观察到这个 limitation（Stranger Things S04E01.nfo plot = series plot copy）— 见 cross-check 报告。SSH `cat <dst>/Season XX/*.nfo` 对比看 plot 是否 episode-specific。
+**契约保证**：
+- [drift-safe] guarded UPDATE `WHERE path=? AND tmdb_id=? AND season=? AND episode=?` + 显式 drift_detected flag，scanner concurrent 改 cache → 不写错位数据 + caller short-circuit
+- [Pattern D] `_write_organize_nfo` 整段包 try，DB / build error 都转 `failed: ...` nfo_status，不污染 hardlink 主状态
+- Lazy enrich（不是 scanner 阶段）— 每集多 1 次 TMDB API 只在真正 organize 时付出
 
-**为什么不急**：Plex/Emby 主屏看 series 卡片显示 series plot 是对的；只在点进单集详情时才显示 episode plot。多数用户体感不强。
+**测试**：11 unit test 覆盖 provider None / movie / 缺 season / 缺 tmdb_id / 已 enriched / happy path / provider raises / lookup None / episode None / drift signaled / DB error。580 total tests pass。
 
-**前置**：Phase 4A NFO writer + tv_shows cache schema 已就位；Phase 3.x metadata_cache 接口已抽象。预计 0.5-1 天（TMDB 调用 + cache 落盘 + writer 字段切换 + 几个 unit test）。
+**review 经过**：codex r1 抓 BLOCKER drift race + IMPORTANT DB leak → r2 抓派生 BLOCKER refresh fallback silently 退旧 + IMPORTANT cache read 在 try 外 → r3 0 BLOCKER ship。
 
 ---
 

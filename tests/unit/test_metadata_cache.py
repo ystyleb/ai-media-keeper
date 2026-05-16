@@ -10,7 +10,7 @@ import pytest
 
 from services import destructive_action, metadata_cache
 from services.identify import FilenameParse, IdentifyResult
-from services.metadata.base import MediaCandidate
+from services.metadata.base import MediaCandidate, MediaDetails
 
 
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "db" / "schema.sql"
@@ -715,3 +715,254 @@ def test_get_many_handles_more_than_chunk_size():
         for p in paths:
             assert result[p] == (None, "miss")
         c.close()
+
+
+# ---------------- ensure_episode_details (ROADMAP #9) ---------------- #
+
+
+class _FakeProvider:
+    """Stub MetadataProvider — 记录 lookup_by_id 调用 + 返预设结果。"""
+
+    def __init__(self, *, episode=None, raise_exc=None, returns_none=False):
+        self._episode = episode
+        self._raise = raise_exc
+        self._none = returns_none
+        self.calls: list[dict] = []
+
+    def lookup_by_id(self, external_id, *, id_type="tmdb_id",
+                     media_type="movie", season=None, episode=None):
+        self.calls.append({
+            "external_id": external_id, "media_type": media_type,
+            "season": season, "episode": episode,
+        })
+        if self._raise:
+            raise self._raise
+        if self._none:
+            return None
+        cand = _make_candidate()
+        return MediaDetails(
+            candidate=cand,
+            episode=self._episode,
+            cast=[],
+            genres=[],
+            runtime_minutes=None,
+        )
+
+    def search(self, *a, **kw):  # 协议要求，不会被 ensure 调
+        return []
+
+    def test_connection(self):
+        return {"ok": True, "message": "fake"}
+
+
+def _seed_tv_episode(conn, path="/share/show.S01E01.mkv"):
+    """创建一条 tv episode cache row，episode_* 字段都是 None。"""
+    res = _make_result(top=_make_candidate())
+    metadata_cache.upsert_identification(
+        conn, path=path,
+        stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
+        identify_result=res,
+    )
+    cached, _ = metadata_cache.get_by_path(conn, path)
+    return cached
+
+
+def test_ensure_episode_details_provider_none_returns_original(conn):
+    cached = _seed_tv_episode(conn)
+    out, drift = metadata_cache.ensure_episode_details(conn, None, cached)
+    assert out is cached  # 完全 noop，不读 DB
+    assert drift is False
+
+
+def test_ensure_episode_details_skips_movie(conn):
+    """movie cached 不该触发 lookup（episode 字段不适用）。"""
+    movie_cand = _make_candidate(media_type="movie", title="Some Movie",
+                                  external_ids={"tmdb_id": "1000"})
+    movie_parse = _make_parse(media_type="movie", season=None, episode=None)
+    res = IdentifyResult(parse=movie_parse, candidates=[movie_cand],
+                        top_pick=movie_cand, confidence=0.95,
+                        reasoning="movie", pick_source="single_exact")
+    metadata_cache.upsert_identification(
+        conn, path="/share/m.mkv",
+        stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
+        identify_result=res,
+    )
+    cached, _ = metadata_cache.get_by_path(conn, "/share/m.mkv")
+    provider = _FakeProvider(episode={"overview": "X"})
+    out, drift = metadata_cache.ensure_episode_details(conn, provider, cached)
+    assert provider.calls == []  # 没调 TMDB
+    assert out is cached
+    assert drift is False
+
+
+def test_ensure_episode_details_skips_missing_season(conn):
+    """tv 但 season=None → 跳过（无法形成 /tv/{id}/season/{N}/episode/{N} 路径）。"""
+    cached = _seed_tv_episode(conn)
+    # 手动改 cache 模拟"识别后 season 没拿到"的边缘情况
+    conn.execute("UPDATE media_files SET season_number = NULL WHERE path = ?", (cached.path,))
+    conn.commit()
+    cached, _ = metadata_cache.get_by_path(conn, cached.path)
+    provider = _FakeProvider(episode={"overview": "X"})
+    out, drift = metadata_cache.ensure_episode_details(conn, provider, cached)
+    assert provider.calls == []
+    assert drift is False
+
+
+def test_ensure_episode_details_skips_missing_tmdb_id(conn):
+    """needs_review row（tmdb_id NULL）即使有 season/episode 也不该 lookup。"""
+    cached = _seed_tv_episode(conn)
+    conn.execute("UPDATE media_files SET tmdb_id = NULL WHERE path = ?", (cached.path,))
+    conn.commit()
+    cached, _ = metadata_cache.get_by_path(conn, cached.path)
+    provider = _FakeProvider(episode={"overview": "X"})
+    out, drift = metadata_cache.ensure_episode_details(conn, provider, cached)
+    assert provider.calls == []
+    assert drift is False
+
+
+def test_ensure_episode_details_skips_already_enriched(conn):
+    """任一字段已填（哪怕只有 air_date） → 跳过，幂等保证。"""
+    cached = _seed_tv_episode(conn)
+    metadata_cache.upsert_details(
+        conn, path=cached.path,
+        episode_air_date="2022-01-01",        # 任一字段非 None 即 enriched
+    )
+    cached, _ = metadata_cache.get_by_path(conn, cached.path)
+    provider = _FakeProvider(episode={"overview": "Should not see"})
+    out, drift = metadata_cache.ensure_episode_details(conn, provider, cached)
+    assert provider.calls == []
+    assert out.episode_air_date == "2022-01-01"
+    assert out.episode_overview is None       # 仍然 None，没被新值覆盖
+    assert drift is False
+
+
+def test_ensure_episode_details_fetches_and_persists(conn):
+    """happy path: 缺字段 → 调 lookup → upsert_details → 返回 refreshed cached。"""
+    cached = _seed_tv_episode(conn)
+    assert cached.episode_overview is None
+    provider = _FakeProvider(episode={
+        "name": "Pilot",
+        "overview": "Specific episode plot.",
+        "air_date": "2013-12-02",
+        "still_url": "https://image.tmdb.org/p/still.jpg",
+    })
+    out, drift = metadata_cache.ensure_episode_details(conn, provider, cached)
+    assert drift is False
+    assert len(provider.calls) == 1
+    call = provider.calls[0]
+    assert call["external_id"] == "60625"
+    assert call["media_type"] == "tv"
+    assert call["season"] == 6
+    assert call["episode"] == 2
+    # 返回值是 refreshed cached，含新字段
+    assert out.episode_overview == "Specific episode plot."
+    assert out.episode_air_date == "2013-12-02"
+    assert out.episode_still_url == "https://image.tmdb.org/p/still.jpg"
+    # DB 真持久化（不是内存对象修补）
+    db_cached, _ = metadata_cache.get_by_path(conn, cached.path)
+    assert db_cached.episode_overview == "Specific episode plot."
+
+
+def test_ensure_episode_details_provider_raises_returns_original(conn):
+    """provider 抛错（网关挂 / 限流 / network） → 返回原 cached，不抛。"""
+    cached = _seed_tv_episode(conn)
+    provider = _FakeProvider(raise_exc=RuntimeError("TMDB 502"))
+    out, drift = metadata_cache.ensure_episode_details(conn, provider, cached)
+    assert out.episode_overview is None       # cache 不变
+    assert out.path == cached.path
+    assert drift is False                      # provider 错不是 drift
+
+
+def test_ensure_episode_details_lookup_returns_none(conn):
+    """provider.lookup 返 None（剧 ID 无效） → 不抛，cache 不变。"""
+    cached = _seed_tv_episode(conn)
+    provider = _FakeProvider(returns_none=True)
+    out, drift = metadata_cache.ensure_episode_details(conn, provider, cached)
+    assert out.episode_overview is None
+    assert drift is False
+
+
+def test_ensure_episode_details_episode_none_returns_original(conn):
+    """剧存在但 TMDB 某集没收录（details.episode is None）→ 不抛，cache 不变。"""
+    cached = _seed_tv_episode(conn)
+    provider = _FakeProvider(episode=None)   # MediaDetails returned but episode=None
+    out, drift = metadata_cache.ensure_episode_details(conn, provider, cached)
+    assert len(provider.calls) == 1            # lookup 真调了
+    assert out.episode_overview is None        # 但 cache 没改
+    assert drift is False
+
+
+def test_ensure_episode_details_signals_drift_when_guarded_update_misses(conn):
+    """codex r2 BLOCKER：drift_detected=True 强 signal 调用方，**不**靠 refreshed cached.
+
+    模拟：fake provider 在 lookup_by_id 里把 cache 的 tmdb_id 改成另一个剧（模拟 scanner 改写）。
+    guarded UPDATE WHERE 不匹配 → rowcount=0 → drift_detected=True → caller short-circuit。
+    """
+    cached = _seed_tv_episode(conn)
+
+    class _DriftProvider:
+        """lookup_by_id 调用期间偷偷改 cache row（模拟 scanner concurrent re-identify）。"""
+        def __init__(self, db_conn):
+            self._db = db_conn
+            self.calls = 0
+        def lookup_by_id(self, *a, **kw):
+            self.calls += 1
+            # 模拟外部把 cache 改成另一个剧
+            self._db.execute(
+                "UPDATE media_files SET tmdb_id = '99999' WHERE path = ?",
+                (cached.path,),
+            )
+            self._db.commit()
+            return MediaDetails(
+                candidate=_make_candidate(),
+                episode={"name": "Old Ep", "overview": "Should not land",
+                         "air_date": "2013-01-01", "still_url": "u"},
+            )
+
+    provider = _DriftProvider(conn)
+    out, drift = metadata_cache.ensure_episode_details(conn, provider, cached)
+    assert drift is True                       # 关键：强 signal caller "drift detected"
+    # cache 当前 tmdb_id 已经是 99999（被 fake scanner 改的），episode_overview 仍 None
+    db_row = conn.execute(
+        "SELECT tmdb_id, episode_overview, episode_air_date FROM media_files WHERE path = ?",
+        (cached.path,),
+    ).fetchone()
+    assert db_row["tmdb_id"] == "99999"
+    assert db_row["episode_overview"] is None    # 旧 episode 数据没被写到新 row
+    assert db_row["episode_air_date"] is None
+
+
+class _FlakyDBProxy:
+    """Connection wrapper：UPDATE media_files 抛 OperationalError，其它 passthrough。
+
+    sqlite3.Connection.execute 是 C-level read-only attribute，不能直接 monkeypatch，
+    用 proxy 包一层模拟 DB 写失败。
+    """
+    def __init__(self, real):
+        self._real = real
+    def execute(self, sql, *a, **kw):
+        if "UPDATE media_files" in sql:
+            raise sqlite3.OperationalError("database is locked")
+        return self._real.execute(sql, *a, **kw)
+    def commit(self):
+        return self._real.commit()
+    def rollback(self):
+        return self._real.rollback()
+
+
+def test_ensure_episode_details_db_error_returns_original(conn):
+    """upsert/update 阶段 SQLite 抛错 → catch 后返原 cached，不让 hardlink success path crash。"""
+    cached = _seed_tv_episode(conn)
+    provider = _FakeProvider(episode={
+        "name": "Pilot", "overview": "X",
+        "air_date": "2013-01-01", "still_url": "u",
+    })
+    flaky = _FlakyDBProxy(conn)
+    out, drift = metadata_cache.ensure_episode_details(flaky, provider, cached)
+    # 不抛，返回的是原 cached（DB 没写入）
+    assert out.episode_overview is None
+    assert drift is False                        # DB error 不是 drift（caller 沿用原 cached 即可）
+    db_row = conn.execute(
+        "SELECT episode_overview FROM media_files WHERE path = ?", (cached.path,),
+    ).fetchone()
+    assert db_row["episode_overview"] is None

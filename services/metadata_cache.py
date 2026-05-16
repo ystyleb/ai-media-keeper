@@ -455,6 +455,121 @@ def delete_by_path(conn: sqlite3.Connection, path: str) -> bool:
     return cur.rowcount > 0
 
 
+def ensure_episode_details(
+    conn: sqlite3.Connection,
+    provider: Any,                         # MetadataProvider | None；用 Any 避免循环 import
+    cached: CachedMetadata,
+) -> tuple[CachedMetadata, bool]:
+    """ROADMAP #9: tv episode lazy enrich. 缺 episode-specific 字段时调 TMDB 补全。
+
+    返回 (cached_or_refreshed, drift_detected)：
+      - drift_detected=False: 正常路径（已 enriched / 跳过条件命中 / lookup 成功 / 失败兜底）
+      - drift_detected=True:  guarded UPDATE rowcount=0，确认 cache 在 lookup 期间被改写。
+        调用方**必须**按 drift 处理（一般是 short-circuit "skipped: cache_drift"），
+        因为返回的 cached_or_refreshed 可能仍是旧 snapshot（refresh 失败时 fallback）。
+
+    幂等：已 enriched 的（任一 episode_overview/air_date/still_url 有值）直接 noop。
+    失败（provider None / lookup raises / TMDB 无单集详情 / DB error）→ 返回 (原 cached, False)。
+
+    [drift-safe] codex r1+r2 BLOCKER：TMDB lookup 是几百毫秒 HTTP call，期间 scanner / manual
+    re-identify 可能把同一 path 改成另一个 tmdb_id/season/episode。修法是 guarded UPDATE：
+    `WHERE path=? AND tmdb_id=? AND season=? AND episode=?`，rowcount=0 即视为 drift。
+    r2: 显式返回 drift_detected flag，避免 refresh 失败时静默回退旧 cached 误导调用方。
+
+    设计：scanner 不在扫描阶段调 episode lookup（每集多 1 次 API call，库大就贵）；
+    只在真正 organize / 看详情时 lazy 触发。Phase 4A NFO writer 之前直接 fallback 到
+    series overview 写成 <plot>，结果 SxxEyy.nfo 全部 plot 一样 — 这个 helper 修该 bug。
+    """
+    if provider is None:
+        return cached, False
+    if cached.media_type != "tv":
+        return cached, False
+    if not (cached.tmdb_id and cached.season_number is not None
+            and cached.episode_number is not None):
+        return cached, False
+
+    # 任一字段已填 = 已 enrich 过（即使 TMDB 当时只给了 air_date 没 overview）
+    already_enriched = (
+        cached.episode_overview is not None
+        or cached.episode_air_date is not None
+        or cached.episode_still_url is not None
+    )
+    if already_enriched:
+        return cached, False
+
+    # 整段包 try：lookup_by_id / SQLite exception / get_by_path 任一抛错都
+    # 不能 leak 到调用方（hardlink 已可能成功，必须保 Pattern D：NFO 失败不污染主状态）
+    try:
+        try:
+            details = provider.lookup_by_id(
+                cached.tmdb_id, media_type="tv",
+                season=cached.season_number, episode=cached.episode_number,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[ensure_episode_details] TMDB lookup failed for {cached.path}: "
+                f"{type(e).__name__}: {e}"
+            )
+            return cached, False
+
+        if details is None or details.episode is None:
+            # provider 拿不到单集详情（剧 OK 但某集 TMDB 没数据）— 不抛
+            # NOTE: 没落 sentinel，下次 organize 会再 lookup 一次（接受 API 成本）
+            return cached, False
+
+        ep = details.episode
+        # [drift-safe] guarded UPDATE：snapshot (tmdb_id, season, episode) 必须仍匹配
+        # cache 当前值才写入。lookup 期间 scanner 把 row 改了 → rowcount=0 → 不写。
+        ep_air_date = ep.get("air_date")
+        ep_overview = ep.get("overview")
+        ep_still_url = ep.get("still_url")
+        if ep_air_date is None and ep_overview is None and ep_still_url is None:
+            return cached, False
+        cur = conn.execute(
+            """UPDATE media_files
+               SET episode_air_date = COALESCE(?, episode_air_date),
+                   episode_overview = COALESCE(?, episode_overview),
+                   episode_still_url = COALESCE(?, episode_still_url),
+                   last_updated_at = ?
+               WHERE path = ?
+                 AND tmdb_id = ?
+                 AND media_type = 'tv'
+                 AND season_number = ?
+                 AND episode_number = ?""",
+            (
+                ep_air_date, ep_overview, ep_still_url, _now(),
+                cached.path, cached.tmdb_id,
+                cached.season_number, cached.episode_number,
+            ),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            logger.info(
+                f"[ensure_episode_details] cache drifted during TMDB lookup for "
+                f"{cached.path}; signaling caller"
+            )
+            # 试着读最新 cache 给 caller（仅作信息性，**caller 不应信任**它 reach happy path）
+            try:
+                refreshed, _ = get_by_path(conn, cached.path)
+            except Exception:  # noqa: BLE001
+                refreshed = None
+            return (refreshed or cached), True   # ← 第二个 flag 强制 caller 走 drift path
+
+        refreshed, _ = get_by_path(conn, cached.path)
+        return (refreshed or cached), False
+    except Exception as e:  # noqa: BLE001
+        # SQLite locked / connection broken / 等任何 DB 异常 → 不让 hardlink success path crash
+        logger.warning(
+            f"[ensure_episode_details] persistence failed for {cached.path}: "
+            f"{type(e).__name__}: {e}"
+        )
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return cached, False
+
+
 # ─── 库视图查询 ───
 
 _SORT_SQL = {
