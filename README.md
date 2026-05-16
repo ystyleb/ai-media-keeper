@@ -1,6 +1,6 @@
 # AI Media Keeper
 
-AI 原生的影视资源管理器（Phase 4A）。Web 版的 NAS 媒体库，专为 **QNAP / Synology / 任意 Linux NAS** 设计，针对 **PT 玩家做硬链接 + qBittorrent 种子的联动删除 + AI 自动识别媒体元数据 + 下载完成后一键整理到媒体库**优化。
+AI 原生的影视资源管理器（Phase 4C ship — 自动整理 + episode-specific NFO）。Web 版的 NAS 媒体库，专为 **QNAP / Synology / 任意 Linux NAS** 设计，针对 **PT 玩家做硬链接 + qBittorrent 种子的联动删除 + AI 自动识别媒体元数据 + 下载完成后零干预整理到媒体库**优化。
 
 > **解决的痛点**：用 SMB / Samba 删一部已经在 qBittorrent 做种的剧时，种子会变成 errored 状态扣保种率；手动到 qBit 里再删一遍又麻烦。这个工具一次操作把硬盘文件 + 关联硬链接 + qBit 种子（含下载文件）一起干掉，磁盘空间真正释放。同时 AI 自动识别电影/剧集 → 海报 + 简介 + 评分 + 演员，按 TMDB 浏览整个媒体库。下载完后一键整理 → atomic hardlink 到媒体库 + 写 NFO，保种不断，待 Plex/Emby 下次扫描即可识别。
 
@@ -31,6 +31,7 @@ AI 原生的影视资源管理器（Phase 4A）。Web 版的 NAS 媒体库，专
   * 「全局唯一 active organize」契约：background + inline 共用同一 active lock，防硬链接 / NFO / qBit 副作用并发
 - 🎬 **自动目录约定**：电影 → `MOVIES_ROOT/<Title (Year)>/<basename>.mkv`，剧集 → `TV_ROOT/<Series (Year)>/Season NN/<basename>.mkv`，`tvshow.nfo` 落 series 根（Plex/Emby 标准结构）
 - 📝 **NFO 自动生成**：从 TMDB cache 构造 NFOPayload → 写 `<movie>` / `<episodedetails>` / `<tvshow>`（含 uniqueid + plot + cast + genres + rating）。已有 NFO 不覆盖（atomic create-only ln 保证）
+- 🎞️ **Episode-specific NFO**（ROADMAP #9）：`episodedetails.nfo` 的 `<plot>` / `<aired>` / `<thumb>` 用**单集**数据（TMDB `/tv/{id}/season/{N}/episode/{N}` 拉 per-episode overview / air_date / still），不是 series 整体简介。Lazy enrich — 只在真 organize 时补全；guarded UPDATE 防 scanner 并发 drift；Pattern D 保 hardlink 成功不被 NFO 失败污染
 - ⚙️ **MOVIES_ROOT / TV_ROOT UI 配置**：topbar 「媒体库」按钮 → modal 输入两个根 + SSH 测试目录可写 + 落盘 `config/organize.json`
 - 🔒 **契约 #6 双 inode 锚定**：preview 抓 src inode → confirm 阶段（a）验 src inode 不变（防 mv 偷换）+（b）ln 后验 dst inode == src inode（保证真 hardlink 不是 cp）
 - 🛡️ **race 防护**：`[ -d dst ]` pre-check + `[ ! -f dst ]` post-stat 防 silent ln-into-dir；冲突时不自动 cleanup（POSIX 无 atomic verify-then-unlink），返 orphan path hint 让 user SSH 手工查
@@ -242,7 +243,7 @@ python3 app.py
 
 ```bash
 .venv/bin/python -m pytest tests/unit/ -q
-# 432 passed (Phase 4B complete)
+# 580 passed (Phase 4C + ROADMAP #9 complete)
 ```
 
 生产部署用 `gunicorn`，**强制单 worker + 禁 preload**（`organize_runner` /
@@ -272,8 +273,12 @@ SQLite lease 跨进程互斥。
 |---|---|---|
 | **Phase 1** | ✅ | 文件管理 + 联删 + 契约 #1 destructive action 协议 |
 | **Phase 2** | ✅ | TMDB 元数据 + DeepSeek grounded select + 全库扫描 + 库视图 + NFO 写回 |
-| **Phase 3** | ✅ | 重复 release 检测（quality scoring）+ Emby 观看进度 + 已看完归档候选；archive executor 仅 stub（不接 SSH 真执行） |
-| Phase 4 | 🗓️ | MCP server（Claude Desktop / Code 直接管 NAS）+ 开源 onboarding |
+| **Phase 3** | ✅ | 重复 release 检测（quality scoring）+ Emby 观看进度 + 已看完归档候选 |
+| **Phase 4A** | ✅ | 单文件 organize（hardlink + NFO + 双 inode 锚定）+ MOVIES_ROOT/TV_ROOT UI 配置 |
+| **Phase 4B** | ✅ | 批量目录 organize（3-step 流程 + background worker + 全局唯一 active lock） |
+| **Phase 4C** | ✅ | qBit 完成后自动 organize（cron 触发 + 双层授权 + 状态机持久化） |
+| **ROADMAP #9** | ✅ | Episode-specific NFO 元数据补全（lazy enrich + drift-safe） |
+| Phase 5 | 🗓️ | MCP server（Claude Desktop / Code 直接管 NAS）+ 开源 onboarding |
 
 详见 [ROADMAP.md](ROADMAP.md)。
 
