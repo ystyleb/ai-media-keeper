@@ -864,6 +864,11 @@ def human_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f} PB"
 
 
+# 注册 UI blueprints (server-rendered HTML fragments for HTMX)
+from routes.ui_status import ui_status_bp  # noqa: E402
+app.register_blueprint(ui_status_bp)
+
+
 @app.route("/")
 def index():
     # Phase A.2: ?layout=v2 短路 — 让浏览器切到新 layout 骨架验证（Task 4 接回鉴权后移除）

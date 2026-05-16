@@ -1043,3 +1043,23 @@ def group_to_dict(g: DedupGroup) -> dict:
         "total_size_bytes": g.total_size_bytes,
         "deletable_size_bytes": g.deletable_size_bytes,
     }
+
+
+def count_unresolved_groups(db) -> int:
+    """Count dedup groups with >= 2 physical inodes that user hasn't resolved yet.
+
+    Phase A 占位实现 - Phase B/C 拆 dedup page 时按 spec 精确化.
+    """
+    try:
+        row = db.execute(
+            """SELECT count(*) AS c FROM (
+                SELECT tmdb_movie_id, season_number, episode_number
+                FROM media_files
+                WHERE tmdb_movie_id IS NOT NULL
+                GROUP BY tmdb_movie_id, season_number, episode_number
+                HAVING count(DISTINCT inode) >= 2
+            )"""
+        ).fetchone()
+        return row["c"] if row else 0
+    except Exception:
+        return 0
