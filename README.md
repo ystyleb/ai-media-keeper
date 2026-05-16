@@ -110,6 +110,7 @@ cd ai-media-keeper
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+make tailwind-build              # 编译 CSS（首次会自动下 Tailwind binary）
 ```
 
 ### 3. 启动（零环境变量）

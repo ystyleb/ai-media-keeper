@@ -11,7 +11,7 @@ module.exports = {
         sidebar: {
           bg: "#1a1d23",
           fg: "#cdd2d8",
-          fg_active: "#ffffff",
+          "fg-active": "#ffffff",
           accent: "#6699cc",
         },
         statusbar: {

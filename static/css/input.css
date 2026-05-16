@@ -24,10 +24,10 @@
 
   /* Sidebar nav item */
   .nav-item {
-    @apply flex items-center justify-between px-4 py-2 text-sidebar-fg hover:text-sidebar-fg_active hover:bg-slate-800 rounded;
+    @apply flex items-center justify-between px-4 py-2 text-sidebar-fg hover:text-sidebar-fg-active hover:bg-slate-800 rounded;
   }
   .nav-item.active {
-    @apply text-sidebar-fg_active bg-slate-800;
+    @apply text-sidebar-fg-active bg-slate-800;
   }
   .nav-badge {
     @apply text-xs bg-statusbar-warn text-slate-900 rounded-full px-2 py-0.5 font-semibold;
