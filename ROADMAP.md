@@ -147,11 +147,17 @@ PT 玩家的核心工作流：下载完文件留在 `/downloads/` 占位保种�
 
 每一项都标注 **依赖**、**工程量**（S=1天 / M=2-3天 / L=1周+）、**用户感知**。
 
-### 1. 可点击候选 → 手动绑定（S，依赖：无）
+### 1. ~~可点击候选 → 手动绑定~~ ✅ 2026-05-16 完成
 
-needs_review / heuristic_fallback 时 UI 已展示候选列表，但点不动。让用户从列表里点一个 → 当作绑定 + 写 cache + 可顺手写 NFO。
+needs_review / heuristic_fallback 时候选列表点击触发 `POST /api/metadata/bind` → `pick_source='manual'` + `confidence=1.0` 强写 cache。15 unit tests。
 
-**为什么先做这个**：LLM 不一定都能选对，需要人工兜底。一次点击就能让"50% 待复核" 变 "95% 已绑定"。
+**契约保证**：
+- `tmdb_id` 强制 numeric regex + `season/episode` 强制 `int && !bool && 0..9999` 防 SDK URL path injection
+- SSH stat 必须 `exists=True` 才写 cache（防错位到已删文件）
+- 复用 `upsert_identification` + IdentifyResult 通道，跟 LLM/heuristic 写入路径完全等价
+- UI 通过 `CustomEvent('metadata-bound', bubbles:true)` 让 organize 按钮立即响应
+
+**review 经过**：codex r1 抓 BLOCKER season/episode injection + IMPORTANT organizeBtn 不刷新 → r2 0 BLOCKER ship.
 
 ### 2. `/api/providers/status` + 顶部 banner（S，依赖：无）
 
@@ -159,14 +165,9 @@ UI 顶部显示 TMDB / DeepSeek 当前可用性（OK / auth_failed / not_configu
 
 **为什么重要**：当前 key 错了 / 失效，用户看到的是"识别失败"，不知道是 key 问题。
 
-### 3. 全库后台扫描 worker（M，依赖：现有持久化）
+### 3. ~~全库后台扫描 worker~~ ✅ Phase 2 已完成
 
-接入 plan v3 的 `scan_runs` + `scan_items` 状态机。用户点 "扫描整个 NAS"，后台 worker 跑遍：
-- 增量：跳过 mtime 不变的（已 cache）
-- 进度推送：前端轮询 `/api/scan/status?id=N` 看 `files_done / files_total`
-- 可中断恢复：worker crash 后 reclaim `in_progress` 超时项
-
-**为什么这个时机做**：cache 已有，scan 只是"批量+持久化+进度追踪"的组合。没有这个，用户得逐目录手动按"批量识别"。
+`services/scanner.py` + scan_runs/scan_items 状态机 + 4 routes (`/api/scan/start`/`status`/`abort`/`runs`)；增量识别（mtime+inode stale 检测）；UI 库视图右上"开始扫描"按钮 + worker 后台跑。
 
 ### 4. ~~重复 release 检测~~ ✅ Phase 3.2/3.3 已完成
 

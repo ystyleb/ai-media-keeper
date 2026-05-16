@@ -4,6 +4,7 @@ import base64
 import subprocess
 import json
 import os
+import re
 import shlex
 import logging
 import sys
@@ -3957,6 +3958,141 @@ def metadata_identify():
         logger.warning(f"[metadata_cache] upsert failed for {path}: {e}")
 
     return jsonify(response)
+
+
+@app.route("/api/metadata/bind", methods=["POST"])
+@require_token
+def metadata_bind():
+    """ROADMAP #1: 用户从候选列表手动选一个 tmdb_id 强绑（pick_source='manual'）。
+
+    needs_review / heuristic 低 confidence 时 UI 显示候选列表 → 用户点一条 → 调本 route
+    → lookup_by_id 拉权威详情 + 强写 cache (metadata_status='ok', confidence=1.0)。
+
+    body: {
+        "path": "/share/...",          # required
+        "tmdb_id": "60625",            # required
+        "media_type": "movie"|"tv",    # required
+        "season": 6,                   # optional override (tv only;不传用 guessit parse)
+        "episode": 2,                  # optional override
+    }
+
+    返回 (200): {bound: true, cached: <CachedMetadata dict>}
+    错误: 400 invalid input / 404 file not found / 500 lookup failed
+    """
+    data = request.json or {}
+    path_in = (data.get("path") or "").strip()
+    tmdb_id = str(data.get("tmdb_id") or "").strip()
+    media_type = (data.get("media_type") or "").strip()
+    if not (path_in and tmdb_id and media_type in ("movie", "tv")):
+        return jsonify({"error": "path/tmdb_id/media_type ∈ {movie,tv} required"}), 400
+    if not re.fullmatch(r"[0-9]+", tmdb_id):
+        # SDK 路径拼接 SSRF 防护（external-tools.md SDK URL composition rule）
+        return jsonify({"error": "tmdb_id must be numeric"}), 400
+
+    try:
+        path = validate_path(path_in)
+    except Exception:
+        return jsonify({"error": f"invalid path: {path_in}"}), 400
+
+    provider = get_tmdb_provider()
+    if provider is None:
+        return jsonify({"error": "TMDB API key not configured"}), 400
+
+    # SSH stat 确认文件还在（防 cache write 错位到不存在文件）
+    stat_map = _ssh_stat_paths([path])
+    stat = stat_map.get(path, {})
+    if not stat.get("exists"):
+        return jsonify({"error": "src_missing", "path": path}), 404
+
+    # season/episode override：优先 body 传入，否则用 guessit parse
+    parse = identify_svc.parse_filename(path)
+    season_arg = data.get("season")
+    episode_arg = data.get("episode")
+    # codex r1 BLOCKER: 跟 tmdb_id 同样的 SDK path injection 攻击面 —
+    # season/episode 直接进 lookup_by_id → 拼到 `/tv/{id}/season/{N}/episode/{N}` URL
+    # 非 int / bool / 负数 / 超大值 → 400 拒掉
+    for label, val in (("season", season_arg), ("episode", episode_arg)):
+        if val is None:
+            continue
+        if isinstance(val, bool) or not isinstance(val, int) or val < 0 or val > 9999:
+            return jsonify({
+                "error": f"{label} must be a non-negative integer ≤ 9999",
+            }), 400
+    if media_type == "tv":
+        if season_arg is None:
+            season_arg = parse.season
+        if episode_arg is None:
+            episode_arg = parse.episode
+
+    # lookup_by_id 拉权威详情（cast/genres/runtime/episode）
+    try:
+        details = provider.lookup_by_id(
+            tmdb_id, media_type=media_type,
+            season=season_arg, episode=episode_arg,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[metadata_bind] lookup failed {tmdb_id}: {e}")
+        return jsonify({"error": f"tmdb_lookup_failed: {type(e).__name__}: {e}"}), 502
+    if details is None:
+        return jsonify({"error": "tmdb_id_not_found", "tmdb_id": tmdb_id}), 404
+
+    cand = details.candidate
+
+    # 构造 IdentifyResult — 复用 upsert_identification 写 cache 通道：
+    # parse 用真实 guessit (保留 quality / parse_raw_name 等);
+    # 但 media_type / season / episode 用 user 选的（强 override 在 IdentifyResult 之外，
+    # 走 parse 字段不行因 FilenameParse frozen，直接构造 new instance）。
+    bound_parse = identify_svc.FilenameParse(
+        raw_name=parse.raw_name,
+        title=cand.title,                           # 用 cand 权威 title 而非 guessit
+        year=cand.year or parse.year,
+        season=season_arg if media_type == "tv" else None,
+        episode=episode_arg if media_type == "tv" else None,
+        episode_title=parse.episode_title,
+        media_type=media_type,                       # 强写 movie/tv
+        resolution=parse.resolution,
+        source=parse.source,
+        release_group=parse.release_group,
+        codec=parse.codec, color_depth=parse.color_depth,
+        hdr_profiles=parse.hdr_profiles, container=parse.container,
+        audio_codec=parse.audio_codec,
+        raw=parse.raw,
+    )
+    bound_result = identify_svc.IdentifyResult(
+        parse=bound_parse,
+        candidates=[cand],
+        top_pick=cand,
+        confidence=1.0,                              # manual = full confidence
+        reasoning="manual binding by user",
+        pick_source="manual",
+    )
+
+    try:
+        db = get_db()
+        metadata_cache.upsert_identification(
+            db, path=path, stat=stat, identify_result=bound_result,
+        )
+        # 写 details（cast/genres/runtime + episode_*）
+        ep = details.episode or {}
+        metadata_cache.upsert_details(
+            db, path=path,
+            genres=details.genres or None,
+            cast=details.cast or None,
+            runtime_minutes=details.runtime_minutes,
+            episode_air_date=ep.get("air_date"),
+            episode_overview=ep.get("overview"),
+            episode_still_url=ep.get("still_url"),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"[metadata_bind] cache write failed for {path}")
+        return jsonify({"error": f"cache_write_failed: {type(e).__name__}: {e}"}), 500
+
+    # 重读返回最新 snapshot 给前端
+    cached, _ = metadata_cache.get_by_path(db, path)
+    return jsonify({
+        "bound": True,
+        "cached": _cached_to_library_dict(cached) if cached else None,
+    })
 
 
 @app.route("/api/metadata/cached", methods=["GET"])

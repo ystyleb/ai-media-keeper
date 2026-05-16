@@ -826,10 +826,22 @@ function renderMetadataCard(container, data) {
             }));
             return;
         }
+        // ROADMAP #1: 点候选 → 手动绑定。要 container.__videoPath 已设
+        const videoPath = container.__videoPath;
+        const canBind = Boolean(videoPath);
+        if (canBind) {
+            container.appendChild(createElement("small", {
+                className: "text-info d-block mb-1",
+                textContent: "👇 点击其中一个候选手动绑定（覆盖待复核状态）",
+            }));
+        }
         const list = createElement("div", { className: "list-group small" });
         data.candidates.forEach(c => {
+            const tmdbId = c.external_ids?.tmdb_id || c.id;
             const item = createElement("div", {
                 className: "list-group-item list-group-item-action bg-transparent text-light border-secondary py-2"
+                    + (canBind ? "" : " disabled"),
+                style: canBind ? "cursor:pointer;" : "",
             });
             const poster = c.poster_url
                 ? `<img src="${c.poster_url}" style="width:50px;height:auto;flex-shrink:0;border-radius:3px;margin-right:8px"/>`
@@ -846,6 +858,48 @@ function renderMetadataCard(container, data) {
                     </div>
                 </div>
             `;
+            if (canBind && tmdbId && (c.media_type === "movie" || c.media_type === "tv")) {
+                item.addEventListener("click", async () => {
+                    if (item.classList.contains("disabled")) return;
+                    item.classList.add("disabled");
+                    item.style.opacity = "0.6";
+                    try {
+                        const season = data.parse?.season;
+                        const episode = data.parse?.episode;
+                        const body = {
+                            path: videoPath, tmdb_id: String(tmdbId), media_type: c.media_type,
+                        };
+                        if (c.media_type === "tv") {
+                            if (season != null) body.season = season;
+                            if (episode != null) body.episode = episode;
+                        }
+                        const res = await apiFetch(`${API_BASE}/api/metadata/bind`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(body),
+                        });
+                        const r = await res.json();
+                        if (!res.ok || !r.bound) {
+                            throw new Error(r.error || `HTTP ${res.status}`);
+                        }
+                        // 重 render 整个 metadata card 用最新绑定结果
+                        const reloadRes = await apiFetch(
+                            `${API_BASE}/api/metadata/cached?path=${encodeURIComponent(videoPath)}`,
+                        );
+                        const cacheData = await reloadRes.json();
+                        renderMetadataCard(container, cacheData);
+                        // codex r1 IMPORTANT: 通知外层 organizeBtn 等 sibling 元素重新评估可见性
+                        container.dispatchEvent(new CustomEvent("metadata-bound", {
+                            bubbles: true,
+                            detail: { cached: cacheData, mediaType: c.media_type },
+                        }));
+                    } catch (err) {
+                        item.classList.remove("disabled");
+                        item.style.opacity = "";
+                        alert(`绑定失败：${err.message}`);
+                    }
+                });
+            }
             list.appendChild(item);
         });
         container.appendChild(list);
@@ -868,6 +922,7 @@ function renderMetadataCard(container, data) {
         single_exact: "单候选",
         heuristic: "启发式",
         llm: "🤖 AI",
+        manual: "👤 手动",
         needs_review: "待复核"
     }[data.pick_source] || data.pick_source || "?";
     const metaLine = [
@@ -993,6 +1048,7 @@ async function showDetail(path) {
         const aiSection = createElement("div", { className: "mb-3" });
         const nfoCard = createElement("div", { className: "mb-2" });           // sidecar .nfo 卡片
         const cachedCard = createElement("div", { className: "mb-2" });        // DB cache 卡片
+        cachedCard.__videoPath = file.path;
         const aiBtn = createElement("button", {
             className: "btn btn-sm btn-outline-info",
             innerHTML: '<span class="spinner-border spinner-border-sm me-1"></span>检查缓存...',
@@ -1007,6 +1063,16 @@ async function showDetail(path) {
         organizeBtn.addEventListener("click", () => openOrganize(file.path));
         const aiResult = createElement("div", { className: "mt-2" });
         aiResult.__videoPath = file.path;
+
+        // codex r1 IMPORTANT: bind 候选成功后 bubble 'metadata-bound' event 上来 → 重 evaluate organizeBtn
+        const onMetadataBound = (e) => {
+            const mt = e.detail?.mediaType || e.detail?.cached?.top_pick?.media_type;
+            if (mt === "movie" || mt === "tv") {
+                organizeBtn.style.display = "inline-block";
+            }
+        };
+        cachedCard.addEventListener("metadata-bound", onMetadataBound);
+        aiResult.addEventListener("metadata-bound", onMetadataBound);
 
         // 并行：(1) 查 DB cache (2) 查 sidecar .nfo
         // 两者都可能命中（cache 来自 TMDB；NFO 来自 sidecar 文件，可能不同步）。
@@ -1977,6 +2043,7 @@ function renderBatchRow(idx, row, data) {
         single_exact: "单候选",
         heuristic: "启发式",
         llm: "🤖 AI",
+        manual: "👤 手动",
         needs_review: "待复核"
     }[data.pick_source] || data.pick_source || "?";
 
