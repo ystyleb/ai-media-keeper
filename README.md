@@ -1,10 +1,22 @@
-# AI Media Keeper
+# NASVault
 
-AI 原生的影视资源管理器（Phase 4C ship — 自动整理 + episode-specific NFO）。Web 版的 NAS 媒体库，专为 **QNAP / Synology / 任意 Linux NAS** 设计，针对 **PT 玩家做硬链接 + qBittorrent 种子的联动删除 + AI 自动识别媒体元数据 + 下载完成后零干预整理到媒体库**优化。
+AI 原生的影视资源管理器（Phase 5 ship — MCP server + 开源就绪）。Web 版的 NAS 媒体库，专为 **QNAP / Synology / 任意 Linux NAS** 设计，针对 **PT 玩家做硬链接 + qBittorrent 种子的联动删除 + AI 自动识别媒体元数据 + 下载完成后零干预整理到媒体库**优化。
 
 > **解决的痛点**：用 SMB / Samba 删一部已经在 qBittorrent 做种的剧时，种子会变成 errored 状态扣保种率；手动到 qBit 里再删一遍又麻烦。这个工具一次操作把硬盘文件 + 关联硬链接 + qBit 种子（含下载文件）一起干掉，磁盘空间真正释放。同时 AI 自动识别电影/剧集 → 海报 + 简介 + 评分 + 演员，按 TMDB 浏览整个媒体库。下载完后一键整理 → atomic hardlink 到媒体库 + 写 NFO，保种不断，待 Plex/Emby 下次扫描即可识别。
 
 ## 核心功能
+
+### MCP server — Claude Desktop / Code 直接管 NAS（Phase 5 / ROADMAP #7）
+- 🤖 **9 个 MCP tool**：`list_files` / `find_recent_downloads` / `get_disk_usage` / `find_duplicates` / `list_archive_candidates` / `providers_status` + 契约 #1 双段式 `prepare_destructive_action` / `confirm_destructive_action` / `action_status`
+- 🔒 **纯协议适配层**：MCP server 通过 HTTP 代理到本机 Flask，业务逻辑（validate_path / 双段式 / HMAC 签名 / SQL）都由 Flask 端持有 — MCP 无法绕过任何 destructive 守门
+- 🛡️ **安全模式**：默认 stdio + `127.0.0.1:5001`；远程访问推荐 Tailscale
+- 📖 完整配置见 [`mcp_server/README.md`](mcp_server/README.md)
+
+### Provider 状态聚合（ROADMAP #2）
+- 🩺 **`/api/providers/status`** 聚合 TMDB / DeepSeek / Emby / qBit 4 个 provider 状态（state ∈ {ok, auth_failed, not_configured, unreachable, error}）
+- 🔝 **顶部 banner + 状态点**：auth_failed / unreachable 时自动顶部红 banner 提示 key 失效；topbar AI / Emby / qBit 按钮带状态点（绿 / 灰 / 橙 / 红）
+- ⏱️ **60s TTL cache** + `?refresh=1` 强制 re-probe，不每次请求都打 4 个外部 endpoint
+- 🪞 **Scanner / identify 优雅降级**：LLM 不可用走 heuristic，provider 失败 → needs_review，不 crash
 
 ### qBit 完成后自动整理（Phase 4C）
 - ⚡ **零干预 organize**：qBit 种子下载完成 → cron 周期扫 → 自动 organize 到媒体库（hardlink + NFO + 双 inode 锚定，跟手动同 stack）
@@ -243,8 +255,25 @@ python3 app.py
 
 ```bash
 .venv/bin/python -m pytest tests/unit/ -q
-# 580 passed (Phase 4C + ROADMAP #9 complete)
+# 616 passed (Phase 5 + ROADMAP #2/#7/#9 complete)
 ```
+
+Lint + format（CI 强制）：
+
+```bash
+.venv/bin/pip install ruff
+.venv/bin/ruff check .
+.venv/bin/ruff format . --check
+```
+
+### Docker
+
+```bash
+docker compose up -d        # 一键起 + config 持久化
+cat config/.api_token       # 拿 token，粘贴到 http://127.0.0.1:8080
+```
+
+Dockerfile + docker-compose.yml 默认 bind `127.0.0.1:8080`（不直接对外暴露）。SSH key 通过 `~/.ssh:ro` 挂入。
 
 生产部署用 `gunicorn`，**强制单 worker + 禁 preload**（`organize_runner` /
 `scanner` 用进程内 lock + abort flag，多 worker / preload 会让 batch organize /
@@ -277,8 +306,10 @@ SQLite lease 跨进程互斥。
 | **Phase 4A** | ✅ | 单文件 organize（hardlink + NFO + 双 inode 锚定）+ MOVIES_ROOT/TV_ROOT UI 配置 |
 | **Phase 4B** | ✅ | 批量目录 organize（3-step 流程 + background worker + 全局唯一 active lock） |
 | **Phase 4C** | ✅ | qBit 完成后自动 organize（cron 触发 + 双层授权 + 状态机持久化） |
+| **Phase 5** | ✅ | MCP server（Claude Desktop / Code 直接管 NAS）+ 开源就绪（Docker + CI + CONTRIBUTING） |
+| **ROADMAP #1** | ✅ | 候选可点手动绑定 |
+| **ROADMAP #2** | ✅ | Providers status + 顶部 banner |
 | **ROADMAP #9** | ✅ | Episode-specific NFO 元数据补全（lazy enrich + drift-safe） |
-| Phase 5 | 🗓️ | MCP server（Claude Desktop / Code 直接管 NAS）+ 开源 onboarding |
 
 详见 [ROADMAP.md](ROADMAP.md)。
 

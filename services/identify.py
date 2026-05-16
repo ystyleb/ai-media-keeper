@@ -38,7 +38,7 @@ class FilenameParse:
     # 全部 None / [] — 附属文件不参与 quality score，故省一次解析（plan 3.1）。
     codec: str | None
     color_depth: str | None
-    hdr_profiles: list[str]      # canonical sorted; 空 list 表示无 HDR
+    hdr_profiles: list[str]  # canonical sorted; 空 list 表示无 HDR
     container: str | None
     audio_codec: str | None
     raw: dict[str, Any]
@@ -49,9 +49,9 @@ class IdentifyResult:
     parse: FilenameParse
     candidates: list[MediaCandidate]
     top_pick: MediaCandidate | None  # None = needs_review
-    confidence: float                # 0.0-1.0
+    confidence: float  # 0.0-1.0
     reasoning: str
-    pick_source: str                 # 'single_exact' | 'heuristic' | 'llm' | 'needs_review'
+    pick_source: str  # 'single_exact' | 'heuristic' | 'llm' | 'needs_review'
 
 
 _EXTRA_PATTERNS: list[tuple[re.Pattern, str]] = [
@@ -113,8 +113,7 @@ def _extract_hdr_profiles(other_field: Any, fallback_text: str = "") -> list[str
     # 不用 \b 因为 'HDR10+' 末尾的 '+' 不是 word char，\b 在 '+' 跟字母间不存在。
     # 自己定义边界：左边界 = 行首或非字母数字，右边界 = 行尾或非字母数字。
     for kw_in, kw_out in extra_keywords + _HDR_KEYWORDS:
-        pat = re.compile(rf"(?:^|[^A-Za-z0-9]){re.escape(kw_in)}(?:[^A-Za-z0-9]|$)",
-                         re.IGNORECASE)
+        pat = re.compile(rf"(?:^|[^A-Za-z0-9]){re.escape(kw_in)}(?:[^A-Za-z0-9]|$)", re.IGNORECASE)
         if pat.search(remaining):
             hits.add(kw_out)
             remaining = pat.sub(" ", remaining)
@@ -239,14 +238,14 @@ def parse_filename(path: str) -> FilenameParse:
             raw_name=name,
             title=g.get("title", "") or extra_kind,
             year=year,
-            season=None,                                # extras 不参与 S/E 索引
+            season=None,  # extras 不参与 S/E 索引
             episode=None,
             episode_title=None,
             media_type="extra",
             resolution=str(g.get("screen_size") or "") or None,
             source=str(g.get("source") or "") or None,
             release_group=str(g.get("release_group") or "") or None,
-            codec=None,                                 # 不抽（plan 3.1：附属文件省解析）
+            codec=None,  # 不抽（plan 3.1：附属文件省解析）
             color_depth=None,
             hdr_profiles=[],
             container=None,
@@ -282,7 +281,7 @@ def parse_filename(path: str) -> FilenameParse:
         if part_index >= 2:
             media_type = "part"
         else:
-            media_type = "movie"                    # BD1/Disc1/CD1 → 主片入口走 TMDB
+            media_type = "movie"  # BD1/Disc1/CD1 → 主片入口走 TMDB
 
     # 续集 "Part N"（罗马字/阿拉伯字）— guessit 把 "Part II" 抽到 `part` 字段，title 留下纯
     # "The Godfather"。但 TMDB 上正版 title 是 "The Godfather Part II"，所以 search 必须
@@ -406,14 +405,20 @@ def _llm_filename_rescue(
         return parse, [], f"llm_rescue_failed: {err}"
 
     # 用 LLM 提取的 title 重搜 TMDB
-    media_type = extraction.media_type if extraction.media_type != "unknown" else parse.media_type or "movie"
+    media_type = (
+        extraction.media_type if extraction.media_type != "unknown" else parse.media_type or "movie"
+    )
     candidates = provider.search(
-        title=extraction.title, year=extraction.year, media_type=media_type,
+        title=extraction.title,
+        year=extraction.year,
+        media_type=media_type,
     )
     # 如果 alt_title 不同且 candidates 仍空，试 alt
     if not candidates and extraction.alt_title and extraction.alt_title != extraction.title:
         candidates = provider.search(
-            title=extraction.alt_title, year=extraction.year, media_type=media_type,
+            title=extraction.alt_title,
+            year=extraction.year,
+            media_type=media_type,
         )
 
     # 更新 parse：用 LLM 的 title / year / season / episode 替换（guessit 拿不到的部分）
@@ -463,7 +468,9 @@ def identify(
     if parse.media_type == "extra":
         extra_kind = parse.raw.get("_extra_kind", "extra")
         return IdentifyResult(
-            parse=parse, candidates=[], top_pick=None,
+            parse=parse,
+            candidates=[],
+            top_pick=None,
             confidence=1.0,
             reasoning=f"detected as {extra_kind} (附属文件，不调 TMDB)",
             pick_source="extra",
@@ -474,7 +481,9 @@ def identify(
     if parse.media_type == "part":
         part_index = parse.raw.get("_part_index")
         return IdentifyResult(
-            parse=parse, candidates=[], top_pick=None,
+            parse=parse,
+            candidates=[],
+            top_pick=None,
             confidence=1.0,
             reasoning=f"multi-disc part #{part_index} (附属于主片，不调 TMDB)",
             pick_source="part",
@@ -485,24 +494,33 @@ def identify(
         parse, candidates, rescue_reason = _llm_filename_rescue(path, parse, provider, llm_api_key)
     elif not parse.title:
         return IdentifyResult(
-            parse=parse, candidates=[], top_pick=None,
-            confidence=0.0, reasoning="guessit failed to parse title (LLM not configured to rescue)",
+            parse=parse,
+            candidates=[],
+            top_pick=None,
+            confidence=0.0,
+            reasoning="guessit failed to parse title (LLM not configured to rescue)",
             pick_source="needs_review",
         )
     else:
         candidates = provider.search(
-            title=parse.title, year=parse.year, media_type=parse.media_type,
+            title=parse.title,
+            year=parse.year,
+            media_type=parse.media_type,
         )
 
     # Step 0b: 有 title 但 provider 返 0 → LLM 重解析（也许 guessit 截出的 title 不对）
     if not candidates and llm_api_key:
-        new_parse, new_cands, rescue_reason = _llm_filename_rescue(path, parse, provider, llm_api_key)
+        new_parse, new_cands, rescue_reason = _llm_filename_rescue(
+            path, parse, provider, llm_api_key
+        )
         if new_cands:
             parse, candidates = new_parse, new_cands
 
     if not candidates:
         return IdentifyResult(
-            parse=parse, candidates=[], top_pick=None,
+            parse=parse,
+            candidates=[],
+            top_pick=None,
             confidence=0.0,
             reasoning=f"no candidates from provider{' (' + rescue_reason + ')' if rescue_reason else ''}",
             pick_source="needs_review",
@@ -516,8 +534,11 @@ def identify(
         norm_o = _normalize_title(c.original_title or "")
         if norm_want and norm_want in (norm_t, norm_o):
             return IdentifyResult(
-                parse=parse, candidates=candidates, top_pick=c,
-                confidence=0.95, reasoning="only candidate with exact title match",
+                parse=parse,
+                candidates=candidates,
+                top_pick=c,
+                confidence=0.95,
+                reasoning="only candidate with exact title match",
                 pick_source="single_exact",
             )
 
@@ -525,32 +546,47 @@ def identify(
     heur_top, heur_score, heur_reason = _pick_top(parse, candidates)
     if heur_top is not None and heur_score >= 0.9:
         return IdentifyResult(
-            parse=parse, candidates=candidates, top_pick=heur_top,
-            confidence=heur_score, reasoning=f"heuristic high: {heur_reason}",
+            parse=parse,
+            candidates=candidates,
+            top_pick=heur_top,
+            confidence=heur_score,
+            reasoning=f"heuristic high: {heur_reason}",
             pick_source="heuristic",
         )
 
     # 路径 3: LLM 可用 → grounded select
     if llm_api_key:
         parse_dict = {
-            "title": parse.title, "year": parse.year,
-            "season": parse.season, "episode": parse.episode,
+            "title": parse.title,
+            "year": parse.year,
+            "season": parse.season,
+            "episode": parse.episode,
             "episode_title": parse.episode_title,
             "media_type": parse.media_type,
-            "resolution": parse.resolution, "source": parse.source,
+            "resolution": parse.resolution,
+            "source": parse.source,
         }
-        cand_dicts = [{
-            "id": c.id, "title": c.title, "original_title": c.original_title,
-            "year": c.year, "media_type": c.media_type,
-            "overview": c.overview, "vote_average": c.vote_average,
-        } for c in candidates]
+        cand_dicts = [
+            {
+                "id": c.id,
+                "title": c.title,
+                "original_title": c.original_title,
+                "year": c.year,
+                "media_type": c.media_type,
+                "overview": c.overview,
+                "vote_average": c.vote_average,
+            }
+            for c in candidates
+        ]
         sel = llm.select_candidate(parse_dict, cand_dicts, api_key=llm_api_key)
         if sel.selected_id:
             # 找回对应的 MediaCandidate object（契约 #3 已 enforce id ∈ candidates）
             chosen = next((c for c in candidates if c.id == sel.selected_id), None)
             if chosen:
                 return IdentifyResult(
-                    parse=parse, candidates=candidates, top_pick=chosen,
+                    parse=parse,
+                    candidates=candidates,
+                    top_pick=chosen,
                     confidence=sel.confidence,
                     reasoning=f"llm: {sel.reasoning}",
                     pick_source="llm",
@@ -563,7 +599,9 @@ def identify(
         if heur_top is not None and heur_score >= 0.5:
             label = "heuristic_fallback_after_llm_error" if is_llm_error else "heuristic_fallback"
             return IdentifyResult(
-                parse=parse, candidates=candidates, top_pick=heur_top,
+                parse=parse,
+                candidates=candidates,
+                top_pick=heur_top,
                 confidence=heur_score,
                 reasoning=f"{label}: llm said '{sel.reasoning}'; heuristic best-guess: {heur_reason}",
                 pick_source="heuristic",
@@ -571,7 +609,9 @@ def identify(
 
         # 真没把握 → needs_review，但仍透传 LLM 失败原因 + heuristic top（让用户在 UI 看到候选 #1）
         return IdentifyResult(
-            parse=parse, candidates=candidates, top_pick=None,
+            parse=parse,
+            candidates=candidates,
+            top_pick=None,
             confidence=sel.confidence,
             reasoning=f"llm needs_review: {sel.reasoning}",
             pick_source="needs_review",
@@ -579,7 +619,9 @@ def identify(
 
     # 路径 4: LLM 不可用 → needs_review，附 heuristic reasoning
     return IdentifyResult(
-        parse=parse, candidates=candidates, top_pick=heur_top,
+        parse=parse,
+        candidates=candidates,
+        top_pick=heur_top,
         confidence=heur_score,
         reasoning=f"heuristic: {heur_reason} (LLM not configured, would help)",
         pick_source="heuristic" if heur_top else "needs_review",

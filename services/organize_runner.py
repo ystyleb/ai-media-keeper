@@ -171,7 +171,9 @@ def start_organize_executor(
             _active_thread = None
             _clear_abort(action_id)
             raise
-    logger.info(f"[organize_runner] started action_id={action_id} items={len(payload.get('items', []))}")
+    logger.info(
+        f"[organize_runner] started action_id={action_id} items={len(payload.get('items', []))}"
+    )
 
 
 def _worker_main(
@@ -209,13 +211,17 @@ def _worker_main(
         # codex r2 IMP2: 每次 update_running_result 返 False 说明 row 已 terminal
         # （reaper 抢标 needs_manual_recovery / 别处 mark_terminal），立刻早退停
         # 后续副作用（hardlink / NFO write）— ownership 已丢失，继续执行就是孤儿写。
-        still_owns = destructive_action.update_running_result(conn, action_id, {
-            "items_total": total,
-            "items_completed": 0,
-            "current_item": None,
-            "status_counts": {},
-            "items": [],
-        })
+        still_owns = destructive_action.update_running_result(
+            conn,
+            action_id,
+            {
+                "items_total": total,
+                "items_completed": 0,
+                "current_item": None,
+                "status_counts": {},
+                "items": [],
+            },
+        )
         if not still_owns:
             logger.warning(
                 f"[organize_runner] action {action_id} ownership lost before any item "
@@ -228,31 +234,41 @@ def _worker_main(
 
             # 1) abort 优先于一切：用户中止 → 不再跑后续 items
             if is_aborted(action_id):
-                results.append({
-                    "src_path": src_path, "status": "skipped_by_abort",
-                    "index": idx,
-                })
+                results.append(
+                    {
+                        "src_path": src_path,
+                        "status": "skipped_by_abort",
+                        "index": idx,
+                    }
+                )
                 status_counts["skipped_by_abort"] = status_counts.get("skipped_by_abort", 0) + 1
                 continue
 
             # 2) UI 未勾选 → 标 skipped_by_user
             if selected_set is not None and idx not in selected_set:
-                results.append({
-                    "src_path": src_path, "status": "skipped_by_user",
-                    "index": idx,
-                })
+                results.append(
+                    {
+                        "src_path": src_path,
+                        "status": "skipped_by_user",
+                        "index": idx,
+                    }
+                )
                 status_counts["skipped_by_user"] = status_counts.get("skipped_by_user", 0) + 1
                 continue
 
             # 3) progressive：先写 current_item 让 polling 看到「正在跑哪个」
             # codex r2 IMP2: ownership guard — 同上，丢失 ownership 就早退
-            still_owns = destructive_action.update_running_result(conn, action_id, {
-                "items_total": total,
-                "items_completed": idx,
-                "current_item": src_path,
-                "status_counts": dict(status_counts),
-                "items": list(results),
-            })
+            still_owns = destructive_action.update_running_result(
+                conn,
+                action_id,
+                {
+                    "items_total": total,
+                    "items_completed": idx,
+                    "current_item": src_path,
+                    "status_counts": dict(status_counts),
+                    "items": list(results),
+                },
+            )
             if not still_owns:
                 logger.warning(
                     f"[organize_runner] action {action_id} ownership lost at item {idx} "
@@ -266,10 +282,11 @@ def _worker_main(
                 # 防御：执行器返回缺 status / src_path → 补字段
                 r.setdefault("src_path", src_path)
                 r.setdefault("status", "failed")
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.exception(f"[organize_runner] item {src_path!r} crashed")
                 r = {
-                    "src_path": src_path, "status": "failed",
+                    "src_path": src_path,
+                    "status": "failed",
                     "reason": f"executor_crashed: {type(e).__name__}: {e}",
                 }
             r["index"] = idx
@@ -279,13 +296,17 @@ def _worker_main(
 
             # 5) 跑完一个就 commit 一次（用户 polling 即时看到 +1）
             # 完成阶段也 guard：如果 reaper 抢标了，我们已经做了这次副作用，但下一个 item 不再做
-            destructive_action.update_running_result(conn, action_id, {
-                "items_total": total,
-                "items_completed": idx + 1,
-                "current_item": src_path,
-                "status_counts": dict(status_counts),
-                "items": list(results),
-            })
+            destructive_action.update_running_result(
+                conn,
+                action_id,
+                {
+                    "items_total": total,
+                    "items_completed": idx + 1,
+                    "current_item": src_path,
+                    "status_counts": dict(status_counts),
+                    "items": list(results),
+                },
+            )
 
         # 终态：组装 result + 写 succeeded（partial failure 不 mark failed —
         # 契约 #7：整 action succeeded，per-item status 在 result 里）
@@ -317,8 +338,11 @@ def _worker_main(
         # codex r1 IMP3: 用 mark_terminal_if_running guard，避免覆盖 reaper 已写入
         # 的 needs_manual_recovery / 其他进程已 mark 的 terminal 状态
         flipped = destructive_action.mark_terminal_if_running(
-            conn, action_id, status="succeeded",
-            result=final_result, error=None,
+            conn,
+            action_id,
+            status="succeeded",
+            result=final_result,
+            error=None,
         )
         if not flipped:
             logger.warning(
@@ -333,12 +357,15 @@ def _worker_main(
             conn.commit()
         logger.info(f"[organize_runner] action {action_id} done: {status_counts}")
 
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception(f"[organize_runner] action {action_id} worker crashed")
         if conn is not None:
             try:
                 destructive_action.mark_terminal_if_running(
-                    conn, action_id, status="failed", result=None,
+                    conn,
+                    action_id,
+                    status="failed",
+                    result=None,
                     error=f"worker_crashed: {type(e).__name__}: {e}",
                 )
             except sqlite3.Error:
@@ -370,6 +397,7 @@ def get_organize_status(conn: sqlite3.Connection, action_id: str) -> dict | None
         return None
 
     import json as _json
+
     result: dict | None = None
     if row["result_json"]:
         try:

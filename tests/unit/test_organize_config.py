@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
 import app as app_module
@@ -151,10 +149,12 @@ def test_test_both_dirs_writable_returns_ok(client, token, monkeypatch):
 
 def test_test_movies_missing_returns_partial_failure(client, token, monkeypatch):
     """movies dir 不存在但 tv ok → movies_ok=False, tv_ok=True, ok=False."""
+
     def fake_ssh(cmd, timeout=10):
         if "/a/missing" in cmd:
             return (1, "", "")
         return (0, "", "")
+
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh)
     resp = client.post(
         "/api/config/organize/test",
@@ -176,13 +176,15 @@ def test_test_uses_saved_config_when_body_missing(client, token, monkeypatch):
         headers={"Authorization": f"Bearer {token}"},
     )
     seen_cmds = []
+
     def fake_ssh(cmd, timeout=10):
         seen_cmds.append(cmd)
         return (0, "", "")
+
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh)
     resp = client.post(
         "/api/config/organize/test",
-        json={},   # 空 body
+        json={},  # 空 body
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200
@@ -204,9 +206,11 @@ def test_test_missing_both_returns_400(client, token):
 def test_test_ssh_uses_test_d_and_w(client, token, monkeypatch):
     """SSH 命令必须用 `test -d <path> -a -w <path>` 验证目录+可写。"""
     seen_cmds = []
+
     def fake_ssh(cmd, timeout=10):
         seen_cmds.append(cmd)
         return (0, "", "")
+
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh)
     client.post(
         "/api/config/organize/test",

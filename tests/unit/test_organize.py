@@ -23,6 +23,7 @@ from services.organize import (
 @dataclass
 class _FakeCached:
     """Duck-typed CachedMetadata stand-in for unit tests."""
+
     title: str
     year: int | None = None
     media_type: str = "movie"
@@ -77,12 +78,20 @@ def test_plan_movie_with_year():
     cached = _FakeCached(title="The Godfather", year=1972, media_type="movie", tmdb_id="238")
     plan = compute_organize_plan(
         "/downloads/Godfather.1972.1080p.BluRay.x264-CLASSIC.mkv",
-        cached, MOVIES, TV,
+        cached,
+        MOVIES,
+        TV,
     )
     assert plan.media_type == "movie"
     assert plan.dst_dir == "/media/movies/The Godfather (1972)"
-    assert plan.dst_path == "/media/movies/The Godfather (1972)/Godfather.1972.1080p.BluRay.x264-CLASSIC.mkv"
-    assert plan.nfo_path == "/media/movies/The Godfather (1972)/Godfather.1972.1080p.BluRay.x264-CLASSIC.nfo"
+    assert (
+        plan.dst_path
+        == "/media/movies/The Godfather (1972)/Godfather.1972.1080p.BluRay.x264-CLASSIC.mkv"
+    )
+    assert (
+        plan.nfo_path
+        == "/media/movies/The Godfather (1972)/Godfather.1972.1080p.BluRay.x264-CLASSIC.nfo"
+    )
     assert plan.tvshow_nfo_path is None
     assert plan.tmdb_id == "238"
 
@@ -118,22 +127,26 @@ def test_plan_movie_strips_trailing_slash_in_root():
 
 def test_plan_tv_full():
     cached = _FakeCached(
-        title="Rick and Morty", year=2013, media_type="tv", tmdb_id="60625",
-        season_number=4, episode_number=10,
+        title="Rick and Morty",
+        year=2013,
+        media_type="tv",
+        tmdb_id="60625",
+        season_number=4,
+        episode_number=10,
     )
     plan = compute_organize_plan(
         "/downloads/RickAndMorty.S04E10.1080p.WEB-DL.x265.mkv",
-        cached, MOVIES, TV,
+        cached,
+        MOVIES,
+        TV,
     )
     assert plan.media_type == "tv"
     assert plan.dst_dir == "/media/tv/Rick and Morty (2013)/Season 04"
     assert plan.dst_path == (
-        "/media/tv/Rick and Morty (2013)/Season 04/"
-        "RickAndMorty.S04E10.1080p.WEB-DL.x265.mkv"
+        "/media/tv/Rick and Morty (2013)/Season 04/RickAndMorty.S04E10.1080p.WEB-DL.x265.mkv"
     )
     assert plan.nfo_path == (
-        "/media/tv/Rick and Morty (2013)/Season 04/"
-        "RickAndMorty.S04E10.1080p.WEB-DL.x265.nfo"
+        "/media/tv/Rick and Morty (2013)/Season 04/RickAndMorty.S04E10.1080p.WEB-DL.x265.nfo"
     )
     assert plan.tvshow_nfo_path == "/media/tv/Rick and Morty (2013)/tvshow.nfo"
     assert plan.season_number == 4 and plan.episode_number == 10
@@ -141,8 +154,11 @@ def test_plan_tv_full():
 
 def test_plan_tv_missing_episode_raises():
     cached = _FakeCached(
-        title="Show", year=2020, media_type="tv",
-        season_number=2, episode_number=None,
+        title="Show",
+        year=2020,
+        media_type="tv",
+        season_number=2,
+        episode_number=None,
     )
     with pytest.raises(OrganizeNotApplicable, match="season \\+ episode"):
         compute_organize_plan("/dl/X.mkv", cached, MOVIES, TV)
@@ -150,8 +166,11 @@ def test_plan_tv_missing_episode_raises():
 
 def test_plan_tv_missing_season_raises():
     cached = _FakeCached(
-        title="Show", year=2020, media_type="tv",
-        season_number=None, episode_number=5,
+        title="Show",
+        year=2020,
+        media_type="tv",
+        season_number=None,
+        episode_number=5,
     )
     with pytest.raises(OrganizeNotApplicable):
         compute_organize_plan("/dl/X.mkv", cached, MOVIES, TV)
@@ -160,8 +179,11 @@ def test_plan_tv_missing_season_raises():
 def test_plan_tv_season_padded():
     """单位数 season / episode 都补零到 2 位（Plex/Emby 标准）。"""
     cached = _FakeCached(
-        title="Foo", year=2020, media_type="tv",
-        season_number=2, episode_number=5,
+        title="Foo",
+        year=2020,
+        media_type="tv",
+        season_number=2,
+        episode_number=5,
     )
     plan = compute_organize_plan("/dl/X.mkv", cached, MOVIES, TV)
     assert "Season 02" in plan.dst_dir
@@ -171,8 +193,11 @@ def test_plan_tv_season_padded():
 def test_plan_tv_tvshow_nfo_at_series_root_not_season():
     """tvshow.nfo 必须落在 series root（一剧一份），不在每个 season 目录里。"""
     cached = _FakeCached(
-        title="Show", year=2020, media_type="tv",
-        season_number=3, episode_number=8,
+        title="Show",
+        year=2020,
+        media_type="tv",
+        season_number=3,
+        episode_number=8,
     )
     plan = compute_organize_plan("/dl/X.mkv", cached, MOVIES, TV)
     assert plan.tvshow_nfo_path == "/media/tv/Show (2020)/tvshow.nfo"

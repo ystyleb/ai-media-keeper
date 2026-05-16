@@ -11,7 +11,6 @@ Coverage:
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -60,12 +59,26 @@ def _seed_movie(
         )
         VALUES (?, ?, ?, ?, ?, ?, 'movie', ?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?)
         """,
-        (path, hash(path) % 10_000_000, size, mtime, tmdb_movie_id, tmdb_movie_id,
-         title, year, resolution, source, codec, color_depth, release_group,
-         mtime, mtime),
+        (
+            path,
+            hash(path) % 10_000_000,
+            size,
+            mtime,
+            tmdb_movie_id,
+            tmdb_movie_id,
+            title,
+            year,
+            resolution,
+            source,
+            codec,
+            color_depth,
+            release_group,
+            mtime,
+            mtime,
+        ),
     )
     fid = cur.lastrowid
-    for p in (hdr_profiles or []):
+    for p in hdr_profiles or []:
         conn.execute(
             "INSERT INTO media_file_hdr_profiles(media_file_id, profile) VALUES (?, ?)",
             (fid, p),
@@ -103,12 +116,29 @@ def _seed_tv(
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, 'tv', ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?)
         """,
-        (path, hash(path) % 10_000_000, size, mtime, tmdb_series_id, tmdb_series_id,
-         tmdb_episode_id, "Show", 2020, season, episode,
-         resolution, source, codec, color_depth, release_group, mtime, mtime),
+        (
+            path,
+            hash(path) % 10_000_000,
+            size,
+            mtime,
+            tmdb_series_id,
+            tmdb_series_id,
+            tmdb_episode_id,
+            "Show",
+            2020,
+            season,
+            episode,
+            resolution,
+            source,
+            codec,
+            color_depth,
+            release_group,
+            mtime,
+            mtime,
+        ),
     )
     fid = cur.lastrowid
-    for p in (hdr_profiles or []):
+    for p in hdr_profiles or []:
         conn.execute(
             "INSERT INTO media_file_hdr_profiles(media_file_id, profile) VALUES (?, ?)",
             (fid, p),
@@ -150,8 +180,16 @@ def _seed_watched_tv(
         )
         VALUES ('emby', ?, 'tv', ?, ?, ?, ?, 1700000000, 1700000001, ?, ?, ?)
         """,
-        (f"emby-tv-{tmdb_series_id}-{season}-{episode}",
-         tmdb_series_id, tmdb_episode_id, season, episode, status, conf, src),
+        (
+            f"emby-tv-{tmdb_series_id}-{season}-{episode}",
+            tmdb_series_id,
+            tmdb_episode_id,
+            season,
+            episode,
+            status,
+            conf,
+            src,
+        ),
     )
     conn.commit()
 
@@ -162,12 +200,16 @@ def _seed_watched_tv(
 def test_quality_score_4k_bluray_dv_h265_high(conn):
     weights = dedup.get_current_weights(conn)
     score, breakdown = dedup.compute_quality_score(
-        {"parse_resolution": "2160p", "parse_source": "Blu-ray",
-         "parse_codec": "H.265", "parse_color_depth": "10-bit"},
+        {
+            "parse_resolution": "2160p",
+            "parse_source": "Blu-ray",
+            "parse_codec": "H.265",
+            "parse_color_depth": "10-bit",
+        },
         hdr_profiles=["DolbyVision"],
         weights=weights,
     )
-    assert score > 80                                  # 40 + 15 + 25 + 15 + 5 = 100
+    assert score > 80  # 40 + 15 + 25 + 15 + 5 = 100
     assert "resolution.2160p" in breakdown
     assert "hdr.DolbyVision" in breakdown
     assert "source.BluRay" in breakdown
@@ -177,8 +219,12 @@ def test_quality_score_4k_bluray_dv_h265_high(conn):
 def test_quality_score_1080p_webdl_h264_low(conn):
     weights = dedup.get_current_weights(conn)
     score, breakdown = dedup.compute_quality_score(
-        {"parse_resolution": "1080p", "parse_source": "WEB-DL",
-         "parse_codec": "H.264", "parse_color_depth": None},
+        {
+            "parse_resolution": "1080p",
+            "parse_source": "WEB-DL",
+            "parse_codec": "H.264",
+            "parse_color_depth": None,
+        },
         hdr_profiles=[],
         weights=weights,
     )
@@ -189,8 +235,12 @@ def test_quality_score_1080p_webdl_h264_low(conn):
 def test_quality_score_no_fields_zero(conn):
     weights = dedup.get_current_weights(conn)
     score, breakdown = dedup.compute_quality_score(
-        {"parse_resolution": None, "parse_source": None,
-         "parse_codec": None, "parse_color_depth": None},
+        {
+            "parse_resolution": None,
+            "parse_source": None,
+            "parse_codec": None,
+            "parse_color_depth": None,
+        },
         hdr_profiles=[],
         weights=weights,
     )
@@ -200,8 +250,12 @@ def test_quality_score_no_fields_zero(conn):
 
 def test_quality_score_hdr10_plus_higher_than_hdr10(conn):
     weights = dedup.get_current_weights(conn)
-    base = {"parse_resolution": "2160p", "parse_source": "Blu-ray",
-            "parse_codec": "H.265", "parse_color_depth": "10-bit"}
+    base = {
+        "parse_resolution": "2160p",
+        "parse_source": "Blu-ray",
+        "parse_codec": "H.265",
+        "parse_color_depth": "10-bit",
+    }
     s_hdr10, _ = dedup.compute_quality_score(base, ["HDR10"], weights)
     s_hdr10_plus, _ = dedup.compute_quality_score(base, ["HDR10+"], weights)
     assert s_hdr10_plus > s_hdr10
@@ -211,8 +265,12 @@ def test_quality_score_clamped_to_0_100(conn):
     """Even with many bonuses, score is clamped to 100."""
     weights = dedup.get_current_weights(conn)
     score, _ = dedup.compute_quality_score(
-        {"parse_resolution": "2160p", "parse_source": "Ultra HD Blu-ray",
-         "parse_codec": "AV1", "parse_color_depth": "10-bit"},
+        {
+            "parse_resolution": "2160p",
+            "parse_source": "Ultra HD Blu-ray",
+            "parse_codec": "AV1",
+            "parse_color_depth": "10-bit",
+        },
         hdr_profiles=["DolbyVision", "HDR10+"],
         weights=weights,
     )
@@ -230,12 +288,25 @@ def test_find_groups_no_duplicates_returns_empty(conn):
 
 
 def test_find_groups_movie_two_releases_grouped(conn):
-    _seed_movie(conn, path="/godfather.4k.mkv", tmdb_movie_id="238",
-                resolution="2160p", source="Blu-ray", codec="H.265",
-                hdr_profiles=["DolbyVision"], size=50_000_000_000)
-    _seed_movie(conn, path="/godfather.1080.mkv", tmdb_movie_id="238",
-                resolution="1080p", source="WEB-DL", codec="H.264",
-                size=10_000_000_000)
+    _seed_movie(
+        conn,
+        path="/godfather.4k.mkv",
+        tmdb_movie_id="238",
+        resolution="2160p",
+        source="Blu-ray",
+        codec="H.265",
+        hdr_profiles=["DolbyVision"],
+        size=50_000_000_000,
+    )
+    _seed_movie(
+        conn,
+        path="/godfather.1080.mkv",
+        tmdb_movie_id="238",
+        resolution="1080p",
+        source="WEB-DL",
+        codec="H.264",
+        size=10_000_000_000,
+    )
     groups, total = dedup.find_duplicate_groups(conn)
     assert total == 1
     assert len(groups) == 1
@@ -265,12 +336,28 @@ def test_find_groups_skips_non_dupes(conn):
 
 
 def test_find_groups_tv_episode_two_releases_grouped(conn):
-    _seed_tv(conn, path="/show.s01e01.4k.mkv", tmdb_series_id="1399",
-             season=1, episode=1, resolution="2160p", source="Blu-ray",
-             codec="H.265", hdr_profiles=["HDR10"], size=5_000_000_000)
-    _seed_tv(conn, path="/show.s01e01.1080.mkv", tmdb_series_id="1399",
-             season=1, episode=1, resolution="1080p", source="WEB-DL",
-             size=2_000_000_000)
+    _seed_tv(
+        conn,
+        path="/show.s01e01.4k.mkv",
+        tmdb_series_id="1399",
+        season=1,
+        episode=1,
+        resolution="2160p",
+        source="Blu-ray",
+        codec="H.265",
+        hdr_profiles=["HDR10"],
+        size=5_000_000_000,
+    )
+    _seed_tv(
+        conn,
+        path="/show.s01e01.1080.mkv",
+        tmdb_series_id="1399",
+        season=1,
+        episode=1,
+        resolution="1080p",
+        source="WEB-DL",
+        size=2_000_000_000,
+    )
     groups, total = dedup.find_duplicate_groups(conn)
     assert total == 1
     g = groups[0]
@@ -283,10 +370,8 @@ def test_find_groups_tv_episode_two_releases_grouped(conn):
 
 
 def test_find_groups_tv_different_episodes_not_grouped(conn):
-    _seed_tv(conn, path="/show.s1e1.a.mkv", tmdb_series_id="1399",
-             season=1, episode=1)
-    _seed_tv(conn, path="/show.s1e2.a.mkv", tmdb_series_id="1399",
-             season=1, episode=2)
+    _seed_tv(conn, path="/show.s1e1.a.mkv", tmdb_series_id="1399", season=1, episode=1)
+    _seed_tv(conn, path="/show.s1e2.a.mkv", tmdb_series_id="1399", season=1, episode=2)
     groups, total = dedup.find_duplicate_groups(conn)
     assert total == 0
 
@@ -320,10 +405,22 @@ def test_watched_only_tv_episode_id_only_row_still_filters_in(conn):
     Emby series cache miss occurs.
     """
     # Group has 2 tv files with same series+s+e
-    _seed_tv(conn, path="/show.s01e01.4k.mkv", tmdb_series_id="1399",
-             season=1, episode=1, tmdb_episode_id="ep-99")
-    _seed_tv(conn, path="/show.s01e01.1080.mkv", tmdb_series_id="1399",
-             season=1, episode=1, tmdb_episode_id="ep-99")
+    _seed_tv(
+        conn,
+        path="/show.s01e01.4k.mkv",
+        tmdb_series_id="1399",
+        season=1,
+        episode=1,
+        tmdb_episode_id="ep-99",
+    )
+    _seed_tv(
+        conn,
+        path="/show.s01e01.1080.mkv",
+        tmdb_series_id="1399",
+        season=1,
+        episode=1,
+        tmdb_episode_id="ep-99",
+    )
 
     # watched row: only episode_id, NO series_id (allowed by CHECK constraint
     # because mapping_status='mapped' AND tmdb_episode_id IS NOT NULL)
@@ -370,24 +467,22 @@ def test_is_watched_set_for_movie_with_watched_row(conn):
 
 def test_is_watched_via_episode_id_strong_signal(conn):
     """TV episode_id 命中（mapping_status='mapped' 强信号）."""
-    _seed_tv(conn, path="/t1.mkv", tmdb_series_id="1399",
-             season=1, episode=1, tmdb_episode_id="ep-99")
-    _seed_tv(conn, path="/t2.mkv", tmdb_series_id="1399",
-             season=1, episode=1, tmdb_episode_id="ep-99")
-    _seed_watched_tv(conn, tmdb_series_id="1399", season=1, episode=1,
-                     tmdb_episode_id="ep-99")
+    _seed_tv(
+        conn, path="/t1.mkv", tmdb_series_id="1399", season=1, episode=1, tmdb_episode_id="ep-99"
+    )
+    _seed_tv(
+        conn, path="/t2.mkv", tmdb_series_id="1399", season=1, episode=1, tmdb_episode_id="ep-99"
+    )
+    _seed_watched_tv(conn, tmdb_series_id="1399", season=1, episode=1, tmdb_episode_id="ep-99")
     groups, _ = dedup.find_duplicate_groups(conn)
     assert all(c.is_watched for c in groups[0].candidates)
 
 
 def test_is_watched_via_series_se_fallback(conn):
     """TV episode_id 缺失 → 用 series+s+e fallback。"""
-    _seed_tv(conn, path="/t1.mkv", tmdb_series_id="1399",
-             season=1, episode=1)
-    _seed_tv(conn, path="/t2.mkv", tmdb_series_id="1399",
-             season=1, episode=1)
-    _seed_watched_tv(conn, tmdb_series_id="1399", season=1, episode=1,
-                     tmdb_episode_id=None)
+    _seed_tv(conn, path="/t1.mkv", tmdb_series_id="1399", season=1, episode=1)
+    _seed_tv(conn, path="/t2.mkv", tmdb_series_id="1399", season=1, episode=1)
+    _seed_watched_tv(conn, tmdb_series_id="1399", season=1, episode=1, tmdb_episode_id=None)
     groups, _ = dedup.find_duplicate_groups(conn)
     assert all(c.is_watched for c in groups[0].candidates)
 
@@ -426,10 +521,10 @@ def test_bulk_fetch_invariant_no_n_plus_one(conn):
     """SQL query count must NOT scale with group count (bulk fetch pattern)."""
     # Seed 10 dup groups
     for i in range(10):
-        _seed_movie(conn, path=f"/m{i}a.mkv", tmdb_movie_id=str(1000 + i),
-                    hdr_profiles=["HDR10"])
-        _seed_movie(conn, path=f"/m{i}b.mkv", tmdb_movie_id=str(1000 + i),
-                    hdr_profiles=["DolbyVision"])
+        _seed_movie(conn, path=f"/m{i}a.mkv", tmdb_movie_id=str(1000 + i), hdr_profiles=["HDR10"])
+        _seed_movie(
+            conn, path=f"/m{i}b.mkv", tmdb_movie_id=str(1000 + i), hdr_profiles=["DolbyVision"]
+        )
 
     # Count executed SQL via trace
     queries: list[str] = []
@@ -455,9 +550,7 @@ def test_bulk_fetch_invariant_no_n_plus_one(conn):
 
 def test_update_weights_changes_meta_hash(conn):
     before = dedup.get_current_hash(conn)
-    new_hash, changed = dedup.update_weights(
-        conn, {"resolution.1080p": 30, "codec.AV1": 25}
-    )
+    new_hash, changed = dedup.update_weights(conn, {"resolution.1080p": 30, "codec.AV1": 25})
     assert changed == 2
     assert new_hash != before
     # readback
@@ -501,10 +594,10 @@ def test_refresh_updates_stale_rows(conn):
 
 def test_refresh_after_weight_change_marks_all_stale(conn):
     _seed_movie(conn, path="/a.mkv", tmdb_movie_id="100")
-    dedup.refresh_all_quality_scores(conn)        # initial fill
+    dedup.refresh_all_quality_scores(conn)  # initial fill
     dedup.update_weights(conn, {"resolution.1080p": 99})
     updated = dedup.refresh_all_quality_scores(conn)
-    assert updated == 1                            # weight change → row stale → rewritten
+    assert updated == 1  # weight change → row stale → rewritten
 
 
 # ── _normalize_source_key helper ───────────────────────────────
@@ -531,11 +624,12 @@ def test_update_weights_rejects_nan():
     """B1: NaN weight 在 update_weights 入口被拒绝（防止下游 score = NaN 污染）。"""
     import math as _math
 
+    # Use a fresh temp DB inline (avoid fixture cross-talk for this validation test)
+    import tempfile
+
     from db import migrations as _m
     from services import destructive_action as _da
 
-    # Use a fresh temp DB inline (avoid fixture cross-talk for this validation test)
-    import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         db = Path(tmp) / "t.db"
         c = _da.open_connection(db)
@@ -563,14 +657,13 @@ def test_update_weights_rejection_does_not_mutate_db(conn):
         "SELECT weight FROM dedup_weights WHERE key='resolution.1080p'"
     ).fetchone()[0]
     with pytest.raises(dedup.InvalidWeightError):
-        dedup.update_weights(
-            conn, {"resolution.1080p": 30, "codec.AV1": float("nan")}
-        )
+        dedup.update_weights(conn, {"resolution.1080p": 30, "codec.AV1": float("nan")})
     # hash 不变 & 1080p 没被 partial-update
     assert dedup.get_current_hash(conn) == before_hash
-    assert conn.execute(
-        "SELECT weight FROM dedup_weights WHERE key='resolution.1080p'"
-    ).fetchone()[0] == before_weight
+    assert (
+        conn.execute("SELECT weight FROM dedup_weights WHERE key='resolution.1080p'").fetchone()[0]
+        == before_weight
+    )
 
 
 # ── review I2: source 映射扩展 ─────────────────────────────────
@@ -587,9 +680,7 @@ def test_normalize_source_key_pt_variants():
 
 def test_dvdrip_has_weight_row(conn):
     """r2 BLOCKER: DVDRip 映射后必须有 weight row（避免 silent 0 score）。"""
-    row = conn.execute(
-        "SELECT weight FROM dedup_weights WHERE key='source.DVDRip'"
-    ).fetchone()
+    row = conn.execute("SELECT weight FROM dedup_weights WHERE key='source.DVDRip'").fetchone()
     assert row is not None, "source.DVDRip must be seeded so normalizer's mapping has a weight"
     assert row[0] > 0
 
@@ -598,8 +689,12 @@ def test_compute_quality_score_unknown_source_returns_zero_contribution(conn):
     """N1: source 字符串 normalizer 返 None 时 score 应正确处理（不 KeyError）。"""
     weights = dedup.get_current_weights(conn)
     score, breakdown = dedup.compute_quality_score(
-        {"parse_resolution": "1080p", "parse_source": "SomeObscureSource",
-         "parse_codec": "H.264", "parse_color_depth": None},
+        {
+            "parse_resolution": "1080p",
+            "parse_source": "SomeObscureSource",
+            "parse_codec": "H.264",
+            "parse_color_depth": None,
+        },
         hdr_profiles=[],
         weights=weights,
     )
@@ -630,10 +725,8 @@ def test_keep_recommended_winner_does_not_alias_hdr_profiles_list(conn):
 def test_bulk_fetch_watched_episode_ids_scoped_to_series(conn):
     """B2: 应该只查 IN (series_ids)，不全表扫描。"""
     # 无关系列的 watched item 不应进结果
-    _seed_watched_tv(conn, tmdb_series_id="OTHER", season=1, episode=1,
-                     tmdb_episode_id="far-away")
-    _seed_watched_tv(conn, tmdb_series_id="1399", season=1, episode=1,
-                     tmdb_episode_id="ep-target")
+    _seed_watched_tv(conn, tmdb_series_id="OTHER", season=1, episode=1, tmdb_episode_id="far-away")
+    _seed_watched_tv(conn, tmdb_series_id="1399", season=1, episode=1, tmdb_episode_id="ep-target")
 
     result = dedup._bulk_fetch_watched_episode_ids(conn, series_ids=["1399"])
     assert "ep-target" in result
@@ -641,8 +734,7 @@ def test_bulk_fetch_watched_episode_ids_scoped_to_series(conn):
 
 
 def test_bulk_fetch_watched_episode_ids_empty_series_returns_empty(conn):
-    _seed_watched_tv(conn, tmdb_series_id="1399", season=1, episode=1,
-                     tmdb_episode_id="ep-1")
+    _seed_watched_tv(conn, tmdb_series_id="1399", season=1, episode=1, tmdb_episode_id="ep-1")
     assert dedup._bulk_fetch_watched_episode_ids(conn, series_ids=[]) == set()
 
 
@@ -682,9 +774,9 @@ def test_find_groups_media_type_none_mixed_returns_sliced(conn):
     _seed_tv(conn, path="/t2.mkv", tmdb_series_id="1399", season=1, episode=1, size=300_000_000)
 
     groups, total = dedup.find_duplicate_groups(conn, media_type=None, limit=1, offset=0)
-    assert total == 2                                         # 总共有 2 个 group
-    assert len(groups) == 1                                   # limit=1 强制只返一个
-    assert groups[0].media_type == "movie"                    # 大的 movie 优先（deletable bigger）
+    assert total == 2  # 总共有 2 个 group
+    assert len(groups) == 1  # limit=1 强制只返一个
+    assert groups[0].media_type == "movie"  # 大的 movie 优先（deletable bigger）
 
 
 def test_find_groups_media_type_none_offset_advances_linearly(conn):
@@ -742,8 +834,19 @@ def _seed_movie_with_inode(
         )
         VALUES (?, ?, ?, ?, ?, ?, 'movie', 'M', 2020, 'ok', ?, ?, ?, '10-bit', 'G', ?, ?)
         """,
-        (path, inode, size, mtime, tmdb_movie_id, tmdb_movie_id,
-         resolution, source, codec, mtime, mtime),
+        (
+            path,
+            inode,
+            size,
+            mtime,
+            tmdb_movie_id,
+            tmdb_movie_id,
+            resolution,
+            source,
+            codec,
+            mtime,
+            mtime,
+        ),
     )
     conn.commit()
     return cur.lastrowid
@@ -752,14 +855,19 @@ def _seed_movie_with_inode(
 def test_hardlinked_same_inode_two_paths_merge_into_one_candidate(conn):
     """Two media_files rows sharing the same inode → one DedupCandidate with
     linked_paths=[both paths]. No spurious "duplicate" — they share storage."""
-    _seed_movie_with_inode(conn, path="/qbit/godfather.mkv",
-                           tmdb_movie_id="238", inode=12345)
-    _seed_movie_with_inode(conn, path="/media/Movies/Godfather.mkv",
-                           tmdb_movie_id="238", inode=12345)
+    _seed_movie_with_inode(conn, path="/qbit/godfather.mkv", tmdb_movie_id="238", inode=12345)
+    _seed_movie_with_inode(
+        conn, path="/media/Movies/Godfather.mkv", tmdb_movie_id="238", inode=12345
+    )
     # Add a real second release with different inode so the group survives the
     # HAVING COUNT >= 2 SQL filter.
-    _seed_movie_with_inode(conn, path="/media/Movies/Godfather.1080.mkv",
-                           tmdb_movie_id="238", inode=99999, size=500_000_000)
+    _seed_movie_with_inode(
+        conn,
+        path="/media/Movies/Godfather.1080.mkv",
+        tmdb_movie_id="238",
+        inode=99999,
+        size=500_000_000,
+    )
 
     groups, _ = dedup.find_duplicate_groups(conn)
     assert len(groups) == 1
@@ -768,7 +876,7 @@ def test_hardlinked_same_inode_two_paths_merge_into_one_candidate(conn):
     # Find the hardlinked candidate (the one with 2 paths)
     hl = next(c for c in g.candidates if len(c.linked_paths) == 2)
     assert hl.linked_paths == ["/media/Movies/Godfather.mkv", "/qbit/godfather.mkv"]
-    assert hl.path == "/media/Movies/Godfather.mkv"   # smallest lexicographically
+    assert hl.path == "/media/Movies/Godfather.mkv"  # smallest lexicographically
     assert len(hl.linked_media_file_ids) == 2
     # Other candidate is the singleton independent file
     solo = next(c for c in g.candidates if len(c.linked_paths) == 1)
@@ -778,10 +886,8 @@ def test_hardlinked_same_inode_two_paths_merge_into_one_candidate(conn):
 def test_hardlinked_all_same_inode_group_disappears(conn):
     """If a group's only "duplicates" all share one inode, no real dedup
     candidate exists — group must be skipped (< 2 unique candidates)."""
-    _seed_movie_with_inode(conn, path="/qbit/m.mkv",
-                           tmdb_movie_id="500", inode=77)
-    _seed_movie_with_inode(conn, path="/media/m.mkv",
-                           tmdb_movie_id="500", inode=77)
+    _seed_movie_with_inode(conn, path="/qbit/m.mkv", tmdb_movie_id="500", inode=77)
+    _seed_movie_with_inode(conn, path="/media/m.mkv", tmdb_movie_id="500", inode=77)
     groups, _ = dedup.find_duplicate_groups(conn)
     # SQL HAVING COUNT >= 2 matches (2 rows same tmdb_movie_id), but after
     # inode merge there's only 1 candidate → group skipped by len(cands)<2 guard.
@@ -790,12 +896,15 @@ def test_hardlinked_all_same_inode_group_disappears(conn):
 
 def test_hardlinked_size_counted_only_once(conn):
     """Two paths sharing inode must not double-count disk usage."""
-    _seed_movie_with_inode(conn, path="/qbit/big.mkv",
-                           tmdb_movie_id="600", inode=42, size=10_000_000_000)
-    _seed_movie_with_inode(conn, path="/media/big.mkv",
-                           tmdb_movie_id="600", inode=42, size=10_000_000_000)
-    _seed_movie_with_inode(conn, path="/media/small.mkv",
-                           tmdb_movie_id="600", inode=43, size=2_000_000_000)
+    _seed_movie_with_inode(
+        conn, path="/qbit/big.mkv", tmdb_movie_id="600", inode=42, size=10_000_000_000
+    )
+    _seed_movie_with_inode(
+        conn, path="/media/big.mkv", tmdb_movie_id="600", inode=42, size=10_000_000_000
+    )
+    _seed_movie_with_inode(
+        conn, path="/media/small.mkv", tmdb_movie_id="600", inode=43, size=2_000_000_000
+    )
     groups, _ = dedup.find_duplicate_groups(conn)
     g = groups[0]
     # total = 10G (hardlinked, counted once) + 2G (independent) = 12G
@@ -821,7 +930,9 @@ def test_candidate_to_dict_is_hardlinked_flag(conn):
     """is_hardlinked flag in serialized dict for UI consumption."""
     _seed_movie_with_inode(conn, path="/qbit/a.mkv", tmdb_movie_id="800", inode=1)
     _seed_movie_with_inode(conn, path="/media/a.mkv", tmdb_movie_id="800", inode=1)
-    _seed_movie_with_inode(conn, path="/media/b.mkv", tmdb_movie_id="800", inode=2, size=500_000_000)
+    _seed_movie_with_inode(
+        conn, path="/media/b.mkv", tmdb_movie_id="800", inode=2, size=500_000_000
+    )
     groups, _ = dedup.find_duplicate_groups(conn)
     serialized = [dedup.candidate_to_dict(c) for c in groups[0].candidates]
     hardlinked = [s for s in serialized if s["is_hardlinked"]]
@@ -836,13 +947,21 @@ def test_hardlinked_winner_keep_recommended(conn):
     """keep_recommended must work correctly after inode merge: the merged
     hardlinked candidate competes with other candidates on quality_score."""
     # Hardlinked group (4K HDR DV) is highest quality
-    _seed_movie_with_inode(conn, path="/qbit/4k.mkv", tmdb_movie_id="900",
-                           inode=10, resolution="2160p")
-    _seed_movie_with_inode(conn, path="/media/4k.mkv", tmdb_movie_id="900",
-                           inode=10, resolution="2160p")
+    _seed_movie_with_inode(
+        conn, path="/qbit/4k.mkv", tmdb_movie_id="900", inode=10, resolution="2160p"
+    )
+    _seed_movie_with_inode(
+        conn, path="/media/4k.mkv", tmdb_movie_id="900", inode=10, resolution="2160p"
+    )
     # Independent low-quality file
-    _seed_movie_with_inode(conn, path="/media/720.mkv", tmdb_movie_id="900",
-                           inode=20, resolution="720p", size=500_000_000)
+    _seed_movie_with_inode(
+        conn,
+        path="/media/720.mkv",
+        tmdb_movie_id="900",
+        inode=20,
+        resolution="720p",
+        size=500_000_000,
+    )
 
     groups, _ = dedup.find_duplicate_groups(conn)
     g = groups[0]

@@ -36,9 +36,9 @@ class ConcurrentSyncError(RuntimeError):
 class WatchedItem:
     """Internal watch-source-agnostic shape, ready for INSERT INTO watched_items."""
 
-    provider: str                         # 'emby'
-    provider_item_id: str                 # Emby Id
-    media_type: str                       # 'movie' | 'tv'
+    provider: str  # 'emby'
+    provider_item_id: str  # Emby Id
+    media_type: str  # 'movie' | 'tv'
     tmdb_movie_id: str | None
     tmdb_series_id: str | None
     tmdb_episode_id: str | None
@@ -47,9 +47,9 @@ class WatchedItem:
     episode_number: int | None
     title: str | None
     year: int | None
-    watched_at: int                       # unix ts
+    watched_at: int  # unix ts
     raw_hash: str
-    mapping_status: str                   # 'mapped' | 'fallback_se' | 'unmapped' | 'ambiguous'
+    mapping_status: str  # 'mapped' | 'fallback_se' | 'unmapped' | 'ambiguous'
     mapping_confidence: float
     mapping_source: str
 
@@ -160,7 +160,8 @@ def _upsert_watched_item(conn: sqlite3.Connection, w: WatchedItem) -> str:
     if w.media_type == "tv" and (w.season_number is None or w.episode_number is None):
         logger.warning(
             "emby: skipping episode without season/episode numbers: %s (%s)",
-            w.provider_item_id, w.title,
+            w.provider_item_id,
+            w.title,
         )
         return "skipped"
 
@@ -183,11 +184,23 @@ def _upsert_watched_item(conn: sqlite3.Connection, w: WatchedItem) -> str:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                w.provider, w.provider_item_id, w.media_type,
-                w.tmdb_movie_id, w.tmdb_series_id, w.tmdb_episode_id, w.imdb_id,
-                w.season_number, w.episode_number,
-                w.title, w.year, w.watched_at, fetched_at, w.raw_hash,
-                w.mapping_status, w.mapping_confidence, w.mapping_source,
+                w.provider,
+                w.provider_item_id,
+                w.media_type,
+                w.tmdb_movie_id,
+                w.tmdb_series_id,
+                w.tmdb_episode_id,
+                w.imdb_id,
+                w.season_number,
+                w.episode_number,
+                w.title,
+                w.year,
+                w.watched_at,
+                fetched_at,
+                w.raw_hash,
+                w.mapping_status,
+                w.mapping_confidence,
+                w.mapping_source,
             ),
         )
         return "inserted"
@@ -205,10 +218,17 @@ def _upsert_watched_item(conn: sqlite3.Connection, w: WatchedItem) -> str:
         WHERE id=?
         """,
         (
-            w.watched_at, fetched_at, w.raw_hash,
-            w.mapping_status, w.mapping_confidence, w.mapping_source,
-            w.tmdb_movie_id, w.tmdb_series_id, w.tmdb_episode_id,
-            w.title, w.year,
+            w.watched_at,
+            fetched_at,
+            w.raw_hash,
+            w.mapping_status,
+            w.mapping_confidence,
+            w.mapping_source,
+            w.tmdb_movie_id,
+            w.tmdb_series_id,
+            w.tmdb_episode_id,
+            w.title,
+            w.year,
             existing["id"],
         ),
     )
@@ -230,8 +250,7 @@ def claim_sync_run(conn: sqlite3.Connection, provider: str) -> int:
     try:
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
-            "INSERT INTO watch_sync_runs(provider, started_at, status) "
-            "VALUES (?, ?, 'running')",
+            "INSERT INTO watch_sync_runs(provider, started_at, status) VALUES (?, ?, 'running')",
             (provider, now),
         )
         run_id = cur.lastrowid
@@ -272,15 +291,14 @@ def finalize_run(
                items_fetched=?, items_inserted=?, items_updated=?, items_skipped=?
          WHERE id=?
         """,
-        (status, int(time.time()), error,
-         s.fetched, s.inserted, s.updated, s.skipped, run_id),
+        (status, int(time.time()), error, s.fetched, s.inserted, s.updated, s.skipped, run_id),
     )
     conn.commit()
 
 
 def sync_emby(
-    open_conn,                          # callable () -> sqlite3.Connection
-    emby_client,                        # clients.watch.emby.EmbyClient
+    open_conn,  # callable () -> sqlite3.Connection
+    emby_client,  # clients.watch.emby.EmbyClient
     *,
     since_iso: str | None = None,
     run_in_thread: bool = True,
@@ -322,7 +340,7 @@ def sync_emby(
                     summary.skipped += 1
             conn.commit()
             finalize_run(conn, run_id, status="done", summary=summary)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.exception("emby sync failed")
             try:
                 conn.rollback()

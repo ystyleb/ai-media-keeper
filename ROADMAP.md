@@ -159,11 +159,21 @@ needs_review / heuristic_fallback 时候选列表点击触发 `POST /api/metadat
 
 **review 经过**：codex r1 抓 BLOCKER season/episode injection + IMPORTANT organizeBtn 不刷新 → r2 0 BLOCKER ship.
 
-### 2. `/api/providers/status` + 顶部 banner（S，依赖：无）
+### 2. ~~`/api/providers/status` + 顶部 banner~~ ✅ 2026-05-16 完成
 
-UI 顶部显示 TMDB / DeepSeek 当前可用性（OK / auth_failed / not_configured / rate_limited）。Scanner 按 state 降级而非崩。
+`/api/providers/status` 聚合 **TMDB / DeepSeek / Emby / qBit** 4 provider 当前可用性，60s TTL cache + `?refresh=1` bypass。State 枚举：`ok / auth_failed / not_configured / unreachable / error`。
 
-**为什么重要**：当前 key 错了 / 失效，用户看到的是"识别失败"，不知道是 key 问题。
+**UI**：
+- Topbar 4 个按钮（AI / Emby / qBit）右侧带状态点（绿=ok / 灰=未配置 / 橙=key 失效 / 红=不可达）
+- 顶部 banner 仅在 auth_failed / unreachable 时显示，含「重试」「本次会话不再提醒」按钮
+- 启动时 `loadProvidersStatus()` 调一次；ProvidersStatus error 静默不阻塞 UI
+
+**契约保证**：
+- Scanner / identify pipeline 已 graceful degradation：LLM 不可用走 heuristic（[[methodology-patterns]] Pattern D 等价），provider 失败 → needs_review 不 crash
+- `_classify_provider_error` 通用辅助：message 含 `401/403/auth/invalid/unauthor` → `auth_failed`，其余 → `unreachable`
+- qBit 多了一道 config 完整性 pre-check：`url`/`user` 缺 → `not_configured`，`has_password=False` → `not_configured`（避免无密码硬碰 network timeout）
+
+**测试**：16 unit tests (`test_providers_status.py`) — 4 provider × {ok, not_configured, auth_failed, unreachable} + cache hit + refresh bypass + no-store header + response shape regression。**588 total tests pass**。
 
 ### 3. ~~全库后台扫描 worker~~ ✅ Phase 2 已完成
 
@@ -175,23 +185,40 @@ UI 顶部显示 TMDB / DeepSeek 当前可用性（OK / auth_failed / not_configu
 
 ### 6. ~~Archive 操作~~ ⏸️ Phase 3.5 仅 stub（executor 不接 SSH 真执行）；用户选定"看完就删"派，schema 占位保留以备后续
 
-### 7. MCP server（M，依赖：#1-#6 业务能力齐了）
+### 7. ~~MCP server~~ ✅ 2026-05-16 完成
 
-Claude Desktop / Code 直接管 NAS：
-- `list_files` / `find_recent_downloads` / `get_disk_usage`
-- `find_duplicates` / `list_archive_candidates`
-- `prepare_destructive_action` + `confirm_destructive_action`（wrap REST API，不另开口子）
+`mcp_server/` 模块 — Claude Desktop / Code 直接管 NAS，stdio 协议 + 通过 HTTP 代理到本机 Flask REST。9 个 tool（比 ROADMAP 列的 7 个多了 `providers_status` 和 `action_status`）。
 
-**安全模式**：默认 stdio + localhost，远程访问推 Tailscale。
+**Tools**：
+- Read: `list_files` / `find_recent_downloads` / `get_disk_usage` / `find_duplicates` / `list_archive_candidates` / `providers_status`
+- Destructive (契约 #1): `prepare_destructive_action` / `confirm_destructive_action` / `action_status`
 
-### 8. 开源发布（S，依赖：#7 + 完整功能）
+**架构契约**：
+- MCP server 是纯协议适配层，**所有业务逻辑** (validate_path / 契约 #1 双段式 / metadata grounding / signed_token HMAC) 都由 Flask 端持有 — MCP 无法绕过任何 destructive 守门
+- `prepare_destructive_action` 必须先生成 `signed_token` + snapshot，`confirm_destructive_action` 才真正执行；MCP 没有 "delete_path" 单 tool，避免绕过 preview
 
-- README + 3 张 GIF（删除 / 元数据 / 重复检测）
-- CONTRIBUTING.md 分层（加 BT adapter L1 / metadata provider L2 / watch source L3 / mutating 行为 L4）
-- Docker Compose（`docker-compose up` 一键跑）
-- 模块化拆 app.py（拆 routes / services 模块）+ ES module 前端
-- 引入 ruff CI + lint
-- 平台兼容矩阵（QNAP / Synology / Linux 的 `stat` / `du` 差异 shim）
+**安全模式**：默认 stdio + 调本机 `127.0.0.1:5001`；不开 TCP 监听。远程访问推 Tailscale（NAS join tailnet 后 `NAS_BASE_URL=http://nas.tailnet:5001`）。
+
+**配置**：
+- `mcp_server/README.md` 含 Claude Desktop config (`claude_desktop_config.json`) + Claude Code CLI (`claude mcp add`) 完整示例
+- 环境变量：`NAS_API_TOKEN`（从 `config/.api_token`）+ `NAS_BASE_URL`
+
+**测试**：28 unit tests (`test_mcp_server.py`) — HTTP layer mock + 9 tool dispatch + 错误分类（network / 4xx / 5xx / 参数错） + tool schema 完整性 + kind enum 与 db schema CHECK 一致性（regression test）。端到端 stdio JSON-RPC smoke：initialize + tools/list 返 9 工具。**616 total tests pass**。
+
+### 8. ~~开源发布~~ ✅ 2026-05-16 完成
+
+第一波 ship 内容：
+- ✅ **README.md** 完整化 — 加 MCP server + ROADMAP #2 章节 + Docker 段
+- ✅ **CONTRIBUTING.md** 4 层分类（L1 metadata provider / L2 BT adapter / L3 watch source / L4 mutating 行为）+ PR checklist + 7 条不变量 + 平台兼容矩阵
+- ✅ **Dockerfile + docker-compose.yml** — `docker compose up -d` 一键跑；默认 bind `127.0.0.1:8080`；SSH key 通过 `~/.ssh:ro` 挂入；config volume 持久化
+- ✅ **ruff CI** (`.github/workflows/ci.yml` + `ruff.toml`) — Python 3.11/3.12 双版本 + lint + format + pytest + Docker build smoke
+- ✅ **LICENSE** MIT
+- ✅ **`mcp_server/README.md`** — Claude Desktop / Code 配置完整示例 + 安全模式
+
+延后到下个 release：
+- 📸 README 3 张 GIF（删除 / 元数据 / 重复检测） — 需要真实演示数据，单独 issue
+- 🔧 模块化拆 app.py（5300 行）— 大重构，单独 PR 跑透
+- 🛂 ES module 前端 — 同上
 
 ### 9. NFO episode-specific 元数据补全（✅ 2026-05-16 完成）
 

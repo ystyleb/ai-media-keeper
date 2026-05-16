@@ -60,9 +60,7 @@ def test_phase3_migrate_creates_all_new_tables(migrated_conn):
         "dedup_weights",
         "dedup_weights_meta",
     }
-    rows = migrated_conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    ).fetchall()
+    rows = migrated_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     actual = {r[0] for r in rows}
     assert expected_tables.issubset(actual)
 
@@ -70,22 +68,32 @@ def test_phase3_migrate_creates_all_new_tables(migrated_conn):
 def test_phase3_migrate_adds_10_media_files_columns(migrated_conn):
     cols = {row[1] for row in migrated_conn.execute("PRAGMA table_info(media_files)")}
     new_cols = {
-        "parse_codec", "parse_color_depth", "parse_container", "parse_audio_codec",
-        "quality_score", "score_weights_hash", "score_computed_at",
-        "tmdb_movie_id", "tmdb_series_id", "tmdb_episode_id",
+        "parse_codec",
+        "parse_color_depth",
+        "parse_container",
+        "parse_audio_codec",
+        "quality_score",
+        "score_weights_hash",
+        "score_computed_at",
+        "tmdb_movie_id",
+        "tmdb_series_id",
+        "tmdb_episode_id",
     }
     assert new_cols.issubset(cols)
 
 
 def test_phase3_migrate_creates_all_indices(migrated_conn):
-    rows = migrated_conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='index'"
-    ).fetchall()
+    rows = migrated_conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
     actual = {r[0] for r in rows}
     expected = {
-        "idx_media_movie_id", "idx_media_series_se", "idx_media_episode_id",
-        "idx_media_seen_size", "idx_hdr_profile",
-        "idx_watched_movie", "idx_watched_series_se", "idx_watched_episode",
+        "idx_media_movie_id",
+        "idx_media_series_se",
+        "idx_media_episode_id",
+        "idx_media_seen_size",
+        "idx_hdr_profile",
+        "idx_watched_movie",
+        "idx_watched_series_se",
+        "idx_watched_episode",
         "idx_watched_when",
         "uniq_watch_sync_running",
     }
@@ -114,8 +122,8 @@ def test_phase3_migrate_old_movie_tmdb_id_copied_to_movie_id(fresh_conn):
         "SELECT tmdb_id, tmdb_movie_id, tmdb_series_id FROM media_files WHERE path=?",
         ("/share/Movies/A.mkv",),
     ).fetchone()
-    assert row[0] == "238"            # 老字段保留
-    assert row[1] == "238"            # 新字段拷贝
+    assert row[0] == "238"  # 老字段保留
+    assert row[1] == "238"  # 新字段拷贝
     assert row[2] is None
 
 
@@ -209,32 +217,45 @@ def test_watched_items_movie_row_rejects_series_id(migrated_conn):
     """Movie row cannot carry tmdb_series_id (Pattern B: id space 互斥)."""
     with pytest.raises(sqlite3.IntegrityError):
         _insert_watched(
-            migrated_conn, media_type="movie",
-            tmdb_movie_id="238", tmdb_series_id="1399",
+            migrated_conn,
+            media_type="movie",
+            tmdb_movie_id="238",
+            tmdb_series_id="1399",
         )
 
 
 def test_watched_items_movie_row_rejects_season_number(migrated_conn):
     with pytest.raises(sqlite3.IntegrityError):
         _insert_watched(
-            migrated_conn, media_type="movie",
-            tmdb_movie_id="238", season_number=1,
+            migrated_conn,
+            media_type="movie",
+            tmdb_movie_id="238",
+            season_number=1,
         )
 
 
 def test_watched_items_tv_row_ok_with_episode_id(migrated_conn):
     rowid = _insert_watched(
-        migrated_conn, provider_item_id="emby-ep-1", media_type="tv",
-        tmdb_episode_id="9999", season_number=1, episode_number=1,
+        migrated_conn,
+        provider_item_id="emby-ep-1",
+        media_type="tv",
+        tmdb_episode_id="9999",
+        season_number=1,
+        episode_number=1,
     )
     assert rowid > 0
 
 
 def test_watched_items_tv_row_ok_with_series_fallback(migrated_conn):
     rowid = _insert_watched(
-        migrated_conn, provider_item_id="emby-ep-2", media_type="tv",
-        tmdb_series_id="1399", season_number=1, episode_number=1,
-        mapping_status="fallback_se", mapping_confidence=0.7,
+        migrated_conn,
+        provider_item_id="emby-ep-2",
+        media_type="tv",
+        tmdb_series_id="1399",
+        season_number=1,
+        episode_number=1,
+        mapping_status="fallback_se",
+        mapping_confidence=0.7,
         mapping_source="emby.series_provider_ids+se",
     )
     assert rowid > 0
@@ -243,18 +264,25 @@ def test_watched_items_tv_row_ok_with_series_fallback(migrated_conn):
 def test_watched_items_tv_row_requires_season_episode(migrated_conn):
     with pytest.raises(sqlite3.IntegrityError):
         _insert_watched(
-            migrated_conn, provider_item_id="emby-ep-3", media_type="tv",
+            migrated_conn,
+            provider_item_id="emby-ep-3",
+            media_type="tv",
             tmdb_episode_id="9999",
-            season_number=None, episode_number=None,
+            season_number=None,
+            episode_number=None,
         )
 
 
 def test_watched_items_tv_row_rejects_movie_id(migrated_conn):
     with pytest.raises(sqlite3.IntegrityError):
         _insert_watched(
-            migrated_conn, provider_item_id="emby-ep-4", media_type="tv",
-            tmdb_movie_id="238", tmdb_episode_id="9999",
-            season_number=1, episode_number=1,
+            migrated_conn,
+            provider_item_id="emby-ep-4",
+            media_type="tv",
+            tmdb_movie_id="238",
+            tmdb_episode_id="9999",
+            season_number=1,
+            episode_number=1,
         )
 
 
@@ -262,9 +290,13 @@ def test_watched_items_mapped_status_requires_join_key(migrated_conn):
     """mapping_status='mapped' must have a join key (movie_id or episode_id or series_id)."""
     with pytest.raises(sqlite3.IntegrityError):
         _insert_watched(
-            migrated_conn, provider_item_id="emby-ep-5", media_type="tv",
-            tmdb_episode_id=None, tmdb_series_id=None,
-            season_number=1, episode_number=1,
+            migrated_conn,
+            provider_item_id="emby-ep-5",
+            media_type="tv",
+            tmdb_episode_id=None,
+            tmdb_series_id=None,
+            season_number=1,
+            episode_number=1,
             mapping_status="mapped",
         )
 
@@ -272,20 +304,28 @@ def test_watched_items_mapped_status_requires_join_key(migrated_conn):
 def test_watched_items_unmapped_status_allows_no_join_key(migrated_conn):
     """mapping_status='unmapped' bypasses join-key CHECK (legitimate use case)."""
     rowid = _insert_watched(
-        migrated_conn, provider_item_id="emby-ep-6", media_type="tv",
-        tmdb_episode_id=None, tmdb_series_id=None,
-        season_number=1, episode_number=1,
-        mapping_status="unmapped", mapping_confidence=0.0, mapping_source="unknown",
+        migrated_conn,
+        provider_item_id="emby-ep-6",
+        media_type="tv",
+        tmdb_episode_id=None,
+        tmdb_series_id=None,
+        season_number=1,
+        episode_number=1,
+        mapping_status="unmapped",
+        mapping_confidence=0.0,
+        mapping_source="unknown",
     )
     assert rowid > 0
 
 
 def test_watched_items_unique_provider_item_id(migrated_conn):
-    _insert_watched(migrated_conn, provider_item_id="dup-1",
-                    media_type="movie", tmdb_movie_id="100")
+    _insert_watched(
+        migrated_conn, provider_item_id="dup-1", media_type="movie", tmdb_movie_id="100"
+    )
     with pytest.raises(sqlite3.IntegrityError):
-        _insert_watched(migrated_conn, provider_item_id="dup-1",
-                        media_type="movie", tmdb_movie_id="100")
+        _insert_watched(
+            migrated_conn, provider_item_id="dup-1", media_type="movie", tmdb_movie_id="100"
+        )
 
 
 # ── watch_sync_runs 单飞锁 ─────────────────────────────────────
@@ -398,9 +438,7 @@ def test_hdr_profiles_cascade_delete_on_media_file_removal(migrated_conn):
 
 
 def test_dedup_weights_seeded_with_defaults_on_first_apply(migrated_conn):
-    rows = migrated_conn.execute(
-        "SELECT key, weight FROM dedup_weights ORDER BY key"
-    ).fetchall()
+    rows = migrated_conn.execute("SELECT key, weight FROM dedup_weights ORDER BY key").fetchall()
     keys = {r[0] for r in rows}
     # 关键键全在
     assert "resolution.4K" in keys
@@ -410,9 +448,7 @@ def test_dedup_weights_seeded_with_defaults_on_first_apply(migrated_conn):
 
 
 def test_dedup_weights_meta_hash_matches_default_weights(migrated_conn):
-    row = migrated_conn.execute(
-        "SELECT current_hash FROM dedup_weights_meta WHERE id=1"
-    ).fetchone()
+    row = migrated_conn.execute("SELECT current_hash FROM dedup_weights_meta WHERE id=1").fetchone()
     assert row is not None
     expected = migrations._canonical_weights_hash(migrations.DEFAULT_DEDUP_WEIGHTS)
     assert row[0] == expected
@@ -427,9 +463,7 @@ def test_dedup_weights_meta_hash_canonical_is_stable_across_dicts(migrated_conn)
 
 def test_phase3_migrate_does_not_reseed_weights_on_second_apply(migrated_conn):
     """If table not empty (e.g. user changed weights), 不要 reset."""
-    migrated_conn.execute(
-        "UPDATE dedup_weights SET weight=999 WHERE key='resolution.4K'"
-    )
+    migrated_conn.execute("UPDATE dedup_weights SET weight=999 WHERE key='resolution.4K'")
     migrated_conn.commit()
 
     summary = migrations.phase3_migrate(migrated_conn)
@@ -450,9 +484,7 @@ def test_phase3_migrate_self_heals_missing_weights_meta(migrated_conn):
 
     summary = migrations.phase3_migrate(migrated_conn)
     assert summary["weights_meta_refreshed"] == 1
-    row = migrated_conn.execute(
-        "SELECT current_hash FROM dedup_weights_meta WHERE id=1"
-    ).fetchone()
+    row = migrated_conn.execute("SELECT current_hash FROM dedup_weights_meta WHERE id=1").fetchone()
     assert row is not None
     expected = migrations._canonical_weights_hash(migrations.DEFAULT_DEDUP_WEIGHTS)
     assert row[0] == expected
@@ -468,7 +500,7 @@ def test_phase3_migrate_backfills_missing_default_weight_keys(migrated_conn):
     migrated_conn.commit()
 
     summary = migrations.phase3_migrate(migrated_conn)
-    assert summary["weights_seeded"] == 1                  # 只补 codec.AV1 一条
+    assert summary["weights_seeded"] == 1  # 只补 codec.AV1 一条
     actual_keys = {r[0] for r in migrated_conn.execute("SELECT key FROM dedup_weights")}
     assert "codec.AV1" in actual_keys
 
@@ -484,9 +516,7 @@ def test_phase3_migrate_refreshes_meta_when_actual_diverges(migrated_conn):
     """User edited weights → meta hash 必须跟着算出新 hash。"""
     migrated_conn.execute("UPDATE dedup_weights SET weight=99 WHERE key='codec.AV1'")
     # 故意把 meta hash 写成 stale 值（模拟 partial state）
-    migrated_conn.execute(
-        "UPDATE dedup_weights_meta SET current_hash='STALE_HASH' WHERE id=1"
-    )
+    migrated_conn.execute("UPDATE dedup_weights_meta SET current_hash='STALE_HASH' WHERE id=1")
     migrated_conn.commit()
 
     summary = migrations.phase3_migrate(migrated_conn)
@@ -569,9 +599,7 @@ def test_phase4_migration_rebuilds_kind_check_constraint(fresh_conn):
         " VALUES ('a2', 'organize', 'h', '{}', 1000, 'web_ui', 999)"
     )
     fresh_conn.commit()
-    row = fresh_conn.execute(
-        "SELECT kind FROM destructive_actions WHERE action_id='a2'"
-    ).fetchone()
+    row = fresh_conn.execute("SELECT kind FROM destructive_actions WHERE action_id='a2'").fetchone()
     assert row[0] == "organize"
 
 
@@ -630,9 +658,9 @@ def test_phase4_migration_indices_rebuilt(fresh_conn):
     _force_old_check_constraint(fresh_conn)
     migrations.phase4_migrate(fresh_conn)
     idx_names = {
-        row[0] for row in fresh_conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' "
-            "AND tbl_name='destructive_actions'"
+        row[0]
+        for row in fresh_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='destructive_actions'"
         ).fetchall()
     }
     assert "idx_actions_expires" in idx_names
@@ -685,14 +713,20 @@ def test_phase5_migration_creates_table_on_legacy_db(tmp_path):
     summary = migrations.phase5_migrate(conn)
     assert summary["created"] is True
     # 表 + 3 个索引都建
-    tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='auto_organize_runs'"
-    ).fetchall()]
+    tables = [
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='auto_organize_runs'"
+        ).fetchall()
+    ]
     assert tables == ["auto_organize_runs"]
-    indices = sorted(r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='index' "
-        "AND tbl_name='auto_organize_runs' AND name NOT LIKE 'sqlite_%'"
-    ).fetchall())
+    indices = sorted(
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND tbl_name='auto_organize_runs' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    )
     assert indices == ["idx_auto_org_history", "idx_auto_org_status", "uniq_auto_org_organizing"]
     conn.close()
 
@@ -723,8 +757,7 @@ def test_phase5_partial_unique_blocks_concurrent_organizing(fresh_conn):
     这个测试当前用 INSERT；PK 先撞 IntegrityError。两种约束都生效都视为 pass。
     """
     fresh_conn.execute(
-        "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,created_at) "
-        "VALUES(?,?,?,?)",
+        "INSERT INTO auto_organize_runs(qbit_hash,content_path,status,created_at) VALUES(?,?,?,?)",
         ("h1", "/x", "organizing", 0),
     )
     fresh_conn.commit()
@@ -740,8 +773,13 @@ def test_phase5_partial_unique_blocks_concurrent_organizing(fresh_conn):
 def test_phase5_terminal_statuses_accepted(fresh_conn):
     """5 terminal + 2 transient = 7 个合法 status 全部能插入。"""
     valid = [
-        "pending", "organizing", "succeeded", "failed",
-        "skipped_needs_identify", "skipped_low_confidence", "skipped_unsupported",
+        "pending",
+        "organizing",
+        "succeeded",
+        "failed",
+        "skipped_needs_identify",
+        "skipped_low_confidence",
+        "skipped_unsupported",
     ]
     for i, st in enumerate(valid):
         # organizing 只能一行（partial unique），所以用不同 hash

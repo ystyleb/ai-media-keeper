@@ -23,10 +23,17 @@ from typing import Any
 # qBit state 中"已完成"枚举值（progress=1.0 仍是主判据，state 是 secondary）。
 # Source: qBittorrent WebAPI doc - https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-4.1)
 #   uploading / stalledUP / pausedUP / queuedUP / forcedUP / completed / seeding
-COMPLETED_STATES = frozenset({
-    "uploading", "stalledUP", "pausedUP", "queuedUP", "forcedUP",
-    "completed", "seeding",
-})
+COMPLETED_STATES = frozenset(
+    {
+        "uploading",
+        "stalledUP",
+        "pausedUP",
+        "queuedUP",
+        "forcedUP",
+        "completed",
+        "seeding",
+    }
+)
 
 
 # ── completion detection ───
@@ -159,16 +166,30 @@ def mark_terminal(
     返 True 表示 row 存在并 update 成功。
     注意：attempts **不在这里增**（mark_organizing 已增过）— 避免双计数.
     """
-    if status not in {"succeeded", "failed", "skipped_needs_identify",
-                      "skipped_low_confidence", "skipped_unsupported"}:
+    if status not in {
+        "succeeded",
+        "failed",
+        "skipped_needs_identify",
+        "skipped_low_confidence",
+        "skipped_unsupported",
+    }:
         raise ValueError(f"mark_terminal: invalid terminal status {status!r}")
     now = int(time.time())
     cur = conn.execute(
         "UPDATE auto_organize_runs SET status=?, action_id=COALESCE(?, action_id), "
         "files_succeeded=?, files_already_linked=?, files_failed=?, "
         "last_error=?, last_attempt_at=?, completed_at=? WHERE qbit_hash=?",
-        (status, action_id, files_succeeded, files_already_linked, files_failed,
-         error, now, now, qbit_hash),
+        (
+            status,
+            action_id,
+            files_succeeded,
+            files_already_linked,
+            files_failed,
+            error,
+            now,
+            now,
+            qbit_hash,
+        ),
     )
     conn.commit()
     return cur.rowcount > 0
@@ -201,10 +222,17 @@ def mark_skipped_at_pending(
 # ── query / UI ───
 
 
-VALID_STATUSES = frozenset({
-    "pending", "organizing", "succeeded", "failed",
-    "skipped_needs_identify", "skipped_low_confidence", "skipped_unsupported",
-})
+VALID_STATUSES = frozenset(
+    {
+        "pending",
+        "organizing",
+        "succeeded",
+        "failed",
+        "skipped_needs_identify",
+        "skipped_low_confidence",
+        "skipped_unsupported",
+    }
+)
 
 
 def list_history(
@@ -293,7 +321,7 @@ def evaluate_confidence_gate(
 
     # 一次 batch 查（4C.1 / Phase 4B 已有 get_many_by_path 500-chunk SQL IN）
     # 避免循环 import：lazy import metadata_cache
-    from . import metadata_cache  # noqa: PLC0415
+    from . import metadata_cache
 
     cache_map = metadata_cache.get_many_by_path(conn, paths)
 
@@ -304,35 +332,46 @@ def evaluate_confidence_gate(
     for p in paths:
         entry = cache_map.get(p)
         if entry is None:
-            needs_identify.append({
-                "path": p, "reason": "no cache row", "confidence": None,
-                "media_type": None,
-            })
+            needs_identify.append(
+                {
+                    "path": p,
+                    "reason": "no cache row",
+                    "confidence": None,
+                    "media_type": None,
+                }
+            )
             continue
         cached, _status = entry  # (CachedMetadata, freshness_label)
         if cached is None or cached.media_type is None:
-            needs_identify.append({
-                "path": p, "reason": "cache exists but media_type is None",
-                "confidence": cached.metadata_confidence if cached else None,
-                "media_type": None,
-            })
+            needs_identify.append(
+                {
+                    "path": p,
+                    "reason": "cache exists but media_type is None",
+                    "confidence": cached.metadata_confidence if cached else None,
+                    "media_type": None,
+                }
+            )
             continue
         if cached.media_type not in SUPPORTED_MEDIA_TYPES:
-            unsupported.append({
-                "path": p,
-                "reason": f"media_type={cached.media_type!r} not in {sorted(SUPPORTED_MEDIA_TYPES)}",
-                "confidence": cached.metadata_confidence,
-                "media_type": cached.media_type,
-            })
+            unsupported.append(
+                {
+                    "path": p,
+                    "reason": f"media_type={cached.media_type!r} not in {sorted(SUPPORTED_MEDIA_TYPES)}",
+                    "confidence": cached.metadata_confidence,
+                    "media_type": cached.media_type,
+                }
+            )
             continue
         conf = cached.metadata_confidence
         if conf is None or conf < threshold:
-            low_confidence.append({
-                "path": p,
-                "reason": f"confidence {conf!r} < threshold {threshold}",
-                "confidence": conf,
-                "media_type": cached.media_type,
-            })
+            low_confidence.append(
+                {
+                    "path": p,
+                    "reason": f"confidence {conf!r} < threshold {threshold}",
+                    "confidence": conf,
+                    "media_type": cached.media_type,
+                }
+            )
             continue
 
     # 优先级 fail-fast：needs_identify > unsupported > low_confidence > pass
@@ -395,9 +434,9 @@ def dispatch_one(
     conn: sqlite3.Connection,
     torrent: dict,
     *,
-    list_video_paths_fn,                   # callable(content_path: str) -> list[str]
+    list_video_paths_fn,  # callable(content_path: str) -> list[str]
     confidence_threshold: float,
-    build_and_start_organize_fn,           # callable(paths, qbit_hash) -> {action_id, status, error?}
+    build_and_start_organize_fn,  # callable(paths, qbit_hash) -> {action_id, status, error?}
 ) -> dict[str, Any]:
     """对一个 completed torrent 触发自动 organize flow（不阻塞，async worker）.
 
@@ -416,57 +455,79 @@ def dispatch_one(
     """
     qbit_hash = torrent.get("hash") or ""
     name = (torrent.get("name") or "").strip()
-    category = (torrent.get("category") or None)
+    category = torrent.get("category") or None
     content_path = (torrent.get("content_path") or "").strip()
     if not (qbit_hash and content_path):
-        return {"action": "skipped", "status": "skipped_unsupported",
-                "qbit_hash": qbit_hash,
-                "reason": "torrent missing hash or content_path"}
+        return {
+            "action": "skipped",
+            "status": "skipped_unsupported",
+            "qbit_hash": qbit_hash,
+            "reason": "torrent missing hash or content_path",
+        }
 
     # 1. claim pending row
     is_new = claim_pending_run(
-        conn, qbit_hash, category=category,
-        torrent_name=name, content_path=content_path,
+        conn,
+        qbit_hash,
+        category=category,
+        torrent_name=name,
+        content_path=content_path,
     )
     if not is_new:
         existing = get_run(conn, qbit_hash)
         if existing and existing["status"] != "pending":
-            return {"action": "skip_existing_run",
-                    "qbit_hash": qbit_hash,
-                    "current_status": existing["status"]}
+            return {
+                "action": "skip_existing_run",
+                "qbit_hash": qbit_hash,
+                "current_status": existing["status"],
+            }
         # status='pending'（cron 之前 row 留下 / locked 重试）→ 继续走
 
     # 2. 列视频文件
     try:
         paths = list_video_paths_fn(content_path)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         mark_skipped_at_pending(
-            conn, qbit_hash, status="skipped_unsupported",
+            conn,
+            qbit_hash,
+            status="skipped_unsupported",
             error=f"list_paths_failed: {type(e).__name__}: {e}",
         )
-        return {"action": "skipped", "status": "skipped_unsupported",
-                "qbit_hash": qbit_hash, "error": str(e)}
+        return {
+            "action": "skipped",
+            "status": "skipped_unsupported",
+            "qbit_hash": qbit_hash,
+            "error": str(e),
+        }
 
     # 3. confidence gate
     gate = evaluate_confidence_gate(conn, paths, threshold=confidence_threshold)
     if gate["status"] != "pass":
         mark_skipped_at_pending(
-            conn, qbit_hash, status=gate["status"], error=gate["reason"],
+            conn,
+            qbit_hash,
+            status=gate["status"],
+            error=gate["reason"],
         )
-        return {"action": "skipped", "status": gate["status"],
-                "qbit_hash": qbit_hash, "reason": gate["reason"],
-                "blockers": gate.get("blockers", [])}
+        return {
+            "action": "skipped",
+            "status": gate["status"],
+            "qbit_hash": qbit_hash,
+            "reason": gate["reason"],
+            "blockers": gate.get("blockers", []),
+        }
 
     # 4. build preview + start worker (caller-injected)
     try:
         result = build_and_start_organize_fn(paths, qbit_hash)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         mark_skipped_at_pending(
-            conn, qbit_hash, status="skipped_unsupported",
+            conn,
+            qbit_hash,
+            status="skipped_unsupported",
             error=f"build_or_start_raised: {type(e).__name__}: {e}",
         )
-        return {"action": "errored", "qbit_hash": qbit_hash,
-                "error": f"{type(e).__name__}: {e}"}
+        return {"action": "errored", "qbit_hash": qbit_hash, "error": f"{type(e).__name__}: {e}"}
 
     action_id = result.get("action_id")
     if result.get("status") == "locked":
@@ -475,11 +536,12 @@ def dispatch_one(
     if result.get("status") == "error":
         # callback 自己识别为永久错误（unsupported / preview build failed）
         mark_skipped_at_pending(
-            conn, qbit_hash, status="skipped_unsupported",
+            conn,
+            qbit_hash,
+            status="skipped_unsupported",
             error=f"build_or_start_failed: {result.get('error') or 'unknown'}",
         )
-        return {"action": "errored", "qbit_hash": qbit_hash,
-                "error": result.get("error")}
+        return {"action": "errored", "qbit_hash": qbit_hash, "error": result.get("error")}
 
     # 5. claim organizing（worker 已 started → pending → organizing）
     # codex r2 派生 fix（取消 r1 B1 修法）: r1 用 _mark_terminal 强标 destructive_action
@@ -492,8 +554,7 @@ def dispatch_one(
     # 幂等（dst inode 共享则 already_linked, NFO atomic create-only 不覆盖），不会污染。
     ok = mark_organizing(conn, qbit_hash, action_id=action_id)
     if not ok:
-        return {"action": "claim_lost", "qbit_hash": qbit_hash,
-                "action_id": action_id}
+        return {"action": "claim_lost", "qbit_hash": qbit_hash, "action_id": action_id}
     return {"action": "started", "qbit_hash": qbit_hash, "action_id": action_id}
 
 
@@ -517,49 +578,70 @@ def reconcile_organizing_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         qbit_hash = row["qbit_hash"]
         action_id = row["action_id"]
         if not action_id:
-            mark_terminal(conn, qbit_hash, status="failed",
-                          error="organizing row has no action_id (corrupted state)")
-            results.append({"qbit_hash": qbit_hash, "synced_to": "failed",
-                            "reason": "missing_action_id"})
+            mark_terminal(
+                conn,
+                qbit_hash,
+                status="failed",
+                error="organizing row has no action_id (corrupted state)",
+            )
+            results.append(
+                {"qbit_hash": qbit_hash, "synced_to": "failed", "reason": "missing_action_id"}
+            )
             continue
         action_row = conn.execute(
             "SELECT status, result_json, error FROM destructive_actions WHERE action_id=?",
             (action_id,),
         ).fetchone()
         if action_row is None:
-            mark_terminal(conn, qbit_hash, status="failed",
-                          action_id=action_id,
-                          error=f"destructive_action row missing: {action_id}")
-            results.append({"qbit_hash": qbit_hash, "synced_to": "failed",
-                            "reason": "action_row_missing"})
+            mark_terminal(
+                conn,
+                qbit_hash,
+                status="failed",
+                action_id=action_id,
+                error=f"destructive_action row missing: {action_id}",
+            )
+            results.append(
+                {"qbit_hash": qbit_hash, "synced_to": "failed", "reason": "action_row_missing"}
+            )
             continue
         a_status = action_row["status"]
         if a_status == "running":
             continue  # 还在跑，下个周期再 check
         # terminal: succeeded / failed / needs_manual_recovery
         try:
-            result_data = (
-                json.loads(action_row["result_json"]) if action_row["result_json"] else {}
-            )
+            result_data = json.loads(action_row["result_json"]) if action_row["result_json"] else {}
         except json.JSONDecodeError:
             result_data = {}
         if a_status == "succeeded":
             mark_terminal(
-                conn, qbit_hash, status="succeeded", action_id=action_id,
+                conn,
+                qbit_hash,
+                status="succeeded",
+                action_id=action_id,
                 files_succeeded=result_data.get("total_succeeded", 0),
                 files_already_linked=result_data.get("total_already_linked", 0),
                 files_failed=result_data.get("total_failed", 0),
             )
-            results.append({"qbit_hash": qbit_hash, "synced_to": "succeeded",
-                            "action_id": action_id})
+            results.append(
+                {"qbit_hash": qbit_hash, "synced_to": "succeeded", "action_id": action_id}
+            )
         else:
             mark_terminal(
-                conn, qbit_hash, status="failed", action_id=action_id,
+                conn,
+                qbit_hash,
+                status="failed",
+                action_id=action_id,
                 files_succeeded=result_data.get("total_succeeded"),
                 files_already_linked=result_data.get("total_already_linked"),
                 files_failed=result_data.get("total_failed"),
                 error=action_row["error"] or f"action_status={a_status}",
             )
-            results.append({"qbit_hash": qbit_hash, "synced_to": "failed",
-                            "action_id": action_id, "action_status": a_status})
+            results.append(
+                {
+                    "qbit_hash": qbit_hash,
+                    "synced_to": "failed",
+                    "action_id": action_id,
+                    "action_status": a_status,
+                }
+            )
     return results

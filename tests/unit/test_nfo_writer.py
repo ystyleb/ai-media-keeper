@@ -222,6 +222,7 @@ def test_build_nfo_unknown_media_type_raises():
 
 def test_round_trip_with_emby_parser():
     """生成的 NFO 应该能被 app._parse_emby_nfo 解析回所有关键字段。"""
+
     # 在测试里 inline 一份 _parse_emby_nfo（避免 import app.py 触发 Flask + DB 初始化）
     def parse_emby(text: str) -> dict | None:
         stripped = text.lstrip("﻿").strip()

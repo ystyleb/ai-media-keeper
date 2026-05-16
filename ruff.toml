@@ -1,0 +1,65 @@
+# NASVault ruff config — 务实而非教条。
+# 不开 strict (D / N / PT 等) — 项目中文 docstring + 已有 naming 约定，硬上 ruff 全规则会
+# 产生大量误报。focus 在 lint 真实 bug + 一致格式。
+
+line-length = 100
+target-version = "py311"
+
+exclude = [
+    ".venv",
+    ".claude",
+    "config",
+    "*.db",
+    "tests/fixtures/*.json",
+    "build",
+    "dist",
+]
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort (import order)
+    "B",   # flake8-bugbear (likely bugs)
+    "UP",  # pyupgrade (modern Python)
+    "RUF", # ruff-specific
+]
+
+# 显式忽略已知不修的：
+ignore = [
+    "E501",  # line too long — black/ruff format 已对齐 100，剩下的多是 user-facing 中文 message
+    "B008",  # function-call-in-default-argument — Flask app 模式常用 (logger.bind, etc.)
+    "B905",  # zip strict — 项目内多用一致长度 iterable，加 strict=False 是 noise
+    "RUF001", # ambiguous-unicode-character (中文 docstring 太多)
+    "RUF002", # 同上 — docstring
+    "RUF003", # 同上 — comments
+    "RUF012", # mutable-default — Phase 3 dataclass 暂保持
+    "RUF015", # prefer-next-over-single-element-slice — 个别 row[0] 比 next() 更可读
+    "RUF034", # useless-if-else — false-positive 在 ternary 表达式
+    "UP006",  # builtin-non-class — 历史代码 List/Dict 还有，逐步迁移
+    "UP035",  # deprecated-import — 同上
+]
+
+[lint.per-file-ignores]
+"tests/**/*.py" = [
+    "F841",  # unused-variable (测试常 destructure)
+    "B011",  # assert False (测试中常用)
+    "RUF059", # unpacked-variable-never-used (测试 destructure 常 _, total = func() 形式)
+    "E402",  # 测试有时改 sys.path 后再 import
+    "E731",  # 测试用 lambda 作 sentinel mock 更紧凑
+]
+"app.py" = [
+    "F401",  # unused-import (Flask app.py 有些 import 是间接生效)
+    "E402",  # 装饰器 / @require_token 在某些 routes 上下文里 import 顺序合理
+    "RUF059", # ssh_exec 返 (code, stdout, stderr) 三元组，stderr 经常不用但 destructure 仍要写
+    "E731",  # lambda 在 def _xxx() 长 helper 不合算的场景
+]
+"services/**/*.py" = [
+    "RUF059", # 同 app.py 的 ssh_exec / 元组 destructure 习惯
+]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = false

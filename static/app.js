@@ -84,6 +84,7 @@ async function loadProvidersStatus(force = false) {
         const tmdb = p.tmdb || {};
         const deepseek = p.deepseek || {};
         const emby = p.emby || {};
+        const qbit = p.qbit || {};
 
         const aiState = _mergeState([tmdb.state, deepseek.state]);
         const aiTip = `TMDB: ${tmdb.state || "?"} (${tmdb.message || ""})\n`
@@ -92,6 +93,9 @@ async function loadProvidersStatus(force = false) {
 
         _setDotState("tb-emby", emby.state || "unknown",
             `Emby: ${emby.state || "?"} (${emby.message || ""})`);
+
+        _setDotState("tb-qbit", qbit.state || "unknown",
+            `qBit: ${qbit.state || "?"} (${qbit.message || ""})`);
 
         renderProviderBanner(p);
     } catch (err) {
@@ -103,7 +107,7 @@ async function loadProvidersStatus(force = false) {
 // 仅在 auth_failed / unreachable 时显示 banner；用户 dismiss 后本次会话不再显示
 let _providerBannerDismissed = false;
 
-const _PROVIDER_LABELS = { tmdb: "TMDB", deepseek: "DeepSeek", emby: "Emby" };
+const _PROVIDER_LABELS = { tmdb: "TMDB", deepseek: "DeepSeek", emby: "Emby", qbit: "qBit" };
 const _STATE_LABELS = { auth_failed: "key 失效", unreachable: "无法连接" };
 
 function renderProviderBanner(providers) {
@@ -116,7 +120,7 @@ function renderProviderBanner(providers) {
     }
     const bad = [];
     let severe = false;
-    for (const key of ["tmdb", "deepseek", "emby"]) {
+    for (const key of ["tmdb", "deepseek", "emby", "qbit"]) {
         const p = providers[key] || {};
         if (p.state === "auth_failed" || p.state === "unreachable") {
             bad.push(`${_PROVIDER_LABELS[key]} ${_STATE_LABELS[p.state]}`);

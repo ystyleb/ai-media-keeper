@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 
@@ -11,7 +10,6 @@ import pytest
 from services import destructive_action, metadata_cache
 from services.identify import FilenameParse, IdentifyResult
 from services.metadata.base import MediaCandidate, MediaDetails
-
 
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "db" / "schema.sql"
 
@@ -23,6 +21,7 @@ def conn(tmp_path):
     destructive_action.init_schema(c, SCHEMA_PATH)
     # Phase 3 migration (adds 10 media_files columns + new tables)
     from db import migrations
+
     migrations.phase3_migrate(c)
     yield c
     c.close()
@@ -30,11 +29,21 @@ def conn(tmp_path):
 
 def _make_parse(**overrides) -> FilenameParse:
     defaults = dict(
-        raw_name="Show.S06E02.mkv", title="Show", year=2022,
-        season=6, episode=2, episode_title="Ep Name",
-        media_type="episode", resolution="1080p",
-        source="WEB-DL", release_group="RG",
-        codec=None, color_depth=None, hdr_profiles=[], container=None, audio_codec=None,
+        raw_name="Show.S06E02.mkv",
+        title="Show",
+        year=2022,
+        season=6,
+        episode=2,
+        episode_title="Ep Name",
+        media_type="episode",
+        resolution="1080p",
+        source="WEB-DL",
+        release_group="RG",
+        codec=None,
+        color_depth=None,
+        hdr_profiles=[],
+        container=None,
+        audio_codec=None,
         raw={},
     )
     defaults.update(overrides)
@@ -45,11 +54,14 @@ def _make_candidate(**overrides) -> MediaCandidate:
     defaults = dict(
         id="tmdb:tv:60625",
         external_ids={"tmdb_id": "60625", "imdb_id": "tt2861424"},
-        title="瑞克和莫蒂", original_title="Rick and Morty",
-        year=2013, media_type="tv",
+        title="瑞克和莫蒂",
+        original_title="Rick and Morty",
+        year=2013,
+        media_type="tv",
         poster_url="https://image.tmdb.org/abc.jpg",
         overview="A misfit family across the multiverse.",
-        vote_average=8.7, raw={},
+        vote_average=8.7,
+        raw={},
     )
     defaults.update(overrides)
     return MediaCandidate(**defaults)
@@ -74,12 +86,14 @@ def _make_result(top: MediaCandidate | None = None, **overrides) -> IdentifyResu
 def test_upsert_then_get_hit(conn):
     res = _make_result(top=_make_candidate())
     metadata_cache.upsert_identification(
-        conn, path="/share/a.mkv",
+        conn,
+        path="/share/a.mkv",
         stat={"inode": 123, "size_bytes": 1000, "mtime": 2000},
         identify_result=res,
     )
-    cached, status = metadata_cache.get_by_path(conn, "/share/a.mkv",
-                                                 current_mtime=2000, current_inode=123)
+    cached, status = metadata_cache.get_by_path(
+        conn, "/share/a.mkv", current_mtime=2000, current_inode=123
+    )
     assert status == "hit"
     assert cached is not None
     assert cached.tmdb_id == "60625"
@@ -102,12 +116,14 @@ def test_get_miss_for_unknown_path(conn):
 def test_stale_on_mtime_change(conn):
     res = _make_result(top=_make_candidate())
     metadata_cache.upsert_identification(
-        conn, path="/share/b.mkv",
+        conn,
+        path="/share/b.mkv",
         stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
         identify_result=res,
     )
-    cached, status = metadata_cache.get_by_path(conn, "/share/b.mkv",
-                                                 current_mtime=9999, current_inode=1)
+    cached, status = metadata_cache.get_by_path(
+        conn, "/share/b.mkv", current_mtime=9999, current_inode=1
+    )
     assert status == "stale"
     assert cached is not None
     assert cached.mtime == 1000  # cached value is still the old mtime
@@ -116,19 +132,22 @@ def test_stale_on_mtime_change(conn):
 def test_stale_on_inode_change(conn):
     res = _make_result(top=_make_candidate())
     metadata_cache.upsert_identification(
-        conn, path="/share/c.mkv",
+        conn,
+        path="/share/c.mkv",
         stat={"inode": 5, "size_bytes": 100, "mtime": 1000},
         identify_result=res,
     )
-    cached, status = metadata_cache.get_by_path(conn, "/share/c.mkv",
-                                                 current_mtime=1000, current_inode=99)
+    cached, status = metadata_cache.get_by_path(
+        conn, "/share/c.mkv", current_mtime=1000, current_inode=99
+    )
     assert status == "stale"
 
 
 def test_skip_stale_check_when_current_not_provided(conn):
     res = _make_result(top=_make_candidate())
     metadata_cache.upsert_identification(
-        conn, path="/share/d.mkv",
+        conn,
+        path="/share/d.mkv",
         stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
         identify_result=res,
     )
@@ -142,20 +161,25 @@ def test_skip_stale_check_when_current_not_provided(conn):
 def test_upsert_idempotent_same_path(conn):
     res1 = _make_result(top=_make_candidate())
     metadata_cache.upsert_identification(
-        conn, path="/share/e.mkv",
+        conn,
+        path="/share/e.mkv",
         stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
         identify_result=res1,
     )
     res2 = _make_result(top=_make_candidate(title="Updated", original_title="Updated Orig"))
     metadata_cache.upsert_identification(
-        conn, path="/share/e.mkv",
+        conn,
+        path="/share/e.mkv",
         stat={"inode": 2, "size_bytes": 200, "mtime": 2000},
         identify_result=res2,
     )
-    rows = conn.execute("SELECT COUNT(*) FROM media_files WHERE path = ?", ("/share/e.mkv",)).fetchone()
+    rows = conn.execute(
+        "SELECT COUNT(*) FROM media_files WHERE path = ?", ("/share/e.mkv",)
+    ).fetchone()
     assert rows[0] == 1
-    cached, status = metadata_cache.get_by_path(conn, "/share/e.mkv",
-                                                 current_mtime=2000, current_inode=2)
+    cached, status = metadata_cache.get_by_path(
+        conn, "/share/e.mkv", current_mtime=2000, current_inode=2
+    )
     assert status == "hit"
     assert cached.title == "Updated"
     assert cached.original_title == "Updated Orig"
@@ -169,12 +193,14 @@ def test_upsert_idempotent_same_path(conn):
 def test_needs_review_persists(conn):
     res = _make_result(top=None)  # 没 top_pick → status='needs_review'
     metadata_cache.upsert_identification(
-        conn, path="/share/f.mkv",
+        conn,
+        path="/share/f.mkv",
         stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
         identify_result=res,
     )
-    cached, _ = metadata_cache.get_by_path(conn, "/share/f.mkv",
-                                            current_mtime=1000, current_inode=1)
+    cached, _ = metadata_cache.get_by_path(
+        conn, "/share/f.mkv", current_mtime=1000, current_inode=1
+    )
     assert cached is not None
     assert cached.metadata_status == "needs_review"
     assert cached.tmdb_id is None
@@ -189,12 +215,14 @@ def test_needs_review_persists(conn):
 def test_upsert_details_patches_only_provided(conn):
     res = _make_result(top=_make_candidate())
     metadata_cache.upsert_identification(
-        conn, path="/share/g.mkv",
+        conn,
+        path="/share/g.mkv",
         stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
         identify_result=res,
     )
     metadata_cache.upsert_details(
-        conn, path="/share/g.mkv",
+        conn,
+        path="/share/g.mkv",
         genres=["Animation", "Comedy"],
         cast=["Justin Roiland"],
         runtime_minutes=22,
@@ -210,7 +238,8 @@ def test_upsert_details_patches_only_provided(conn):
 def test_upsert_details_noop_when_empty(conn):
     res = _make_result(top=_make_candidate())
     metadata_cache.upsert_identification(
-        conn, path="/share/h.mkv",
+        conn,
+        path="/share/h.mkv",
         stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
         identify_result=res,
     )
@@ -226,7 +255,8 @@ def test_upsert_details_noop_when_empty(conn):
 def test_delete_by_path(conn):
     res = _make_result(top=_make_candidate())
     metadata_cache.upsert_identification(
-        conn, path="/share/i.mkv",
+        conn,
+        path="/share/i.mkv",
         stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
         identify_result=res,
     )
@@ -259,29 +289,36 @@ def _seed_library(conn, items):
         )
         res = _make_result(top=c)
         metadata_cache.upsert_identification(
-            conn, path=it["path"],
+            conn,
+            path=it["path"],
             stat={"inode": 1, "size_bytes": 100, "mtime": it.get("mtime", 1000)},
             identify_result=res,
         )
 
 
 def test_query_library_filters_media_type(conn):
-    _seed_library(conn, [
-        {"path": "/a.mkv", "tmdb_id": "1", "media_type": "movie", "year": 2020},
-        {"path": "/b.mkv", "tmdb_id": "2", "media_type": "tv", "year": 2021},
-        {"path": "/c.mkv", "tmdb_id": "3", "media_type": "movie", "year": 2022},
-    ])
+    _seed_library(
+        conn,
+        [
+            {"path": "/a.mkv", "tmdb_id": "1", "media_type": "movie", "year": 2020},
+            {"path": "/b.mkv", "tmdb_id": "2", "media_type": "tv", "year": 2021},
+            {"path": "/c.mkv", "tmdb_id": "3", "media_type": "movie", "year": 2022},
+        ],
+    )
     items, total = metadata_cache.query_library(conn, media_type="movie")
     assert total == 2
     assert all(i.media_type == "movie" for i in items)
 
 
 def test_query_library_filters_year_range(conn):
-    _seed_library(conn, [
-        {"path": "/old.mkv", "tmdb_id": "1", "year": 1995},
-        {"path": "/mid.mkv", "tmdb_id": "2", "year": 2010},
-        {"path": "/new.mkv", "tmdb_id": "3", "year": 2022},
-    ])
+    _seed_library(
+        conn,
+        [
+            {"path": "/old.mkv", "tmdb_id": "1", "year": 1995},
+            {"path": "/mid.mkv", "tmdb_id": "2", "year": 2010},
+            {"path": "/new.mkv", "tmdb_id": "3", "year": 2022},
+        ],
+    )
     items, total = metadata_cache.query_library(conn, year_from=2000, year_to=2015)
     assert total == 1
     assert items[0].year == 2010
@@ -289,14 +326,24 @@ def test_query_library_filters_year_range(conn):
 
 def test_query_library_query_matches_title_and_original(conn):
     """模糊匹配应该 title (zh-CN) 和 original_title (en) 都命中。"""
-    _seed_library(conn, [
-        {"path": "/a.mkv", "tmdb_id": "1", "title": "瑞克和莫蒂",
-         "original_title": "Rick and Morty"},
-        {"path": "/b.mkv", "tmdb_id": "2", "title": "星际穿越",
-         "original_title": "Interstellar"},
-        {"path": "/c.mkv", "tmdb_id": "3", "title": "Other",
-         "original_title": "Other"},
-    ])
+    _seed_library(
+        conn,
+        [
+            {
+                "path": "/a.mkv",
+                "tmdb_id": "1",
+                "title": "瑞克和莫蒂",
+                "original_title": "Rick and Morty",
+            },
+            {
+                "path": "/b.mkv",
+                "tmdb_id": "2",
+                "title": "星际穿越",
+                "original_title": "Interstellar",
+            },
+            {"path": "/c.mkv", "tmdb_id": "3", "title": "Other", "original_title": "Other"},
+        ],
+    )
     # 中文搜
     items, total = metadata_cache.query_library(conn, query="瑞克")
     assert total == 1 and items[0].tmdb_id == "1"
@@ -309,30 +356,35 @@ def test_query_library_query_matches_title_and_original(conn):
 
 
 def test_query_library_sort_year_desc(conn):
-    _seed_library(conn, [
-        {"path": "/a.mkv", "tmdb_id": "1", "year": 1995},
-        {"path": "/b.mkv", "tmdb_id": "2", "year": 2022},
-        {"path": "/c.mkv", "tmdb_id": "3", "year": 2010},
-    ])
+    _seed_library(
+        conn,
+        [
+            {"path": "/a.mkv", "tmdb_id": "1", "year": 1995},
+            {"path": "/b.mkv", "tmdb_id": "2", "year": 2022},
+            {"path": "/c.mkv", "tmdb_id": "3", "year": 2010},
+        ],
+    )
     items, _ = metadata_cache.query_library(conn, sort="year_desc")
     assert [i.year for i in items] == [2022, 2010, 1995]
 
 
 def test_query_library_sort_vote_desc(conn):
-    _seed_library(conn, [
-        {"path": "/a.mkv", "tmdb_id": "1", "vote_average": 6.5},
-        {"path": "/b.mkv", "tmdb_id": "2", "vote_average": 9.0},
-        {"path": "/c.mkv", "tmdb_id": "3", "vote_average": 7.5},
-    ])
+    _seed_library(
+        conn,
+        [
+            {"path": "/a.mkv", "tmdb_id": "1", "vote_average": 6.5},
+            {"path": "/b.mkv", "tmdb_id": "2", "vote_average": 9.0},
+            {"path": "/c.mkv", "tmdb_id": "3", "vote_average": 7.5},
+        ],
+    )
     items, _ = metadata_cache.query_library(conn, sort="vote_desc")
     assert [i.vote_average for i in items] == [9.0, 7.5, 6.5]
 
 
 def test_query_library_limit_offset(conn):
-    _seed_library(conn, [
-        {"path": f"/{i}.mkv", "tmdb_id": str(i), "year": 2000 + i}
-        for i in range(10)
-    ])
+    _seed_library(
+        conn, [{"path": f"/{i}.mkv", "tmdb_id": str(i), "year": 2000 + i} for i in range(10)]
+    )
     items, total = metadata_cache.query_library(conn, sort="year_desc", limit=3, offset=2)
     assert total == 10
     assert len(items) == 3
@@ -344,7 +396,8 @@ def test_query_library_excludes_needs_review(conn):
     # 一个 ok + 一个 needs_review
     _seed_library(conn, [{"path": "/a.mkv", "tmdb_id": "1"}])
     metadata_cache.upsert_identification(
-        conn, path="/b.mkv",
+        conn,
+        path="/b.mkv",
         stat={"inode": 2, "size_bytes": 100, "mtime": 1000},
         identify_result=_make_result(top=None),  # needs_review
     )
@@ -356,9 +409,17 @@ def test_query_library_excludes_needs_review(conn):
 def test_query_library_excludes_extras_by_default(conn):
     """media_type='extra' 默认从库视图过滤。"""
     # 用 raw upsert 模拟扫描时检测到的 extra（直接 insert）
-    _seed_library(conn, [
-        {"path": "/Movies/Foo/Foo.2020.mkv", "tmdb_id": "1", "media_type": "movie", "year": 2020},
-    ])
+    _seed_library(
+        conn,
+        [
+            {
+                "path": "/Movies/Foo/Foo.2020.mkv",
+                "tmdb_id": "1",
+                "media_type": "movie",
+                "year": 2020,
+            },
+        ],
+    )
     # 手动 insert 一个 extra
     conn.execute("""
         INSERT INTO media_files (path, inode, size_bytes, mtime, media_type, title, year,
@@ -379,9 +440,17 @@ def test_query_library_excludes_extras_by_default(conn):
 
 def test_list_extras_in_dir_returns_same_dir_only(conn):
     """同目录的 extra 返回，子目录或别目录的不返回。"""
-    _seed_library(conn, [
-        {"path": "/Movies/Foo/Foo.2020.mkv", "tmdb_id": "1", "media_type": "movie", "year": 2020},
-    ])
+    _seed_library(
+        conn,
+        [
+            {
+                "path": "/Movies/Foo/Foo.2020.mkv",
+                "tmdb_id": "1",
+                "media_type": "movie",
+                "year": 2020,
+            },
+        ],
+    )
     conn.executemany(
         """INSERT INTO media_files (path, inode, size_bytes, mtime, media_type, title,
                                      metadata_status, metadata_source, metadata_provider,
@@ -414,12 +483,39 @@ def test_list_extras_in_dir_empty_returns_empty(conn):
 
 
 def test_library_stats_basic_counts(conn):
-    _seed_library(conn, [
-        {"path": "/a.mkv", "tmdb_id": "1", "media_type": "movie", "year": 1995, "vote_average": 8.5},
-        {"path": "/b.mkv", "tmdb_id": "2", "media_type": "tv", "year": 2010, "vote_average": 7.5},
-        {"path": "/c.mkv", "tmdb_id": "3", "media_type": "movie", "year": 1998, "vote_average": 6.5},
-        {"path": "/d.mkv", "tmdb_id": "4", "media_type": "movie", "year": 2020, "vote_average": 9.2},
-    ])
+    _seed_library(
+        conn,
+        [
+            {
+                "path": "/a.mkv",
+                "tmdb_id": "1",
+                "media_type": "movie",
+                "year": 1995,
+                "vote_average": 8.5,
+            },
+            {
+                "path": "/b.mkv",
+                "tmdb_id": "2",
+                "media_type": "tv",
+                "year": 2010,
+                "vote_average": 7.5,
+            },
+            {
+                "path": "/c.mkv",
+                "tmdb_id": "3",
+                "media_type": "movie",
+                "year": 1998,
+                "vote_average": 6.5,
+            },
+            {
+                "path": "/d.mkv",
+                "tmdb_id": "4",
+                "media_type": "movie",
+                "year": 2020,
+                "vote_average": 9.2,
+            },
+        ],
+    )
     stats = metadata_cache.get_library_stats(conn)
     assert stats["total"] == 4
     assert stats["by_media_type"] == {"movie": 3, "tv": 1}
@@ -435,7 +531,8 @@ def test_library_stats_ignores_needs_review(conn):
     """stats 只算 ok 的，needs_review 不计入。"""
     _seed_library(conn, [{"path": "/a.mkv", "tmdb_id": "1"}])
     metadata_cache.upsert_identification(
-        conn, path="/b.mkv",
+        conn,
+        path="/b.mkv",
         stat={"inode": 2, "size_bytes": 100, "mtime": 1000},
         identify_result=_make_result(top=None),
     )
@@ -450,8 +547,10 @@ def _make_movie_candidate(tmdb_id: str = "238") -> MediaCandidate:
     return _make_candidate(
         id=f"tmdb:movie:{tmdb_id}",
         external_ids={"tmdb_id": tmdb_id, "imdb_id": "tt0068646"},
-        title="教父", original_title="The Godfather",
-        year=1972, media_type="movie",
+        title="教父",
+        original_title="The Godfather",
+        year=1972,
+        media_type="movie",
     )
 
 
@@ -461,7 +560,8 @@ def test_upsert_movie_writes_tmdb_movie_id_not_series(conn):
         top=_make_movie_candidate("238"),
     )
     metadata_cache.upsert_identification(
-        conn, path="/share/godfather.mkv",
+        conn,
+        path="/share/godfather.mkv",
         stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
         identify_result=res,
     )
@@ -470,15 +570,16 @@ def test_upsert_movie_writes_tmdb_movie_id_not_series(conn):
         ("/share/godfather.mkv",),
     ).fetchone()
     assert row["tmdb_movie_id"] == "238"
-    assert row["tmdb_series_id"] is None        # 互斥
-    assert row["tmdb_episode_id"] is None       # episode_id 仅 watched_items 写
-    assert row["tmdb_id"] == "238"              # 老字段保留兼容
+    assert row["tmdb_series_id"] is None  # 互斥
+    assert row["tmdb_episode_id"] is None  # episode_id 仅 watched_items 写
+    assert row["tmdb_id"] == "238"  # 老字段保留兼容
 
 
 def test_upsert_tv_writes_tmdb_series_id_not_movie(conn):
     res = _make_result(top=_make_candidate())  # default candidate is tv (60625)
     metadata_cache.upsert_identification(
-        conn, path="/share/rick.mkv",
+        conn,
+        path="/share/rick.mkv",
         stat={"inode": 2, "size_bytes": 100, "mtime": 1000},
         identify_result=res,
     )
@@ -493,11 +594,11 @@ def test_upsert_tv_writes_tmdb_series_id_not_movie(conn):
 
 def test_upsert_companion_extras_no_tmdb_ids(conn):
     """Extras 路径 → 所有 tmdb_*_id 都该是 NULL（互斥 + 不参与 join）。"""
-    parse = _make_parse(media_type="extra", season=None, episode=None,
-                         hdr_profiles=[], codec=None)
+    parse = _make_parse(media_type="extra", season=None, episode=None, hdr_profiles=[], codec=None)
     res = _make_result(parse=parse, top=None)
     metadata_cache.upsert_identification(
-        conn, path="/share/Movie/Extras.mkv",
+        conn,
+        path="/share/Movie/Extras.mkv",
         stat={"inode": 3, "size_bytes": 100, "mtime": 1000},
         identify_result=res,
     )
@@ -515,14 +616,19 @@ def test_upsert_companion_extras_no_tmdb_ids(conn):
 def test_upsert_writes_parse_quality_fields(conn):
     """parse_codec / parse_container / parse_color_depth / parse_audio_codec 应入库。"""
     parse = _make_parse(
-        media_type="movie", season=None, episode=None,
-        codec="H.265", color_depth="10-bit",
-        container="mkv", audio_codec="Dolby TrueHD",
+        media_type="movie",
+        season=None,
+        episode=None,
+        codec="H.265",
+        color_depth="10-bit",
+        container="mkv",
+        audio_codec="Dolby TrueHD",
         hdr_profiles=["DolbyVision", "HDR10"],
     )
     res = _make_result(parse=parse, top=_make_movie_candidate("238"))
     metadata_cache.upsert_identification(
-        conn, path="/share/q.mkv",
+        conn,
+        path="/share/q.mkv",
         stat={"inode": 4, "size_bytes": 100, "mtime": 1000},
         identify_result=res,
     )
@@ -539,18 +645,21 @@ def test_upsert_writes_parse_quality_fields(conn):
 
 def test_upsert_writes_hdr_profiles_to_subtable(conn):
     parse = _make_parse(
-        media_type="movie", season=None, episode=None,
+        media_type="movie",
+        season=None,
+        episode=None,
         hdr_profiles=["DolbyVision", "HDR10"],
     )
     res = _make_result(parse=parse, top=_make_movie_candidate("238"))
     metadata_cache.upsert_identification(
-        conn, path="/share/hdr.mkv",
+        conn,
+        path="/share/hdr.mkv",
         stat={"inode": 5, "size_bytes": 100, "mtime": 1000},
         identify_result=res,
     )
-    fid = conn.execute(
-        "SELECT id FROM media_files WHERE path=?", ("/share/hdr.mkv",)
-    ).fetchone()["id"]
+    fid = conn.execute("SELECT id FROM media_files WHERE path=?", ("/share/hdr.mkv",)).fetchone()[
+        "id"
+    ]
     profiles = [
         r["profile"]
         for r in conn.execute(
@@ -564,24 +673,26 @@ def test_upsert_writes_hdr_profiles_to_subtable(conn):
 def test_upsert_clears_stale_hdr_profiles_on_reidentify(conn):
     """Re-identify 后 HDR 子表先 DELETE 再 INSERT；旧 profile 不残留。"""
     # 第一次：DolbyVision + HDR10
-    parse1 = _make_parse(media_type="movie", season=None, episode=None,
-                          hdr_profiles=["DolbyVision", "HDR10"])
+    parse1 = _make_parse(
+        media_type="movie", season=None, episode=None, hdr_profiles=["DolbyVision", "HDR10"]
+    )
     metadata_cache.upsert_identification(
-        conn, path="/share/r.mkv",
+        conn,
+        path="/share/r.mkv",
         stat={"inode": 6, "size_bytes": 100, "mtime": 1000},
         identify_result=_make_result(parse=parse1, top=_make_movie_candidate("238")),
     )
     # 第二次：重剪版只 HDR10
-    parse2 = _make_parse(media_type="movie", season=None, episode=None,
-                          hdr_profiles=["HDR10"])
+    parse2 = _make_parse(media_type="movie", season=None, episode=None, hdr_profiles=["HDR10"])
     metadata_cache.upsert_identification(
-        conn, path="/share/r.mkv",
+        conn,
+        path="/share/r.mkv",
         stat={"inode": 6, "size_bytes": 200, "mtime": 2000},
         identify_result=_make_result(parse=parse2, top=_make_movie_candidate("238")),
     )
-    fid = conn.execute(
-        "SELECT id FROM media_files WHERE path=?", ("/share/r.mkv",)
-    ).fetchone()["id"]
+    fid = conn.execute("SELECT id FROM media_files WHERE path=?", ("/share/r.mkv",)).fetchone()[
+        "id"
+    ]
     profiles = sorted(
         r["profile"]
         for r in conn.execute(
@@ -594,7 +705,8 @@ def test_upsert_clears_stale_hdr_profiles_on_reidentify(conn):
 def test_upsert_empty_hdr_profiles_results_in_no_subtable_rows(conn):
     parse = _make_parse(media_type="movie", season=None, episode=None, hdr_profiles=[])
     metadata_cache.upsert_identification(
-        conn, path="/share/sdr.mkv",
+        conn,
+        path="/share/sdr.mkv",
         stat={"inode": 7, "size_bytes": 100, "mtime": 1000},
         identify_result=_make_result(parse=parse, top=_make_movie_candidate("238")),
     )
@@ -624,20 +736,21 @@ def test_get_many_all_miss_returns_none_for_each(conn):
     """没 seed 任何 row → 三个 path 都 (None, miss)。"""
     result = metadata_cache.get_many_by_path(conn, ["/a", "/b", "/c"])
     assert len(result) == 3
-    assert all(cached is None and status == "miss"
-               for cached, status in result.values())
+    assert all(cached is None and status == "miss" for cached, status in result.values())
 
 
 def test_get_many_mixed_hit_and_miss(conn):
     """seed 2 个 path，查 3 个 → 2 hit + 1 miss。"""
     res = _make_result(top=_make_candidate())
     metadata_cache.upsert_identification(
-        conn, path="/share/movie.mkv",
+        conn,
+        path="/share/movie.mkv",
         stat={"inode": 100, "size_bytes": 1000, "mtime": 2000},
         identify_result=res,
     )
     metadata_cache.upsert_identification(
-        conn, path="/share/tv.s01e01.mkv",
+        conn,
+        path="/share/tv.s01e01.mkv",
         stat={"inode": 200, "size_bytes": 2000, "mtime": 3000},
         identify_result=res,
     )
@@ -655,14 +768,13 @@ def test_get_many_detects_stale_on_mtime_change(conn):
     """current_stats 不一致 → 标 stale。"""
     res = _make_result(top=_make_candidate())
     metadata_cache.upsert_identification(
-        conn, path="/share/a.mkv",
+        conn,
+        path="/share/a.mkv",
         stat={"inode": 100, "size_bytes": 1000, "mtime": 2000},
         identify_result=res,
     )
     current = {"/share/a.mkv": {"inode": 100, "mtime": 9999}}  # mtime 变了
-    result = metadata_cache.get_many_by_path(
-        conn, ["/share/a.mkv"], current_stats=current
-    )
+    result = metadata_cache.get_many_by_path(conn, ["/share/a.mkv"], current_stats=current)
     cached, status = result["/share/a.mkv"]
     assert status == "stale"
     assert cached is not None  # stale 仍返回 cached（caller 可判旧值）
@@ -671,14 +783,13 @@ def test_get_many_detects_stale_on_mtime_change(conn):
 def test_get_many_detects_stale_on_inode_change(conn):
     res = _make_result(top=_make_candidate())
     metadata_cache.upsert_identification(
-        conn, path="/share/a.mkv",
+        conn,
+        path="/share/a.mkv",
         stat={"inode": 100, "size_bytes": 1000, "mtime": 2000},
         identify_result=res,
     )
     current = {"/share/a.mkv": {"inode": 9999, "mtime": 2000}}  # inode 变了
-    result = metadata_cache.get_many_by_path(
-        conn, ["/share/a.mkv"], current_stats=current
-    )
+    result = metadata_cache.get_many_by_path(conn, ["/share/a.mkv"], current_stats=current)
     assert result["/share/a.mkv"][1] == "stale"
 
 
@@ -687,12 +798,15 @@ def test_get_many_skips_stale_check_when_path_not_in_current_stats(conn):
     （场景：src 文件已被删，SSH stat 返 exists=False，不进 current_stats）"""
     res = _make_result(top=_make_candidate())
     metadata_cache.upsert_identification(
-        conn, path="/share/a.mkv",
+        conn,
+        path="/share/a.mkv",
         stat={"inode": 100, "size_bytes": 1000, "mtime": 2000},
         identify_result=res,
     )
     result = metadata_cache.get_many_by_path(
-        conn, ["/share/a.mkv"], current_stats={},  # 空 current_stats
+        conn,
+        ["/share/a.mkv"],
+        current_stats={},  # 空 current_stats
     )
     assert result["/share/a.mkv"][1] == "hit"
 
@@ -702,12 +816,15 @@ def test_get_many_handles_more_than_chunk_size():
 
     SQLite SQLITE_MAX_VARIABLE_NUMBER 默认 999；用 750 path 强制走 2 chunk。
     """
-    from services import destructive_action as da
     import tempfile
+
+    from services import destructive_action as da
+
     with tempfile.NamedTemporaryFile(suffix=".db") as f:
         c = da.open_connection(f.name)
         da.init_schema(c, SCHEMA_PATH)
         from db import migrations
+
         migrations.phase3_migrate(c)
         paths = [f"/share/file_{i:04d}.mkv" for i in range(750)]
         result = metadata_cache.get_many_by_path(c, paths)
@@ -729,12 +846,17 @@ class _FakeProvider:
         self._none = returns_none
         self.calls: list[dict] = []
 
-    def lookup_by_id(self, external_id, *, id_type="tmdb_id",
-                     media_type="movie", season=None, episode=None):
-        self.calls.append({
-            "external_id": external_id, "media_type": media_type,
-            "season": season, "episode": episode,
-        })
+    def lookup_by_id(
+        self, external_id, *, id_type="tmdb_id", media_type="movie", season=None, episode=None
+    ):
+        self.calls.append(
+            {
+                "external_id": external_id,
+                "media_type": media_type,
+                "season": season,
+                "episode": episode,
+            }
+        )
         if self._raise:
             raise self._raise
         if self._none:
@@ -759,7 +881,8 @@ def _seed_tv_episode(conn, path="/share/show.S01E01.mkv"):
     """创建一条 tv episode cache row，episode_* 字段都是 None。"""
     res = _make_result(top=_make_candidate())
     metadata_cache.upsert_identification(
-        conn, path=path,
+        conn,
+        path=path,
         stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
         identify_result=res,
     )
@@ -776,14 +899,21 @@ def test_ensure_episode_details_provider_none_returns_original(conn):
 
 def test_ensure_episode_details_skips_movie(conn):
     """movie cached 不该触发 lookup（episode 字段不适用）。"""
-    movie_cand = _make_candidate(media_type="movie", title="Some Movie",
-                                  external_ids={"tmdb_id": "1000"})
+    movie_cand = _make_candidate(
+        media_type="movie", title="Some Movie", external_ids={"tmdb_id": "1000"}
+    )
     movie_parse = _make_parse(media_type="movie", season=None, episode=None)
-    res = IdentifyResult(parse=movie_parse, candidates=[movie_cand],
-                        top_pick=movie_cand, confidence=0.95,
-                        reasoning="movie", pick_source="single_exact")
+    res = IdentifyResult(
+        parse=movie_parse,
+        candidates=[movie_cand],
+        top_pick=movie_cand,
+        confidence=0.95,
+        reasoning="movie",
+        pick_source="single_exact",
+    )
     metadata_cache.upsert_identification(
-        conn, path="/share/m.mkv",
+        conn,
+        path="/share/m.mkv",
         stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
         identify_result=res,
     )
@@ -824,15 +954,16 @@ def test_ensure_episode_details_skips_already_enriched(conn):
     """任一字段已填（哪怕只有 air_date） → 跳过，幂等保证。"""
     cached = _seed_tv_episode(conn)
     metadata_cache.upsert_details(
-        conn, path=cached.path,
-        episode_air_date="2022-01-01",        # 任一字段非 None 即 enriched
+        conn,
+        path=cached.path,
+        episode_air_date="2022-01-01",  # 任一字段非 None 即 enriched
     )
     cached, _ = metadata_cache.get_by_path(conn, cached.path)
     provider = _FakeProvider(episode={"overview": "Should not see"})
     out, drift = metadata_cache.ensure_episode_details(conn, provider, cached)
     assert provider.calls == []
     assert out.episode_air_date == "2022-01-01"
-    assert out.episode_overview is None       # 仍然 None，没被新值覆盖
+    assert out.episode_overview is None  # 仍然 None，没被新值覆盖
     assert drift is False
 
 
@@ -840,12 +971,14 @@ def test_ensure_episode_details_fetches_and_persists(conn):
     """happy path: 缺字段 → 调 lookup → upsert_details → 返回 refreshed cached。"""
     cached = _seed_tv_episode(conn)
     assert cached.episode_overview is None
-    provider = _FakeProvider(episode={
-        "name": "Pilot",
-        "overview": "Specific episode plot.",
-        "air_date": "2013-12-02",
-        "still_url": "https://image.tmdb.org/p/still.jpg",
-    })
+    provider = _FakeProvider(
+        episode={
+            "name": "Pilot",
+            "overview": "Specific episode plot.",
+            "air_date": "2013-12-02",
+            "still_url": "https://image.tmdb.org/p/still.jpg",
+        }
+    )
     out, drift = metadata_cache.ensure_episode_details(conn, provider, cached)
     assert drift is False
     assert len(provider.calls) == 1
@@ -868,9 +1001,9 @@ def test_ensure_episode_details_provider_raises_returns_original(conn):
     cached = _seed_tv_episode(conn)
     provider = _FakeProvider(raise_exc=RuntimeError("TMDB 502"))
     out, drift = metadata_cache.ensure_episode_details(conn, provider, cached)
-    assert out.episode_overview is None       # cache 不变
+    assert out.episode_overview is None  # cache 不变
     assert out.path == cached.path
-    assert drift is False                      # provider 错不是 drift
+    assert drift is False  # provider 错不是 drift
 
 
 def test_ensure_episode_details_lookup_returns_none(conn):
@@ -885,10 +1018,10 @@ def test_ensure_episode_details_lookup_returns_none(conn):
 def test_ensure_episode_details_episode_none_returns_original(conn):
     """剧存在但 TMDB 某集没收录（details.episode is None）→ 不抛，cache 不变。"""
     cached = _seed_tv_episode(conn)
-    provider = _FakeProvider(episode=None)   # MediaDetails returned but episode=None
+    provider = _FakeProvider(episode=None)  # MediaDetails returned but episode=None
     out, drift = metadata_cache.ensure_episode_details(conn, provider, cached)
-    assert len(provider.calls) == 1            # lookup 真调了
-    assert out.episode_overview is None        # 但 cache 没改
+    assert len(provider.calls) == 1  # lookup 真调了
+    assert out.episode_overview is None  # 但 cache 没改
     assert drift is False
 
 
@@ -902,9 +1035,11 @@ def test_ensure_episode_details_signals_drift_when_guarded_update_misses(conn):
 
     class _DriftProvider:
         """lookup_by_id 调用期间偷偷改 cache row（模拟 scanner concurrent re-identify）。"""
+
         def __init__(self, db_conn):
             self._db = db_conn
             self.calls = 0
+
         def lookup_by_id(self, *a, **kw):
             self.calls += 1
             # 模拟外部把 cache 改成另一个剧
@@ -915,20 +1050,24 @@ def test_ensure_episode_details_signals_drift_when_guarded_update_misses(conn):
             self._db.commit()
             return MediaDetails(
                 candidate=_make_candidate(),
-                episode={"name": "Old Ep", "overview": "Should not land",
-                         "air_date": "2013-01-01", "still_url": "u"},
+                episode={
+                    "name": "Old Ep",
+                    "overview": "Should not land",
+                    "air_date": "2013-01-01",
+                    "still_url": "u",
+                },
             )
 
     provider = _DriftProvider(conn)
     out, drift = metadata_cache.ensure_episode_details(conn, provider, cached)
-    assert drift is True                       # 关键：强 signal caller "drift detected"
+    assert drift is True  # 关键：强 signal caller "drift detected"
     # cache 当前 tmdb_id 已经是 99999（被 fake scanner 改的），episode_overview 仍 None
     db_row = conn.execute(
         "SELECT tmdb_id, episode_overview, episode_air_date FROM media_files WHERE path = ?",
         (cached.path,),
     ).fetchone()
     assert db_row["tmdb_id"] == "99999"
-    assert db_row["episode_overview"] is None    # 旧 episode 数据没被写到新 row
+    assert db_row["episode_overview"] is None  # 旧 episode 数据没被写到新 row
     assert db_row["episode_air_date"] is None
 
 
@@ -938,14 +1077,18 @@ class _FlakyDBProxy:
     sqlite3.Connection.execute 是 C-level read-only attribute，不能直接 monkeypatch，
     用 proxy 包一层模拟 DB 写失败。
     """
+
     def __init__(self, real):
         self._real = real
+
     def execute(self, sql, *a, **kw):
         if "UPDATE media_files" in sql:
             raise sqlite3.OperationalError("database is locked")
         return self._real.execute(sql, *a, **kw)
+
     def commit(self):
         return self._real.commit()
+
     def rollback(self):
         return self._real.rollback()
 
@@ -953,16 +1096,21 @@ class _FlakyDBProxy:
 def test_ensure_episode_details_db_error_returns_original(conn):
     """upsert/update 阶段 SQLite 抛错 → catch 后返原 cached，不让 hardlink success path crash。"""
     cached = _seed_tv_episode(conn)
-    provider = _FakeProvider(episode={
-        "name": "Pilot", "overview": "X",
-        "air_date": "2013-01-01", "still_url": "u",
-    })
+    provider = _FakeProvider(
+        episode={
+            "name": "Pilot",
+            "overview": "X",
+            "air_date": "2013-01-01",
+            "still_url": "u",
+        }
+    )
     flaky = _FlakyDBProxy(conn)
     out, drift = metadata_cache.ensure_episode_details(flaky, provider, cached)
     # 不抛，返回的是原 cached（DB 没写入）
     assert out.episode_overview is None
-    assert drift is False                        # DB error 不是 drift（caller 沿用原 cached 即可）
+    assert drift is False  # DB error 不是 drift（caller 沿用原 cached 即可）
     db_row = conn.execute(
-        "SELECT episode_overview FROM media_files WHERE path = ?", (cached.path,),
+        "SELECT episode_overview FROM media_files WHERE path = ?",
+        (cached.path,),
     ).fetchone()
     assert db_row["episode_overview"] is None

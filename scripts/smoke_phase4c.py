@@ -6,12 +6,13 @@
 不依赖 qBit 服务可达；用 monkeypatch qbit.get_torrents 注入 fake 已完成种子。
 组织：Stranger Things 4B 已整理过的种子 → 应走 already_linked path（幂等）.
 """
+
 from __future__ import annotations
+
+import logging
+import sqlite3
 import sys
 import time
-import json
-import sqlite3
-import logging
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -72,12 +73,14 @@ def step(msg):
 # ── 2. 设置 config: enabled + 白名单 + threshold 0.85 ───
 
 step("STEP 1: 配置 qbit_auto_organize (enabled, whitelist=[TestAutoOrganize])")
-app.save_qbit_auto_organize_config({
-    "enabled": True,
-    "categories": ["TestAutoOrganize"],
-    "poll_interval_minutes": 5,
-    "confidence_threshold": 0.85,
-})
+app.save_qbit_auto_organize_config(
+    {
+        "enabled": True,
+        "categories": ["TestAutoOrganize"],
+        "poll_interval_minutes": 5,
+        "confidence_threshold": 0.85,
+    }
+)
 cfg = app.load_qbit_auto_organize_config()
 print(f"  config saved: {cfg}")
 
@@ -86,9 +89,7 @@ print(f"  config saved: {cfg}")
 step("STEP 2: 清理潜在残留 (上次 smoke 跑过的 row)")
 conn = sqlite3.connect("config/actions.db")
 conn.row_factory = sqlite3.Row
-n = conn.execute(
-    "DELETE FROM auto_organize_runs WHERE qbit_hash LIKE 'smoke4c-%'"
-).rowcount
+n = conn.execute("DELETE FROM auto_organize_runs WHERE qbit_hash LIKE 'smoke4c-%'").rowcount
 conn.commit()
 print(f"  cleaned {n} previous smoke rows")
 
@@ -108,7 +109,7 @@ for i in range(30):
     ).fetchall()
     organizing = [r["qbit_hash"] for r in rows if r["status"] == "organizing"]
     if not organizing:
-        print(f"  no organizing rows after {i+1}s")
+        print(f"  no organizing rows after {i + 1}s")
         break
     time.sleep(1)
 
@@ -124,13 +125,17 @@ rows = conn.execute(
     "SELECT * FROM auto_organize_runs WHERE qbit_hash LIKE 'smoke4c-%' ORDER BY created_at"
 ).fetchall()
 for r in rows:
-    print(f"  {r['qbit_hash']:40} status={r['status']:25} "
-          f"action_id={r['action_id'] or '-'} attempts={r['attempts']}")
+    print(
+        f"  {r['qbit_hash']:40} status={r['status']:25} "
+        f"action_id={r['action_id'] or '-'} attempts={r['attempts']}"
+    )
     if r["last_error"]:
         print(f"    error: {r['last_error'][:200]}")
     if r["files_succeeded"] is not None:
-        print(f"    files: succeeded={r['files_succeeded']} "
-              f"already_linked={r['files_already_linked']} failed={r['files_failed']}")
+        print(
+            f"    files: succeeded={r['files_succeeded']} "
+            f"already_linked={r['files_already_linked']} failed={r['files_failed']}"
+        )
 
 # ── 6. 期望断言 ───
 
@@ -160,34 +165,38 @@ for h in forbidden:
 # ── 7. cross-check: destructive_actions table 看 created_by='cron' row ───
 
 step("STEP 7: 看本次 cron 创建的 destructive_actions row")
-recent = conn.execute("""
+recent = conn.execute(
+    """
     SELECT action_id, kind, status, created_by, error, started_at, completed_at
     FROM destructive_actions
     WHERE created_by = 'cron' AND started_at >= ?
     ORDER BY started_at DESC LIMIT 5
-""", (int(time.time()) - 120,)).fetchall()
+""",
+    (int(time.time()) - 120,),
+).fetchall()
 print(f"  found {len(recent)} cron-created actions in last 2 min:")
 for r in recent:
-    print(f"  {r['action_id'][:8]} kind={r['kind']} status={r['status']} "
-          f"created_by={r['created_by']}")
+    print(
+        f"  {r['action_id'][:8]} kind={r['kind']} status={r['status']} created_by={r['created_by']}"
+    )
     if r["error"]:
         print(f"    error: {r['error'][:200]}")
 
 # ── cleanup smoke rows ───
 step("CLEANUP: 删 smoke4c-* rows")
-n = conn.execute(
-    "DELETE FROM auto_organize_runs WHERE qbit_hash LIKE 'smoke4c-%'"
-).rowcount
+n = conn.execute("DELETE FROM auto_organize_runs WHERE qbit_hash LIKE 'smoke4c-%'").rowcount
 conn.commit()
 print(f"  deleted {n} smoke rows")
 
 # 关掉 enabled 防意外触发
-app.save_qbit_auto_organize_config({
-    "enabled": False,
-    "categories": [],
-    "poll_interval_minutes": 5,
-    "confidence_threshold": 0.85,
-})
+app.save_qbit_auto_organize_config(
+    {
+        "enabled": False,
+        "categories": [],
+        "poll_interval_minutes": 5,
+        "confidence_threshold": 0.85,
+    }
+)
 print("  reverted config to disabled+empty whitelist")
 
 conn.close()

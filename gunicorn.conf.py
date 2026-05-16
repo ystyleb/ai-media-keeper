@@ -29,8 +29,7 @@ def on_starting(server):
     cfg = server.cfg
     if cfg.workers != 1:
         server.log.error(
-            f"NAS Vault requires workers=1, got {cfg.workers}; "
-            "see config_module-level constraint."
+            f"NAS Vault requires workers=1, got {cfg.workers}; see config_module-level constraint."
         )
         raise SystemExit(1)
     if cfg.preload_app:

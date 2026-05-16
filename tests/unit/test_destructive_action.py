@@ -14,8 +14,6 @@
 
 from __future__ import annotations
 
-import os
-import sqlite3
 import threading
 from pathlib import Path
 
@@ -48,7 +46,12 @@ def payload():
         "snapshot": {
             "captured_at": 1_700_000_000,
             "items": [
-                {"path": "/share/test/a.mkv", "inode": 12345, "size_bytes": 1024, "mtime": 1_699_000_000},
+                {
+                    "path": "/share/test/a.mkv",
+                    "inode": 12345,
+                    "size_bytes": 1024,
+                    "mtime": 1_699_000_000,
+                },
             ],
         },
     }
@@ -87,9 +90,7 @@ def test_preview_concurrent_same_payload_yields_distinct_ids(conn, secret, paylo
 
 def test_preview_rejects_unknown_kind(conn, secret, payload):
     with pytest.raises(ValueError):
-        da.create_preview(
-            conn, kind="not_a_real_kind", payload=payload, server_secret=secret
-        )
+        da.create_preview(conn, kind="not_a_real_kind", payload=payload, server_secret=secret)
 
 
 # ---------------- confirm happy path ---------------- #
@@ -129,12 +130,22 @@ def test_confirm_happy_path_marks_succeeded(conn, secret, payload):
 def test_confirm_replay_rejected(conn, secret, payload):
     """第 4 项：重放同 token 必须拒绝。"""
     res = da.create_preview(conn, kind="delete", payload=payload, server_secret=secret)
-    da.confirm(conn, action_id=res.action_id, signed_token=res.signed_token,
-               server_secret=secret, executor=lambda p: {})
+    da.confirm(
+        conn,
+        action_id=res.action_id,
+        signed_token=res.signed_token,
+        server_secret=secret,
+        executor=lambda p: {},
+    )
 
     with pytest.raises(da.ActionAlreadyConsumed):
-        da.confirm(conn, action_id=res.action_id, signed_token=res.signed_token,
-                   server_secret=secret, executor=lambda p: {})
+        da.confirm(
+            conn,
+            action_id=res.action_id,
+            signed_token=res.signed_token,
+            server_secret=secret,
+            executor=lambda p: {},
+        )
 
 
 def test_confirm_tampered_token_keeps_action_pending(conn, secret, payload):
@@ -143,12 +154,22 @@ def test_confirm_tampered_token_keeps_action_pending(conn, secret, payload):
     bogus = "0" * 64
 
     with pytest.raises(da.ActionTokenInvalid):
-        da.confirm(conn, action_id=res.action_id, signed_token=bogus,
-                   server_secret=secret, executor=lambda p: {})
+        da.confirm(
+            conn,
+            action_id=res.action_id,
+            signed_token=bogus,
+            server_secret=secret,
+            executor=lambda p: {},
+        )
 
     # 关键：合法 token 仍然能 confirm（attacker 不能通过给假 token 永久占用 action_id）
-    out = da.confirm(conn, action_id=res.action_id, signed_token=res.signed_token,
-                     server_secret=secret, executor=lambda p: {"ok": True})
+    out = da.confirm(
+        conn,
+        action_id=res.action_id,
+        signed_token=res.signed_token,
+        server_secret=secret,
+        executor=lambda p: {"ok": True},
+    )
     assert out.status == "succeeded"
 
 
@@ -159,8 +180,13 @@ def test_confirm_with_different_secret_rejected(conn, secret, payload):
     new_secret = b"b" * 64
 
     with pytest.raises(da.ActionTokenInvalid):
-        da.confirm(conn, action_id=res.action_id, signed_token=res.signed_token,
-                   server_secret=new_secret, executor=lambda p: {})
+        da.confirm(
+            conn,
+            action_id=res.action_id,
+            signed_token=res.signed_token,
+            server_secret=new_secret,
+            executor=lambda p: {},
+        )
 
 
 def test_confirm_expired_action_rejected(conn, secret, payload, monkeypatch):
@@ -174,14 +200,24 @@ def test_confirm_expired_action_rejected(conn, secret, payload, monkeypatch):
     conn.commit()
 
     with pytest.raises(da.ActionExpired):
-        da.confirm(conn, action_id=res.action_id, signed_token=res.signed_token,
-                   server_secret=secret, executor=lambda p: {})
+        da.confirm(
+            conn,
+            action_id=res.action_id,
+            signed_token=res.signed_token,
+            server_secret=secret,
+            executor=lambda p: {},
+        )
 
 
 def test_confirm_unknown_action_id(conn, secret):
     with pytest.raises(da.ActionNotFound):
-        da.confirm(conn, action_id="does-not-exist", signed_token="x",
-                   server_secret=secret, executor=lambda p: {})
+        da.confirm(
+            conn,
+            action_id="does-not-exist",
+            signed_token="x",
+            server_secret=secret,
+            executor=lambda p: {},
+        )
 
 
 def test_executor_exception_marks_failed(conn, secret, payload):
@@ -191,8 +227,13 @@ def test_executor_exception_marks_failed(conn, secret, payload):
     def boom(p):
         raise RuntimeError("simulated SSH failure")
 
-    out = da.confirm(conn, action_id=res.action_id, signed_token=res.signed_token,
-                     server_secret=secret, executor=boom)
+    out = da.confirm(
+        conn,
+        action_id=res.action_id,
+        signed_token=res.signed_token,
+        server_secret=secret,
+        executor=boom,
+    )
     assert out.status == "failed"
     assert "simulated SSH failure" in out.error
 
@@ -227,8 +268,11 @@ def test_two_concurrent_confirms_only_one_wins(tmp_path, secret, payload):
         try:
             barrier.wait()
             out = da.confirm(
-                c, action_id=res.action_id, signed_token=res.signed_token,
-                server_secret=secret, executor=lambda p: {"who": threading.current_thread().name}
+                c,
+                action_id=res.action_id,
+                signed_token=res.signed_token,
+                server_secret=secret,
+                executor=lambda p: {"who": threading.current_thread().name},
             )
             results.append(out)
         except Exception as e:
@@ -356,7 +400,6 @@ def test_load_server_secret_config_file_first_time(monkeypatch, tmp_path):
     assert len(s) >= 64
     assert keyfile.exists()
     # chmod 600 验证
-    import stat as st
     mode = keyfile.stat().st_mode & 0o777
     assert mode == 0o600, f"expected 0o600, got 0o{mode:o}"
 
@@ -431,8 +474,7 @@ def test_update_running_result_writes_partial_progress(conn, secret, payload):
 
     # Step 3: 验证 result_json 落盘 + status / completed_at 不变
     after = conn.execute(
-        "SELECT status, completed_at, result_json FROM destructive_actions "
-        "WHERE action_id = ?",
+        "SELECT status, completed_at, result_json FROM destructive_actions WHERE action_id = ?",
         (res.action_id,),
     ).fetchone()
     assert after["status"] == "running"
@@ -445,9 +487,7 @@ def test_update_running_result_skips_terminal_rows(conn, secret, payload):
     """status != 'running' 时 update 不生效，返回 False。防御踩 terminal 状态。"""
     res = da.create_preview(conn, kind="delete", payload=payload, server_secret=secret)
     # 直接 mark terminal（绕过 confirm 流程）
-    da._mark_terminal(
-        conn, res.action_id, status="succeeded", result={"x": 1}, error=None
-    )
+    da._mark_terminal(conn, res.action_id, status="succeeded", result={"x": 1}, error=None)
     ok = da.update_running_result(conn, res.action_id, {"items_completed": 99})
     assert ok is False
     # 原 result 不被覆盖
@@ -483,8 +523,11 @@ def test_mark_terminal_if_running_flips_running_to_succeeded(conn, secret, paylo
     assert row is not None
 
     ok = da.mark_terminal_if_running(
-        conn, res.action_id, status="succeeded",
-        result={"items": [{"x": 1}]}, error=None,
+        conn,
+        res.action_id,
+        status="succeeded",
+        result={"items": [{"x": 1}]},
+        error=None,
     )
     assert ok is True
     after = conn.execute(
@@ -500,13 +543,17 @@ def test_mark_terminal_if_running_no_op_when_already_terminal(conn, secret, payl
     res = da.create_preview(conn, kind="delete", payload=payload, server_secret=secret)
     # reaper 直接标 terminal
     conn.execute(
-        "UPDATE destructive_actions SET status='needs_manual_recovery' "
-        "WHERE action_id = ?", (res.action_id,),
+        "UPDATE destructive_actions SET status='needs_manual_recovery' WHERE action_id = ?",
+        (res.action_id,),
     )
     conn.commit()
 
     ok = da.mark_terminal_if_running(
-        conn, res.action_id, status="succeeded", result={"x": 1}, error=None,
+        conn,
+        res.action_id,
+        status="succeeded",
+        result={"x": 1},
+        error=None,
     )
     assert ok is False
     # 原 status 不变
@@ -521,6 +568,10 @@ def test_mark_terminal_if_running_no_op_for_pending(conn, secret, payload):
     """pending 状态 → 不 flip（必须先 consume 才能进 running 再 terminal）。"""
     res = da.create_preview(conn, kind="delete", payload=payload, server_secret=secret)
     ok = da.mark_terminal_if_running(
-        conn, res.action_id, status="succeeded", result={"x": 1}, error=None,
+        conn,
+        res.action_id,
+        status="succeeded",
+        result={"x": 1},
+        error=None,
     )
     assert ok is False

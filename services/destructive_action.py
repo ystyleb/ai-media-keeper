@@ -174,7 +174,7 @@ def load_server_secret(
 
 
 def _signed_token(secret: bytes, action_id: str, payload_hash: str) -> str:
-    msg = f"{action_id}|{payload_hash}".encode("utf-8")
+    msg = f"{action_id}|{payload_hash}".encode()
     return hmac.new(secret, msg, hashlib.sha256).hexdigest()
 
 
@@ -364,7 +364,9 @@ def mark_terminal_if_running(
            AND status       = 'running'
         """,
         (
-            status, _now(), error,
+            status,
+            _now(),
+            error,
             _canonical_json(result) if result else None,
             action_id,
         ),
@@ -398,8 +400,7 @@ def confirm(
     if row is None:
         # 失败可能原因：已 consumed / expired / status 已变 — 重查精确报错
         cur = conn.execute(
-            "SELECT status, consumed_at, expires_at FROM destructive_actions "
-            "WHERE action_id = ?",
+            "SELECT status, consumed_at, expires_at FROM destructive_actions WHERE action_id = ?",
             (action_id,),
         ).fetchone()
         if cur is None:
@@ -420,7 +421,7 @@ def confirm(
     payload = json.loads(row["payload_json"])
     try:
         result = executor(payload)
-    except Exception as exc:  # noqa: BLE001 — executor 任何异常视为 failed
+    except Exception as exc:
         logger.exception("[destructive_action] executor raised for %s", action_id)
         _mark_terminal(
             conn,

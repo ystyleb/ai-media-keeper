@@ -26,9 +26,7 @@ def _existing_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in cur.fetchall()}
 
 
-def _add_column_if_missing(
-    conn: sqlite3.Connection, table: str, column: str, decl: str
-) -> bool:
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, decl: str) -> bool:
     existing = _existing_columns(conn, table)
     if column in existing:
         return False
@@ -54,8 +52,7 @@ DEFAULT_DEDUP_WEIGHTS: dict[str, float] = {
     "source.WEB-DL": 10,
     "source.WEBRip": 6,
     "source.HDTV": 3,
-    "source.DVDRip": 1,           # Phase 3.2 r2: dedup._normalize_source_key 映射 DVD/DVDRip 到此 key
-
+    "source.DVDRip": 1,  # Phase 3.2 r2: dedup._normalize_source_key 映射 DVD/DVDRip 到此 key
     "codec.AV1": 18,
     "codec.H.265": 15,
     "codec.H.264": 5,
@@ -280,9 +277,7 @@ def phase3_migrate(conn: sqlite3.Connection) -> dict:
     #     produces at runtime (no int-vs-float drift).
     actual_weights = _read_weights_from_db(conn)
     current_hash = _canonical_weights_hash(actual_weights)
-    meta_row = conn.execute(
-        "SELECT current_hash FROM dedup_weights_meta WHERE id=1"
-    ).fetchone()
+    meta_row = conn.execute("SELECT current_hash FROM dedup_weights_meta WHERE id=1").fetchone()
     if meta_row is None or meta_row[0] != current_hash:
         conn.execute(
             "INSERT OR REPLACE INTO dedup_weights_meta(id, current_hash, updated_at) "
@@ -348,9 +343,7 @@ def phase4_migrate(conn: sqlite3.Connection) -> dict:
             )
             moved = cur.rowcount or 0
             conn.execute("DROP TABLE destructive_actions")
-            conn.execute(
-                "ALTER TABLE destructive_actions_new RENAME TO destructive_actions"
-            )
+            conn.execute("ALTER TABLE destructive_actions_new RENAME TO destructive_actions")
             conn.execute(
                 "CREATE INDEX idx_actions_expires ON destructive_actions(expires_at, status)"
             )
@@ -411,13 +404,9 @@ def phase5_migrate(conn: sqlite3.Connection) -> dict:
                 "ON auto_organize_runs(qbit_hash) WHERE status = 'organizing'"
             )
             conn.execute(
-                "CREATE INDEX idx_auto_org_status "
-                "ON auto_organize_runs(status, last_attempt_at)"
+                "CREATE INDEX idx_auto_org_status ON auto_organize_runs(status, last_attempt_at)"
             )
-            conn.execute(
-                "CREATE INDEX idx_auto_org_history "
-                "ON auto_organize_runs(completed_at)"
-            )
+            conn.execute("CREATE INDEX idx_auto_org_history ON auto_organize_runs(completed_at)")
         summary["created"] = True
         return summary
     except Exception:

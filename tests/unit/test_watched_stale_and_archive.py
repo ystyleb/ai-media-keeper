@@ -10,7 +10,7 @@ import pytest
 
 import app as app_module
 from db import migrations
-from services import destructive_action, dedup
+from services import dedup, destructive_action
 
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "db" / "schema.sql"
 
@@ -49,14 +49,31 @@ def _seed_movie(conn, path, *, tmdb_movie_id, first_seen_at, size=1_000_000_000)
         )
         VALUES (?, ?, ?, ?, ?, ?, 'movie', 'M', 2020, 'ok', ?, ?)
         """,
-        (path, abs(hash(path)) % 10_000_000, size, first_seen_at,
-         tmdb_movie_id, tmdb_movie_id, first_seen_at, first_seen_at),
+        (
+            path,
+            abs(hash(path)) % 10_000_000,
+            size,
+            first_seen_at,
+            tmdb_movie_id,
+            tmdb_movie_id,
+            first_seen_at,
+            first_seen_at,
+        ),
     )
     conn.commit()
 
 
-def _seed_tv(conn, path, *, tmdb_series_id, season, episode,
-             tmdb_episode_id=None, first_seen_at=None, size=500_000_000):
+def _seed_tv(
+    conn,
+    path,
+    *,
+    tmdb_series_id,
+    season,
+    episode,
+    tmdb_episode_id=None,
+    first_seen_at=None,
+    size=500_000_000,
+):
     fs = first_seen_at or _now()
     conn.execute(
         """
@@ -67,8 +84,19 @@ def _seed_tv(conn, path, *, tmdb_series_id, season, episode,
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, 'tv', 'S', 2020, ?, ?, 'ok', ?, ?)
         """,
-        (path, abs(hash(path)) % 10_000_000, size, fs, tmdb_series_id, tmdb_series_id,
-         tmdb_episode_id, season, episode, fs, fs),
+        (
+            path,
+            abs(hash(path)) % 10_000_000,
+            size,
+            fs,
+            tmdb_series_id,
+            tmdb_series_id,
+            tmdb_episode_id,
+            season,
+            episode,
+            fs,
+            fs,
+        ),
     )
     conn.commit()
 
@@ -97,9 +125,18 @@ def _seed_watched_tv(conn, *, tmdb_series_id, season, episode, tmdb_episode_id=N
           watched_at, fetched_at, mapping_status, mapping_confidence, mapping_source)
         VALUES ('emby', ?, 'tv', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (f"emby-tv-{tmdb_series_id}-{season}-{episode}",
-         tmdb_series_id, tmdb_episode_id, season, episode,
-         _now(), _now(), status, conf, src),
+        (
+            f"emby-tv-{tmdb_series_id}-{season}-{episode}",
+            tmdb_series_id,
+            tmdb_episode_id,
+            season,
+            episode,
+            _now(),
+            _now(),
+            status,
+            conf,
+            src,
+        ),
     )
     conn.commit()
 
@@ -139,10 +176,16 @@ def test_watched_stale_unwatched_old_movie_excluded(conn):
 def test_watched_stale_tv_episode_id_strong_branch(conn):
     """TV episode_id 命中（strong signal）→ 返回。"""
     old = _now() - 200 * 86400
-    _seed_tv(conn, "/old-ep.mkv", tmdb_series_id="1399",
-             season=1, episode=1, tmdb_episode_id="ep-99", first_seen_at=old)
-    _seed_watched_tv(conn, tmdb_series_id="1399", season=1, episode=1,
-                     tmdb_episode_id="ep-99")
+    _seed_tv(
+        conn,
+        "/old-ep.mkv",
+        tmdb_series_id="1399",
+        season=1,
+        episode=1,
+        tmdb_episode_id="ep-99",
+        first_seen_at=old,
+    )
+    _seed_watched_tv(conn, tmdb_series_id="1399", season=1, episode=1, tmdb_episode_id="ep-99")
     items, total = dedup.find_watched_stale_media(conn, days=180)
     assert total == 1
     assert items[0]["path"] == "/old-ep.mkv"
@@ -151,10 +194,16 @@ def test_watched_stale_tv_episode_id_strong_branch(conn):
 def test_watched_stale_tv_series_se_fallback_branch(conn):
     """TV: m 无 episode_id + watched 仅有 series+s+e → fallback 分支命中。"""
     old = _now() - 200 * 86400
-    _seed_tv(conn, "/old-ep-fb.mkv", tmdb_series_id="1399",
-             season=2, episode=3, tmdb_episode_id=None, first_seen_at=old)
-    _seed_watched_tv(conn, tmdb_series_id="1399", season=2, episode=3,
-                     tmdb_episode_id=None)
+    _seed_tv(
+        conn,
+        "/old-ep-fb.mkv",
+        tmdb_series_id="1399",
+        season=2,
+        episode=3,
+        tmdb_episode_id=None,
+        first_seen_at=old,
+    )
+    _seed_watched_tv(conn, tmdb_series_id="1399", season=2, episode=3, tmdb_episode_id=None)
     items, total = dedup.find_watched_stale_media(conn, days=180)
     assert total == 1
 
@@ -167,12 +216,20 @@ def test_watched_stale_tv_episode_id_branch_excludes_se_only(conn):
     这反映 plan r3 polish ROI 衰减注记的"recall 损失" — 已接受。
     """
     old = _now() - 200 * 86400
-    _seed_tv(conn, "/has-ep-but-fallback-watched.mkv", tmdb_series_id="1399",
-             season=1, episode=1, tmdb_episode_id="ep-99", first_seen_at=old)
-    _seed_watched_tv(conn, tmdb_series_id="1399", season=1, episode=1,
-                     tmdb_episode_id=None)  # fallback only
+    _seed_tv(
+        conn,
+        "/has-ep-but-fallback-watched.mkv",
+        tmdb_series_id="1399",
+        season=1,
+        episode=1,
+        tmdb_episode_id="ep-99",
+        first_seen_at=old,
+    )
+    _seed_watched_tv(
+        conn, tmdb_series_id="1399", season=1, episode=1, tmdb_episode_id=None
+    )  # fallback only
     items, total = dedup.find_watched_stale_media(conn, days=180)
-    assert total == 0    # acceptable recall loss (documented)
+    assert total == 0  # acceptable recall loss (documented)
 
 
 def test_watched_stale_pattern_b_movie_does_not_match_tv_watched(conn):
@@ -180,8 +237,7 @@ def test_watched_stale_pattern_b_movie_does_not_match_tv_watched(conn):
     old = _now() - 200 * 86400
     _seed_movie(conn, "/m.mkv", tmdb_movie_id="999", first_seen_at=old)
     # tv watched 用同样的字符串 — 不该 join 上
-    _seed_watched_tv(conn, tmdb_series_id="999", season=1, episode=1,
-                     tmdb_episode_id="999")
+    _seed_watched_tv(conn, tmdb_series_id="999", season=1, episode=1, tmdb_episode_id="999")
     items, total = dedup.find_watched_stale_media(conn, days=180)
     assert total == 0
 
@@ -189,10 +245,13 @@ def test_watched_stale_pattern_b_movie_does_not_match_tv_watched(conn):
 def test_watched_stale_pagination(conn):
     old = _now() - 200 * 86400
     for i in range(5):
-        _seed_movie(conn, f"/old-m-{i}.mkv",
-                    tmdb_movie_id=str(100 + i),
-                    first_seen_at=old,
-                    size=(5 - i) * 1_000_000_000)        # decreasing size
+        _seed_movie(
+            conn,
+            f"/old-m-{i}.mkv",
+            tmdb_movie_id=str(100 + i),
+            first_seen_at=old,
+            size=(5 - i) * 1_000_000_000,
+        )  # decreasing size
         _seed_watched_movie(conn, str(100 + i))
     page1, total = dedup.find_watched_stale_media(conn, days=180, limit=2, offset=0)
     page2, _ = dedup.find_watched_stale_media(conn, days=180, limit=2, offset=2)
@@ -207,16 +266,27 @@ def test_watched_stale_pagination(conn):
 
 
 def test_watched_stale_route_returns_list(client, token, monkeypatch):
-    fake_items = [{
-        "id": 1, "path": "/x.mkv", "media_type": "movie",
-        "title": "X", "year": 2020, "tmdb_movie_id": "238",
-        "tmdb_series_id": None, "tmdb_episode_id": None,
-        "season_number": None, "episode_number": None,
-        "size_bytes": 1_000_000_000, "mtime": 1700000000,
-        "first_seen_at": 1700000000, "poster_url": None,
-        "parse_resolution": "1080p", "parse_source": "Blu-ray",
-        "days_since_first_seen": 200,
-    }]
+    fake_items = [
+        {
+            "id": 1,
+            "path": "/x.mkv",
+            "media_type": "movie",
+            "title": "X",
+            "year": 2020,
+            "tmdb_movie_id": "238",
+            "tmdb_series_id": None,
+            "tmdb_episode_id": None,
+            "season_number": None,
+            "episode_number": None,
+            "size_bytes": 1_000_000_000,
+            "mtime": 1700000000,
+            "first_seen_at": 1700000000,
+            "poster_url": None,
+            "parse_resolution": "1080p",
+            "parse_source": "Blu-ray",
+            "days_since_first_seen": 200,
+        }
+    ]
     with patch.object(dedup, "find_watched_stale_media", return_value=(fake_items, 1)):
         resp = client.get(
             "/api/library/watched-stale?days=180&limit=10",
@@ -261,11 +331,12 @@ def test_archive_executor_does_not_call_ssh_or_qbit(monkeypatch):
         return 0, "", ""
 
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh)
-    monkeypatch.setattr(app_module.qbit, "find_torrents_by_paths",
-                        lambda *a, **k: ssh_called.append("qbit"))
+    monkeypatch.setattr(
+        app_module.qbit, "find_torrents_by_paths", lambda *a, **k: ssh_called.append("qbit")
+    )
     with pytest.raises(app_module.ArchiveDisabledError):
         app_module._archive_executor({"candidates": [{"path": "/x"}]})
-    assert ssh_called == []      # no SSH or qBit touched
+    assert ssh_called == []  # no SSH or qBit touched
 
 
 def test_archive_route_executor_dispatches_disabled():

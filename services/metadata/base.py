@@ -17,15 +17,15 @@ from typing import Any
 class MediaCandidate:
     """Provider 返回的候选项。id 唯一，下游 LLM/用户只能从已返回的 id 集合中选。"""
 
-    id: str                              # provider 内部 id（TMDB 的 movie.id / tv.id 转字符串）
-    external_ids: dict[str, str]         # {"tmdb_id": "...", "imdb_id": "...", "tvdb_id": "..."}
+    id: str  # provider 内部 id（TMDB 的 movie.id / tv.id 转字符串）
+    external_ids: dict[str, str]  # {"tmdb_id": "...", "imdb_id": "...", "tvdb_id": "..."}
     title: str
     original_title: str | None
     year: int | None
-    media_type: str                      # 'movie' | 'tv'
+    media_type: str  # 'movie' | 'tv'
     poster_url: str | None
     overview: str | None
-    vote_average: float | None           # 0-10
+    vote_average: float | None  # 0-10
     raw: dict[str, Any] = field(default_factory=dict)  # provider 原始响应，作 provenance
 
 
@@ -34,7 +34,7 @@ class MediaDetails:
     """lookup_by_id 返回的完整详情（候选 + season/episode 列表 + 演员等）。"""
 
     candidate: MediaCandidate
-    episode: dict[str, Any] | None = None   # tv 时按 season/episode 拉到的某集详情
+    episode: dict[str, Any] | None = None  # tv 时按 season/episode 拉到的某集详情
     cast: list[str] = field(default_factory=list)
     genres: list[str] = field(default_factory=list)
     runtime_minutes: int | None = None

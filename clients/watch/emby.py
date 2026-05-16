@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urljoin
 
@@ -28,13 +28,13 @@ logger = logging.getLogger(__name__)
 class EmbyItem:
     """Raw Emby item shape we care about (Movie or Episode)."""
 
-    id: str                     # Emby internal ItemId (used as provider_item_id)
-    type: str                   # 'Movie' or 'Episode'
+    id: str  # Emby internal ItemId (used as provider_item_id)
+    type: str  # 'Movie' or 'Episode'
     name: str | None
     year: int | None
-    tmdb_id: str | None         # ProviderIds.Tmdb (episode id for Episode, movie id for Movie)
+    tmdb_id: str | None  # ProviderIds.Tmdb (episode id for Episode, movie id for Movie)
     imdb_id: str | None
-    series_id: str | None       # Episode only — internal Emby SeriesId
+    series_id: str | None  # Episode only — internal Emby SeriesId
     season_number: int | None
     episode_number: int | None
     last_played_at: int | None  # unix ts, UTC
@@ -93,7 +93,7 @@ class EmbyClient:
             return {"ok": False, "message": str(e), "code": "auth_failed"}
         except requests.RequestException as e:
             return {"ok": False, "message": f"network: {e}", "code": "network"}
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return {"ok": False, "message": str(e), "code": "unknown"}
 
     def list_watched(
@@ -200,7 +200,7 @@ def _parse_iso_to_ts(s: str | None) -> int | None:
             s = s[:-1] + "+00:00"
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return int(dt.timestamp())
     except (ValueError, IndexError) as e:
         logger.warning("emby: failed to parse iso datetime %r: %s", s, e)

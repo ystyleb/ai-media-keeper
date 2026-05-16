@@ -12,14 +12,12 @@ Coverage:
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from clients.watch.emby import EmbyClient, EmbyItem, _parse_item, _parse_iso_to_ts
+from clients.watch.emby import EmbyClient, EmbyItem, _parse_iso_to_ts, _parse_item
 from db import migrations
 from services import destructive_action, watch_sync
 
@@ -93,7 +91,7 @@ def test_parse_item_episode_with_tmdb_id_is_episode_id():
         "Type": "Episode",
         "Name": "Pilot",
         "ProductionYear": 2013,
-        "ProviderIds": {"Tmdb": "ep-9999"},          # episode tmdb id
+        "ProviderIds": {"Tmdb": "ep-9999"},  # episode tmdb id
         "SeriesId": "emby-series-1399",
         "ParentIndexNumber": 1,
         "IndexNumber": 1,
@@ -101,7 +99,7 @@ def test_parse_item_episode_with_tmdb_id_is_episode_id():
     }
     item = _parse_item(raw)
     assert item.type == "Episode"
-    assert item.tmdb_id == "ep-9999"                  # episode tmdb id, NOT series
+    assert item.tmdb_id == "ep-9999"  # episode tmdb id, NOT series
     assert item.series_id == "emby-series-1399"
     assert item.season_number == 1
     assert item.episode_number == 1
@@ -111,10 +109,18 @@ def test_parse_item_episode_with_tmdb_id_is_episode_id():
 
 
 def test_map_movie_with_tmdb_returns_mapped():
-    item = EmbyItem(id="m1", type="Movie", name="X", year=2020,
-                    tmdb_id="238", imdb_id=None, series_id=None,
-                    season_number=None, episode_number=None,
-                    last_played_at=1700000000)
+    item = EmbyItem(
+        id="m1",
+        type="Movie",
+        name="X",
+        year=2020,
+        tmdb_id="238",
+        imdb_id=None,
+        series_id=None,
+        season_number=None,
+        episode_number=None,
+        last_played_at=1700000000,
+    )
     w = watch_sync.map_emby_item_to_watched(item, series_tmdb_cache={})
     assert w.media_type == "movie"
     assert w.tmdb_movie_id == "238"
@@ -127,10 +133,18 @@ def test_map_movie_with_tmdb_returns_mapped():
 
 
 def test_map_movie_without_tmdb_returns_unmapped():
-    item = EmbyItem(id="m2", type="Movie", name="X", year=2020,
-                    tmdb_id=None, imdb_id=None, series_id=None,
-                    season_number=None, episode_number=None,
-                    last_played_at=1700000000)
+    item = EmbyItem(
+        id="m2",
+        type="Movie",
+        name="X",
+        year=2020,
+        tmdb_id=None,
+        imdb_id=None,
+        series_id=None,
+        season_number=None,
+        episode_number=None,
+        last_played_at=1700000000,
+    )
     w = watch_sync.map_emby_item_to_watched(item, series_tmdb_cache={})
     assert w.mapping_status == "unmapped"
     assert w.tmdb_movie_id is None
@@ -140,18 +154,22 @@ def test_map_movie_without_tmdb_returns_unmapped():
 
 
 def test_map_episode_with_tmdb_episode_id_mapped_strong():
-    item = EmbyItem(id="e1", type="Episode", name="Pilot", year=2013,
-                    tmdb_id="ep-9999",                # episode tmdb id
-                    imdb_id=None,
-                    series_id="emby-series-1399",
-                    season_number=1, episode_number=1,
-                    last_played_at=1700000000)
-    w = watch_sync.map_emby_item_to_watched(
-        item, series_tmdb_cache={"emby-series-1399": "1399"}
+    item = EmbyItem(
+        id="e1",
+        type="Episode",
+        name="Pilot",
+        year=2013,
+        tmdb_id="ep-9999",  # episode tmdb id
+        imdb_id=None,
+        series_id="emby-series-1399",
+        season_number=1,
+        episode_number=1,
+        last_played_at=1700000000,
     )
+    w = watch_sync.map_emby_item_to_watched(item, series_tmdb_cache={"emby-series-1399": "1399"})
     assert w.media_type == "tv"
     assert w.tmdb_movie_id is None
-    assert w.tmdb_series_id == "1399"                 # filled from cache
+    assert w.tmdb_series_id == "1399"  # filled from cache
     assert w.tmdb_episode_id == "ep-9999"
     assert w.season_number == 1
     assert w.mapping_status == "mapped"
@@ -160,15 +178,19 @@ def test_map_episode_with_tmdb_episode_id_mapped_strong():
 
 def test_map_episode_without_episode_id_falls_back_to_series_se():
     """No ProviderIds.Tmdb on Episode but series tmdb id available + s/e known."""
-    item = EmbyItem(id="e2", type="Episode", name="Pilot", year=2013,
-                    tmdb_id=None,
-                    imdb_id=None,
-                    series_id="emby-series-1399",
-                    season_number=1, episode_number=1,
-                    last_played_at=1700000000)
-    w = watch_sync.map_emby_item_to_watched(
-        item, series_tmdb_cache={"emby-series-1399": "1399"}
+    item = EmbyItem(
+        id="e2",
+        type="Episode",
+        name="Pilot",
+        year=2013,
+        tmdb_id=None,
+        imdb_id=None,
+        series_id="emby-series-1399",
+        season_number=1,
+        episode_number=1,
+        last_played_at=1700000000,
     )
+    w = watch_sync.map_emby_item_to_watched(item, series_tmdb_cache={"emby-series-1399": "1399"})
     assert w.tmdb_episode_id is None
     assert w.tmdb_series_id == "1399"
     assert w.mapping_status == "fallback_se"
@@ -177,11 +199,18 @@ def test_map_episode_without_episode_id_falls_back_to_series_se():
 
 
 def test_map_episode_no_episode_id_no_series_tmdb_unmapped():
-    item = EmbyItem(id="e3", type="Episode", name="x", year=2020,
-                    tmdb_id=None, imdb_id=None,
-                    series_id="some-series",
-                    season_number=1, episode_number=1,
-                    last_played_at=1700000000)
+    item = EmbyItem(
+        id="e3",
+        type="Episode",
+        name="x",
+        year=2020,
+        tmdb_id=None,
+        imdb_id=None,
+        series_id="some-series",
+        season_number=1,
+        episode_number=1,
+        last_played_at=1700000000,
+    )
     w = watch_sync.map_emby_item_to_watched(item, series_tmdb_cache={})
     assert w.tmdb_episode_id is None
     assert w.tmdb_series_id is None
@@ -192,10 +221,18 @@ def test_map_episode_no_episode_id_no_series_tmdb_unmapped():
 
 
 def test_upsert_movie_inserts_only_movie_id(conn):
-    item = EmbyItem(id="ins-1", type="Movie", name="Godfather", year=1972,
-                    tmdb_id="238", imdb_id=None, series_id=None,
-                    season_number=None, episode_number=None,
-                    last_played_at=1700000000)
+    item = EmbyItem(
+        id="ins-1",
+        type="Movie",
+        name="Godfather",
+        year=1972,
+        tmdb_id="238",
+        imdb_id=None,
+        series_id=None,
+        season_number=None,
+        episode_number=None,
+        last_played_at=1700000000,
+    )
     w = watch_sync.map_emby_item_to_watched(item, series_tmdb_cache={})
     result = watch_sync._upsert_watched_item(conn, w)
     assert result == "inserted"
@@ -210,11 +247,18 @@ def test_upsert_movie_inserts_only_movie_id(conn):
 
 
 def test_upsert_episode_strong_inserts_episode_and_series(conn):
-    item = EmbyItem(id="ins-ep-1", type="Episode", name="Pilot", year=2013,
-                    tmdb_id="ep-1", imdb_id=None,
-                    series_id="emby-1399",
-                    season_number=1, episode_number=1,
-                    last_played_at=1700000000)
+    item = EmbyItem(
+        id="ins-ep-1",
+        type="Episode",
+        name="Pilot",
+        year=2013,
+        tmdb_id="ep-1",
+        imdb_id=None,
+        series_id="emby-1399",
+        season_number=1,
+        episode_number=1,
+        last_played_at=1700000000,
+    )
     w = watch_sync.map_emby_item_to_watched(item, {"emby-1399": "1399"})
     assert watch_sync._upsert_watched_item(conn, w) == "inserted"
     row = conn.execute(
@@ -230,35 +274,70 @@ def test_upsert_episode_strong_inserts_episode_and_series(conn):
 def test_upsert_tv_without_se_skipped(conn):
     """TV row with missing season/episode fails CHECK; we should skip not raise."""
     w = watch_sync.WatchedItem(
-        provider="emby", provider_item_id="bad-ep", media_type="tv",
-        tmdb_movie_id=None, tmdb_series_id=None, tmdb_episode_id=None,
-        imdb_id=None, season_number=None, episode_number=None,
-        title=None, year=None, watched_at=1700000000, raw_hash="x",
-        mapping_status="unmapped", mapping_confidence=0.0, mapping_source="unknown",
+        provider="emby",
+        provider_item_id="bad-ep",
+        media_type="tv",
+        tmdb_movie_id=None,
+        tmdb_series_id=None,
+        tmdb_episode_id=None,
+        imdb_id=None,
+        season_number=None,
+        episode_number=None,
+        title=None,
+        year=None,
+        watched_at=1700000000,
+        raw_hash="x",
+        mapping_status="unmapped",
+        mapping_confidence=0.0,
+        mapping_source="unknown",
     )
     result = watch_sync._upsert_watched_item(conn, w)
     assert result == "skipped"
 
 
 def test_upsert_same_row_skips_when_raw_hash_unchanged(conn):
-    item = EmbyItem(id="dup-1", type="Movie", name="X", year=2020,
-                    tmdb_id="100", imdb_id=None, series_id=None,
-                    season_number=None, episode_number=None,
-                    last_played_at=1700000000)
+    item = EmbyItem(
+        id="dup-1",
+        type="Movie",
+        name="X",
+        year=2020,
+        tmdb_id="100",
+        imdb_id=None,
+        series_id=None,
+        season_number=None,
+        episode_number=None,
+        last_played_at=1700000000,
+    )
     w = watch_sync.map_emby_item_to_watched(item, {})
     assert watch_sync._upsert_watched_item(conn, w) == "inserted"
     assert watch_sync._upsert_watched_item(conn, w) == "skipped"
 
 
 def test_upsert_updates_when_watched_at_changes(conn):
-    item1 = EmbyItem(id="re-1", type="Movie", name="X", year=2020,
-                     tmdb_id="100", imdb_id=None, series_id=None,
-                     season_number=None, episode_number=None,
-                     last_played_at=1700000000)
-    item2 = EmbyItem(id="re-1", type="Movie", name="X", year=2020,
-                     tmdb_id="100", imdb_id=None, series_id=None,
-                     season_number=None, episode_number=None,
-                     last_played_at=1800000000)
+    item1 = EmbyItem(
+        id="re-1",
+        type="Movie",
+        name="X",
+        year=2020,
+        tmdb_id="100",
+        imdb_id=None,
+        series_id=None,
+        season_number=None,
+        episode_number=None,
+        last_played_at=1700000000,
+    )
+    item2 = EmbyItem(
+        id="re-1",
+        type="Movie",
+        name="X",
+        year=2020,
+        tmdb_id="100",
+        imdb_id=None,
+        series_id=None,
+        season_number=None,
+        episode_number=None,
+        last_played_at=1800000000,
+    )
     w1 = watch_sync.map_emby_item_to_watched(item1, {})
     w2 = watch_sync.map_emby_item_to_watched(item2, {})
     assert watch_sync._upsert_watched_item(conn, w1) == "inserted"
@@ -311,9 +390,7 @@ def test_finalize_run_writes_terminal_status(conn):
 def test_finalize_run_failed_carries_error(conn):
     run_id = watch_sync.claim_sync_run(conn, "emby")
     watch_sync.finalize_run(conn, run_id, status="failed", error="emby 500")
-    row = conn.execute(
-        "SELECT status, error FROM watch_sync_runs WHERE id=?", (run_id,)
-    ).fetchone()
+    row = conn.execute("SELECT status, error FROM watch_sync_runs WHERE id=?", (run_id,)).fetchone()
     assert row["status"] == "failed"
     assert row["error"] == "emby 500"
 
@@ -337,9 +414,7 @@ def test_reap_stuck_marks_old_running_as_aborted(conn):
     conn.commit()
     n = watch_sync.reap_stuck_sync_runs(conn, timeout_secs=600)
     assert n == 1
-    row = conn.execute(
-        "SELECT status, error FROM watch_sync_runs WHERE id=?", (run_id,)
-    ).fetchone()
+    row = conn.execute("SELECT status, error FROM watch_sync_runs WHERE id=?", (run_id,)).fetchone()
     assert row["status"] == "aborted"
 
 
@@ -366,14 +441,30 @@ class _FakeEmbyClient:
 
 def test_sync_emby_inserts_mapped_items(db_path):
     items = [
-        EmbyItem(id="m-1", type="Movie", name="Godfather", year=1972,
-                 tmdb_id="238", imdb_id=None, series_id=None,
-                 season_number=None, episode_number=None,
-                 last_played_at=1700000000),
-        EmbyItem(id="e-1", type="Episode", name="Pilot", year=2013,
-                 tmdb_id="ep-1", imdb_id=None, series_id="emby-1399",
-                 season_number=1, episode_number=1,
-                 last_played_at=1700000000),
+        EmbyItem(
+            id="m-1",
+            type="Movie",
+            name="Godfather",
+            year=1972,
+            tmdb_id="238",
+            imdb_id=None,
+            series_id=None,
+            season_number=None,
+            episode_number=None,
+            last_played_at=1700000000,
+        ),
+        EmbyItem(
+            id="e-1",
+            type="Episode",
+            name="Pilot",
+            year=2013,
+            tmdb_id="ep-1",
+            imdb_id=None,
+            series_id="emby-1399",
+            season_number=1,
+            episode_number=1,
+            last_played_at=1700000000,
+        ),
     ]
     client = _FakeEmbyClient(items, {"emby-1399": "1399"})
 
@@ -381,7 +472,9 @@ def test_sync_emby_inserts_mapped_items(db_path):
         return destructive_action.open_connection(db_path)
 
     run_id = watch_sync.sync_emby(
-        open_conn=open_conn, emby_client=client, run_in_thread=False,
+        open_conn=open_conn,
+        emby_client=client,
+        run_in_thread=False,
     )
 
     conn = open_conn()

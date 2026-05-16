@@ -7,8 +7,6 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from services import llm
 
 
@@ -26,10 +24,18 @@ def _make_openai_mock(response_text: str):
 
 
 def test_extract_title_happy_path():
-    fake = _make_openai_mock(json.dumps({
-        "title": "死亡笔记", "alt_title": "Death Note",
-        "year": 2006, "season": 1, "episode": None, "media_type": "tv",
-    }))
+    fake = _make_openai_mock(
+        json.dumps(
+            {
+                "title": "死亡笔记",
+                "alt_title": "Death Note",
+                "year": 2006,
+                "season": 1,
+                "episode": None,
+                "media_type": "tv",
+            }
+        )
+    )
     with patch.dict(sys.modules, {"openai": fake}):
         ext, err = llm.extract_title_from_filename(
             "死亡笔记.BDrip1080P.X264.AC3.LGGZ S.01.mkv",
@@ -46,9 +52,7 @@ def test_extract_title_happy_path():
 def test_extract_title_returns_null_when_unrecognizable():
     fake = _make_openai_mock(json.dumps({"title": None}))
     with patch.dict(sys.modules, {"openai": fake}):
-        ext, err = llm.extract_title_from_filename(
-            "random.gibberish.mkv", api_key="fake-key"
-        )
+        ext, err = llm.extract_title_from_filename("random.gibberish.mkv", api_key="fake-key")
     assert ext is None
     assert err == "no_title"
 
@@ -93,9 +97,14 @@ def test_extract_title_markdown_fence_tolerated():
 
 
 def test_extract_title_invalid_media_type_falls_to_unknown():
-    fake = _make_openai_mock(json.dumps({
-        "title": "Something", "media_type": "tv_or_movie",  # invalid enum
-    }))
+    fake = _make_openai_mock(
+        json.dumps(
+            {
+                "title": "Something",
+                "media_type": "tv_or_movie",  # invalid enum
+            }
+        )
+    )
     with patch.dict(sys.modules, {"openai": fake}):
         ext, err = llm.extract_title_from_filename("x.mkv", api_key="fake-key")
     assert ext is not None
@@ -104,9 +113,15 @@ def test_extract_title_invalid_media_type_falls_to_unknown():
 
 
 def test_extract_title_non_int_year_handled():
-    fake = _make_openai_mock(json.dumps({
-        "title": "X", "year": "not a number", "media_type": "movie",
-    }))
+    fake = _make_openai_mock(
+        json.dumps(
+            {
+                "title": "X",
+                "year": "not a number",
+                "media_type": "movie",
+            }
+        )
+    )
     with patch.dict(sys.modules, {"openai": fake}):
         ext, err = llm.extract_title_from_filename("x.mkv", api_key="fake-key")
     assert ext is not None

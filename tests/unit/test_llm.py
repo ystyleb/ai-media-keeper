@@ -14,8 +14,6 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from services import llm
 
 
@@ -35,23 +33,37 @@ def _make_openai_mock(response_text: str):
 
 PARSE_SAMPLE = {"title": "Rick and Morty", "season": 5, "episode": 1, "media_type": "episode"}
 CANDIDATES_SAMPLE = [
-    {"id": "tmdb:tv:60625", "title": "瑞克和莫蒂", "original_title": "Rick and Morty",
-     "year": 2013, "media_type": "tv", "overview": "Mad scientist Rick..."},
-    {"id": "tmdb:tv:202559", "title": "瑞克和莫蒂：日漫版", "original_title": "Rick and Morty: The Anime",
-     "year": 2024, "media_type": "tv", "overview": "Anime spin-off..."},
+    {
+        "id": "tmdb:tv:60625",
+        "title": "瑞克和莫蒂",
+        "original_title": "Rick and Morty",
+        "year": 2013,
+        "media_type": "tv",
+        "overview": "Mad scientist Rick...",
+    },
+    {
+        "id": "tmdb:tv:202559",
+        "title": "瑞克和莫蒂：日漫版",
+        "original_title": "Rick and Morty: The Anime",
+        "year": 2024,
+        "media_type": "tv",
+        "overview": "Anime spin-off...",
+    },
 ]
 
 
 def test_happy_path_valid_selection():
-    fake = _make_openai_mock(json.dumps({
-        "selected": "tmdb:tv:60625",
-        "confidence": 0.95,
-        "reasoning": "original_title exact match",
-    }))
-    with patch.dict(sys.modules, {"openai": fake}):
-        result = llm.select_candidate(
-            PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key"
+    fake = _make_openai_mock(
+        json.dumps(
+            {
+                "selected": "tmdb:tv:60625",
+                "confidence": 0.95,
+                "reasoning": "original_title exact match",
+            }
         )
+    )
+    with patch.dict(sys.modules, {"openai": fake}):
+        result = llm.select_candidate(PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key")
     assert result.selected_id == "tmdb:tv:60625"
     assert result.confidence == 0.95
     assert "exact" in result.reasoning
@@ -59,15 +71,17 @@ def test_happy_path_valid_selection():
 
 def test_fabricated_id_rejected():
     """LLM 返回 candidates 里不存在的 id → 必须拒绝（契约 #3 hard rule）。"""
-    fake = _make_openai_mock(json.dumps({
-        "selected": "tmdb:tv:99999999",  # 假的，不在 candidates 里
-        "confidence": 0.99,
-        "reasoning": "I made this up",
-    }))
-    with patch.dict(sys.modules, {"openai": fake}):
-        result = llm.select_candidate(
-            PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key"
+    fake = _make_openai_mock(
+        json.dumps(
+            {
+                "selected": "tmdb:tv:99999999",  # 假的，不在 candidates 里
+                "confidence": 0.99,
+                "reasoning": "I made this up",
+            }
         )
+    )
+    with patch.dict(sys.modules, {"openai": fake}):
+        result = llm.select_candidate(PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key")
     assert result.selected_id is None
     assert result.confidence == 0.0
     assert "fabricated_id_rejected" in result.reasoning
@@ -75,15 +89,17 @@ def test_fabricated_id_rejected():
 
 def test_low_confidence_returns_none():
     """selected 合法但 confidence < 0.7 → needs_review。"""
-    fake = _make_openai_mock(json.dumps({
-        "selected": "tmdb:tv:60625",
-        "confidence": 0.5,
-        "reasoning": "not sure, could be either",
-    }))
-    with patch.dict(sys.modules, {"openai": fake}):
-        result = llm.select_candidate(
-            PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key"
+    fake = _make_openai_mock(
+        json.dumps(
+            {
+                "selected": "tmdb:tv:60625",
+                "confidence": 0.5,
+                "reasoning": "not sure, could be either",
+            }
         )
+    )
+    with patch.dict(sys.modules, {"openai": fake}):
+        result = llm.select_candidate(PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key")
     assert result.selected_id is None
     assert result.confidence == 0.5
     assert "not sure" in result.reasoning
@@ -91,24 +107,24 @@ def test_low_confidence_returns_none():
 
 def test_null_selection_returns_none():
     """LLM 主动返 selected=null → needs_review。"""
-    fake = _make_openai_mock(json.dumps({
-        "selected": None,
-        "confidence": 0.6,
-        "reasoning": "title mismatch",
-    }))
-    with patch.dict(sys.modules, {"openai": fake}):
-        result = llm.select_candidate(
-            PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key"
+    fake = _make_openai_mock(
+        json.dumps(
+            {
+                "selected": None,
+                "confidence": 0.6,
+                "reasoning": "title mismatch",
+            }
         )
+    )
+    with patch.dict(sys.modules, {"openai": fake}):
+        result = llm.select_candidate(PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key")
     assert result.selected_id is None
 
 
 def test_malformed_json_graceful_fallback():
     fake = _make_openai_mock("not valid json at all {")
     with patch.dict(sys.modules, {"openai": fake}):
-        result = llm.select_candidate(
-            PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key"
-        )
+        result = llm.select_candidate(PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key")
     assert result.selected_id is None
     assert "malformed_json" in result.reasoning
 
@@ -121,9 +137,7 @@ def test_markdown_fenced_json_accepted():
 ```
 """)
     with patch.dict(sys.modules, {"openai": fake}):
-        result = llm.select_candidate(
-            PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key"
-        )
+        result = llm.select_candidate(PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key")
     assert result.selected_id == "tmdb:tv:60625"
 
 
@@ -132,9 +146,7 @@ def test_network_error_graceful_fallback():
     fake_module = types.ModuleType("openai")
     fake_module.OpenAI = fake_class
     with patch.dict(sys.modules, {"openai": fake_module}):
-        result = llm.select_candidate(
-            PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key"
-        )
+        result = llm.select_candidate(PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key")
     assert result.selected_id is None
     assert "llm_error" in result.reasoning
 
@@ -159,6 +171,7 @@ def test_no_api_key_short_circuits():
 def test_openai_sdk_missing_graceful():
     """openai SDK 没装 → 不崩，返 needs_review。"""
     import builtins
+
     real_import = builtins.__import__
 
     def deny_openai(name, *args, **kwargs):
@@ -167,9 +180,7 @@ def test_openai_sdk_missing_graceful():
         return real_import(name, *args, **kwargs)
 
     with patch.object(builtins, "__import__", side_effect=deny_openai):
-        result = llm.select_candidate(
-            PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key"
-        )
+        result = llm.select_candidate(PARSE_SAMPLE, CANDIDATES_SAMPLE, api_key="fake-key")
     assert result.selected_id is None
     assert "sdk_missing" in result.reasoning
 

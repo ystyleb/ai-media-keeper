@@ -1,0 +1,46 @@
+# NASVault docker-compose — 一键起 NAS 媒体库管理。
+#
+# 启动:
+#   docker compose up -d
+#
+# 首次启动:
+#   1. config/ 自动初始化（API token 生成到 config/.api_token）
+#   2. cat config/.api_token → 复制 token
+#   3. 浏览器打开 http://127.0.0.1:8080 → 粘贴 token
+#   4. 在 UI 配 NAS host / qBit URL / TMDB key / DeepSeek key
+#
+# 默认只监听 127.0.0.1（localhost）— 不直接对外暴露。
+# 远程访问推荐用 Tailscale / WireGuard / 反向代理 + auth。
+
+services:
+  nasvault:
+    build: .
+    image: nasvault:latest
+    container_name: nasvault
+    restart: unless-stopped
+    ports:
+      # 仅本机访问；要 LAN 访问改成 "<lan_ip>:8080:8080" 或 "0.0.0.0:8080:8080"
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # 配置 + 数据库持久化（API token / NAS 配置 / SQLite cache 都在这）
+      - ./config:/app/config
+      # SSH 私钥（连 NAS 必需），只读挂载
+      - ~/.ssh:/root/.ssh:ro
+      # 可选：known_hosts 持久化避免重启后重新确认 host key
+      - ~/.ssh/known_hosts:/root/.ssh/known_hosts:rw
+    environment:
+      # 默认全 UI 配置；如需 CI / 多机部署用 env override，参考 README 配置文件章节
+      # NAS_API_TOKEN: "..."         # 强制 token（覆盖 config/.api_token）
+      # NAS_HOST: "192.168.1.100"    # 强制 NAS 地址
+      TZ: "Asia/Shanghai"
+    # NASVault organize_runner / scanner 用进程内 lock — 必须单 worker
+    # gunicorn.conf.py 已 hard enforce workers=1 + preload=False，
+    # docker-compose 这里不能再覆盖 CMD 加 -w >1
+    # 健康检查（可选）— /api/disk 不需要 auth bypass，但需要 token；
+    # 简单 TCP probe 就够了
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',8080))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s

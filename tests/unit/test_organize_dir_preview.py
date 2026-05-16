@@ -26,6 +26,7 @@ def token():
 @dataclass
 class _CachedStub:
     """Stand-in for services.metadata_cache.CachedMetadata。"""
+
     path: str
     title: str
     media_type: str
@@ -41,7 +42,8 @@ class _CachedStub:
 
 def _ok_cfg(monkeypatch, movies_root="/media/movies", tv_root="/media/tv"):
     monkeypatch.setattr(
-        app_module, "load_organize_config",
+        app_module,
+        "load_organize_config",
         lambda: {"movies_root": movies_root, "tv_root": tv_root},
     )
 
@@ -118,20 +120,38 @@ def test_dir_preview_classifies_mixed_directory(client, token, monkeypatch):
     def fake_get_many(conn, qpaths, *, current_stats=None):
         out = {p: (None, "miss") for p in qpaths}
         out["/dl/movie.will_link.mkv"] = (
-            _CachedStub(path="/dl/movie.will_link.mkv", title="Will Link",
-                        media_type="movie", year=2020, tmdb_id="111"), "hit",
+            _CachedStub(
+                path="/dl/movie.will_link.mkv",
+                title="Will Link",
+                media_type="movie",
+                year=2020,
+                tmdb_id="111",
+            ),
+            "hit",
         )
         out["/dl/movie.already_linked.mkv"] = (
-            _CachedStub(path="/dl/movie.already_linked.mkv", title="Already",
-                        media_type="movie", year=2021, tmdb_id="222"), "hit",
+            _CachedStub(
+                path="/dl/movie.already_linked.mkv",
+                title="Already",
+                media_type="movie",
+                year=2021,
+                tmdb_id="222",
+            ),
+            "hit",
         )
         out["/dl/movie.conflict.mkv"] = (
-            _CachedStub(path="/dl/movie.conflict.mkv", title="Conflict",
-                        media_type="movie", year=2022, tmdb_id="333"), "hit",
+            _CachedStub(
+                path="/dl/movie.conflict.mkv",
+                title="Conflict",
+                media_type="movie",
+                year=2022,
+                tmdb_id="333",
+            ),
+            "hit",
         )
         out["/dl/extra.mkv"] = (
-            _CachedStub(path="/dl/extra.mkv", title="Extra Content",
-                        media_type="extra"), "hit",
+            _CachedStub(path="/dl/extra.mkv", title="Extra Content", media_type="extra"),
+            "hit",
         )
         return out
 
@@ -139,23 +159,40 @@ def test_dir_preview_classifies_mixed_directory(client, token, monkeypatch):
 
     # SSH stat: 第一次调用是 src，第二次是 dst
     call_count = {"n": 0}
+
     def fake_stat(qpaths):
         call_count["n"] += 1
         if call_count["n"] == 1:
             # src batch — 都存在
-            return {p: {"exists": True, "inode": src_inodes[p],
-                        "size_bytes": 1024 * 1024, "mtime": 1700000000}
-                    for p in qpaths}
+            return {
+                p: {
+                    "exists": True,
+                    "inode": src_inodes[p],
+                    "size_bytes": 1024 * 1024,
+                    "mtime": 1700000000,
+                }
+                for p in qpaths
+            }
         else:
             # dst batch — already_linked 同 inode，conflict 不同 inode，will_link 不存在
             out = {}
             for q in qpaths:
                 if "Already" in q:
-                    out[q] = {"exists": True, "inode": 200,
-                              "size_bytes": 0, "mtime": 0, "is_dir": False}
+                    out[q] = {
+                        "exists": True,
+                        "inode": 200,
+                        "size_bytes": 0,
+                        "mtime": 0,
+                        "is_dir": False,
+                    }
                 elif "Conflict" in q:
-                    out[q] = {"exists": True, "inode": 9999,
-                              "size_bytes": 0, "mtime": 0, "is_dir": False}
+                    out[q] = {
+                        "exists": True,
+                        "inode": 9999,
+                        "size_bytes": 0,
+                        "mtime": 0,
+                        "is_dir": False,
+                    }
                 else:
                     out[q] = {"exists": False}
             return out
@@ -193,18 +230,29 @@ def test_dir_preview_uses_only_two_ssh_stat_calls(client, token, monkeypatch):
     monkeypatch.setattr(app_module, "_list_video_paths", lambda *a, **kw: paths)
 
     def fake_get_many(conn, qpaths, *, current_stats=None):
-        return {p: (_CachedStub(path=p, title=f"M{i}", media_type="movie",
-                                year=2020, tmdb_id=str(i)), "hit")
-                for i, p in enumerate(qpaths)}
+        return {
+            p: (
+                _CachedStub(path=p, title=f"M{i}", media_type="movie", year=2020, tmdb_id=str(i)),
+                "hit",
+            )
+            for i, p in enumerate(qpaths)
+        }
+
     monkeypatch.setattr(app_module.metadata_cache, "get_many_by_path", fake_get_many)
 
     call_count = {"n": 0}
+
     def fake_stat(qpaths):
         call_count["n"] += 1
-        return {p: {"exists": True, "inode": 100 + i,
-                    "size_bytes": 1024, "mtime": 1000}
-                for i, p in enumerate(qpaths)} if call_count["n"] == 1 else \
-               {p: {"exists": False} for p in qpaths}
+        return (
+            {
+                p: {"exists": True, "inode": 100 + i, "size_bytes": 1024, "mtime": 1000}
+                for i, p in enumerate(qpaths)
+            }
+            if call_count["n"] == 1
+            else {p: {"exists": False} for p in qpaths}
+        )
+
     monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
 
     resp = client.get(
@@ -223,16 +271,28 @@ def test_dir_preview_not_applicable_for_tv_missing_episode(client, token, monkey
 
     def fake_get_many(conn, qpaths, *, current_stats=None):
         # tv 但没 season/episode
-        return {"/dl/show.mkv": (
-            _CachedStub(path="/dl/show.mkv", title="Show",
-                        media_type="tv", year=2020, tmdb_id="999",
-                        season_number=None, episode_number=None), "hit"),
+        return {
+            "/dl/show.mkv": (
+                _CachedStub(
+                    path="/dl/show.mkv",
+                    title="Show",
+                    media_type="tv",
+                    year=2020,
+                    tmdb_id="999",
+                    season_number=None,
+                    episode_number=None,
+                ),
+                "hit",
+            ),
         }
+
     monkeypatch.setattr(app_module.metadata_cache, "get_many_by_path", fake_get_many)
     monkeypatch.setattr(
-        app_module, "_ssh_stat_paths",
-        lambda paths: {p: {"exists": True, "inode": 100,
-                           "size_bytes": 1024, "mtime": 1000} for p in paths},
+        app_module,
+        "_ssh_stat_paths",
+        lambda paths: {
+            p: {"exists": True, "inode": 100, "size_bytes": 1024, "mtime": 1000} for p in paths
+        },
     )
 
     resp = client.get(
@@ -243,8 +303,10 @@ def test_dir_preview_not_applicable_for_tv_missing_episode(client, token, monkey
     body = resp.get_json()
     assert body["counts"]["not_applicable"] == 1
     assert body["items"][0]["status"] == "not_applicable"
-    assert "episode" in body["items"][0]["reason"].lower() or \
-           "season" in body["items"][0]["reason"].lower()
+    assert (
+        "episode" in body["items"][0]["reason"].lower()
+        or "season" in body["items"][0]["reason"].lower()
+    )
 
 
 def test_dir_preview_stale_cache_treated_as_needs_identify(client, token, monkeypatch):
@@ -255,15 +317,22 @@ def test_dir_preview_stale_cache_treated_as_needs_identify(client, token, monkey
 
     def fake_get_many(conn, qpaths, *, current_stats=None):
         # 返回 stale 状态
-        return {"/dl/x.mkv": (
-            _CachedStub(path="/dl/x.mkv", title="X", media_type="movie",
-                        year=2020, tmdb_id="111"), "stale"),
+        return {
+            "/dl/x.mkv": (
+                _CachedStub(
+                    path="/dl/x.mkv", title="X", media_type="movie", year=2020, tmdb_id="111"
+                ),
+                "stale",
+            ),
         }
+
     monkeypatch.setattr(app_module.metadata_cache, "get_many_by_path", fake_get_many)
     monkeypatch.setattr(
-        app_module, "_ssh_stat_paths",
-        lambda paths: {p: {"exists": True, "inode": 100,
-                           "size_bytes": 1024, "mtime": 1000} for p in paths},
+        app_module,
+        "_ssh_stat_paths",
+        lambda paths: {
+            p: {"exists": True, "inode": 100, "size_bytes": 1024, "mtime": 1000} for p in paths
+        },
     )
 
     resp = client.get(
@@ -281,16 +350,22 @@ def test_dir_preview_limit_reached_flag(client, token, monkeypatch):
     _patch_validate_path(monkeypatch)
     # 模拟 _list_video_paths 已经把 cap 计入但返了 limit+1 表示有更多
     monkeypatch.setattr(
-        app_module, "_list_video_paths",
+        app_module,
+        "_list_video_paths",
         lambda path, max_depth, limit: [f"/dl/f{i}.mkv" for i in range(limit + 1)],
     )
-    monkeypatch.setattr(app_module.metadata_cache, "get_many_by_path",
-                        lambda c, qp, **kw: {p: (None, "miss") for p in qp})
     monkeypatch.setattr(
-        app_module, "_ssh_stat_paths",
-        lambda paths: {p: {"exists": True, "inode": i,
-                           "size_bytes": 1024, "mtime": 1000}
-                       for i, p in enumerate(paths)},
+        app_module.metadata_cache,
+        "get_many_by_path",
+        lambda c, qp, **kw: {p: (None, "miss") for p in qp},
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_ssh_stat_paths",
+        lambda paths: {
+            p: {"exists": True, "inode": i, "size_bytes": 1024, "mtime": 1000}
+            for i, p in enumerate(paths)
+        },
     )
 
     resp = client.get(
@@ -306,12 +381,15 @@ def test_dir_preview_src_missing_marks_not_applicable(client, token, monkeypatch
     """find 列出来的 path 但 SSH stat 显示不存在（race）→ not_applicable + src_missing。"""
     _ok_cfg(monkeypatch)
     _patch_validate_path(monkeypatch)
-    monkeypatch.setattr(app_module, "_list_video_paths",
-                        lambda *a, **kw: ["/dl/ghost.mkv"])
-    monkeypatch.setattr(app_module.metadata_cache, "get_many_by_path",
-                        lambda c, qp, **kw: {p: (None, "miss") for p in qp})
+    monkeypatch.setattr(app_module, "_list_video_paths", lambda *a, **kw: ["/dl/ghost.mkv"])
     monkeypatch.setattr(
-        app_module, "_ssh_stat_paths",
+        app_module.metadata_cache,
+        "get_many_by_path",
+        lambda c, qp, **kw: {p: (None, "miss") for p in qp},
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_ssh_stat_paths",
         lambda paths: {p: {"exists": False} for p in paths},
     )
 

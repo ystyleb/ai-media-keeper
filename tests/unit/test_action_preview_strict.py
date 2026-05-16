@@ -75,7 +75,9 @@ def test_delete_preview_invalid_source_returns_400(client, token):
 
 def test_delete_preview_missing_source_defaults_file_browser(client, token):
     """缺 source 应 fallback 到 file_browser + lenient (legacy 兼容)。"""
-    with patch.object(app_module, "_build_delete_snapshot", return_value=_ok_snapshot([{"path": "/x.mkv"}])):
+    with patch.object(
+        app_module, "_build_delete_snapshot", return_value=_ok_snapshot([{"path": "/x.mkv"}])
+    ):
         resp = client.post(
             "/api/action/preview",
             json={"kind": "delete", "candidates": [{"path": "/x.mkv"}]},
@@ -92,11 +94,17 @@ def test_delete_preview_dedup_source_cannot_use_lenient(client, token):
     resp = client.post(
         "/api/action/preview",
         json={
-            "kind": "delete", "source": "dedup", "snapshot_mode": "lenient",
-            "candidates": [{
-                "path": "/x.mkv",
-                "expected_inode": 1, "expected_size": 1, "expected_mtime": 1,
-            }],
+            "kind": "delete",
+            "source": "dedup",
+            "snapshot_mode": "lenient",
+            "candidates": [
+                {
+                    "path": "/x.mkv",
+                    "expected_inode": 1,
+                    "expected_size": 1,
+                    "expected_mtime": 1,
+                }
+            ],
         },
         headers={"Authorization": f"Bearer {token}"},
     )
@@ -123,13 +131,17 @@ def test_strict_mode_missing_expected_inode_returns_400(client, token):
     resp = client.post(
         "/api/action/preview",
         json={
-            "kind": "delete", "source": "dedup", "snapshot_mode": "strict",
-            "candidates": [{
-                "path": "/x.mkv",
-                "expected_size": 1024,
-                "expected_mtime": 1000,
-                # 缺 expected_inode
-            }],
+            "kind": "delete",
+            "source": "dedup",
+            "snapshot_mode": "strict",
+            "candidates": [
+                {
+                    "path": "/x.mkv",
+                    "expected_size": 1024,
+                    "expected_mtime": 1000,
+                    # 缺 expected_inode
+                }
+            ],
         },
         headers={"Authorization": f"Bearer {token}"},
     )
@@ -143,11 +155,16 @@ def test_strict_mode_missing_expected_size_returns_400(client, token):
     resp = client.post(
         "/api/action/preview",
         json={
-            "kind": "delete", "source": "dedup", "snapshot_mode": "strict",
-            "candidates": [{
-                "path": "/x.mkv",
-                "expected_inode": 100, "expected_mtime": 1000,
-            }],
+            "kind": "delete",
+            "source": "dedup",
+            "snapshot_mode": "strict",
+            "candidates": [
+                {
+                    "path": "/x.mkv",
+                    "expected_inode": 100,
+                    "expected_mtime": 1000,
+                }
+            ],
         },
         headers={"Authorization": f"Bearer {token}"},
     )
@@ -159,11 +176,16 @@ def test_strict_mode_missing_expected_mtime_returns_400(client, token):
     resp = client.post(
         "/api/action/preview",
         json={
-            "kind": "delete", "source": "dedup", "snapshot_mode": "strict",
-            "candidates": [{
-                "path": "/x.mkv",
-                "expected_inode": 100, "expected_size": 1024,
-            }],
+            "kind": "delete",
+            "source": "dedup",
+            "snapshot_mode": "strict",
+            "candidates": [
+                {
+                    "path": "/x.mkv",
+                    "expected_inode": 100,
+                    "expected_size": 1024,
+                }
+            ],
         },
         headers={"Authorization": f"Bearer {token}"},
     )
@@ -181,11 +203,17 @@ def test_strict_mode_all_match_returns_token(client, token):
         resp = client.post(
             "/api/action/preview",
             json={
-                "kind": "delete", "source": "dedup", "snapshot_mode": "strict",
-                "candidates": [{
-                    "path": "/x.mkv",
-                    "expected_inode": 100, "expected_size": 1024, "expected_mtime": 1000,
-                }],
+                "kind": "delete",
+                "source": "dedup",
+                "snapshot_mode": "strict",
+                "candidates": [
+                    {
+                        "path": "/x.mkv",
+                        "expected_inode": 100,
+                        "expected_size": 1024,
+                        "expected_mtime": 1000,
+                    }
+                ],
             },
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -201,22 +229,30 @@ def test_strict_mode_mtime_diff_returns_409_blocked(client, token):
     """strict + mtime diff → 409 + mismatches；不 create_preview / 不返 token。"""
     blocked_snap = _blocked_snapshot(
         items=[{"path": "/x.mkv"}],
-        mismatches=[{
-            "path": "/x.mkv",
-            "diffs": ["mtime_changed"],
-            "expected": {"inode": 100, "size_bytes": 1024, "mtime": 1000},
-            "current": {"inode": 100, "size_bytes": 1024, "mtime": 9999},
-        }],
+        mismatches=[
+            {
+                "path": "/x.mkv",
+                "diffs": ["mtime_changed"],
+                "expected": {"inode": 100, "size_bytes": 1024, "mtime": 1000},
+                "current": {"inode": 100, "size_bytes": 1024, "mtime": 9999},
+            }
+        ],
     )
     with patch.object(app_module, "_build_delete_snapshot", return_value=blocked_snap):
         resp = client.post(
             "/api/action/preview",
             json={
-                "kind": "delete", "source": "dedup", "snapshot_mode": "strict",
-                "candidates": [{
-                    "path": "/x.mkv",
-                    "expected_inode": 100, "expected_size": 1024, "expected_mtime": 1000,
-                }],
+                "kind": "delete",
+                "source": "dedup",
+                "snapshot_mode": "strict",
+                "candidates": [
+                    {
+                        "path": "/x.mkv",
+                        "expected_inode": 100,
+                        "expected_size": 1024,
+                        "expected_mtime": 1000,
+                    }
+                ],
             },
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -225,7 +261,7 @@ def test_strict_mode_mtime_diff_returns_409_blocked(client, token):
     assert body["blocked"] is True
     assert len(body["mismatches"]) == 1
     assert "mtime_changed" in body["mismatches"][0]["diffs"]
-    assert "signed_token" not in body                    # 不产 token
+    assert "signed_token" not in body  # 不产 token
 
 
 # ── _build_delete_snapshot strict 模式单元测试 ─────────────────
@@ -233,17 +269,30 @@ def test_strict_mode_mtime_diff_returns_409_blocked(client, token):
 
 def test_build_delete_snapshot_strict_detects_inode_change(monkeypatch):
     """_build_delete_snapshot mode='strict' 在 inode 变化时填 mismatches[]."""
-    cand = [{"path": "/test/a.mkv",
-             "expected_inode": 999,                  # expected differs from actual
-             "expected_size": 1024,
-             "expected_mtime": 1000}]
+    cand = [
+        {
+            "path": "/test/a.mkv",
+            "expected_inode": 999,  # expected differs from actual
+            "expected_size": 1024,
+            "expected_mtime": 1000,
+        }
+    ]
 
     monkeypatch.setattr(app_module, "validate_path", lambda p: p)
     monkeypatch.setattr(app_module, "_reject_base_path", lambda *_: None)
-    monkeypatch.setattr(app_module, "_ssh_stat_paths", lambda paths: {
-        "/test/a.mkv": {"exists": True, "inode": 100, "size_bytes": 1024,
-                        "mtime": 1000, "is_dir": False},
-    })
+    monkeypatch.setattr(
+        app_module,
+        "_ssh_stat_paths",
+        lambda paths: {
+            "/test/a.mkv": {
+                "exists": True,
+                "inode": 100,
+                "size_bytes": 1024,
+                "mtime": 1000,
+                "is_dir": False,
+            },
+        },
+    )
     monkeypatch.setattr(app_module, "_resolve_real_paths", lambda paths: {p: p for p in paths})
     monkeypatch.setattr(app_module, "_resolve_all_hardlink_paths", lambda paths: {})
     monkeypatch.setattr(app_module, "_enumerate_dir_files", lambda *_, **__: [])
@@ -258,17 +307,30 @@ def test_build_delete_snapshot_strict_detects_inode_change(monkeypatch):
 
 
 def test_build_delete_snapshot_strict_all_match_not_blocked(monkeypatch):
-    cand = [{"path": "/test/a.mkv",
-             "expected_inode": 100,
-             "expected_size": 1024,
-             "expected_mtime": 1000}]
+    cand = [
+        {
+            "path": "/test/a.mkv",
+            "expected_inode": 100,
+            "expected_size": 1024,
+            "expected_mtime": 1000,
+        }
+    ]
 
     monkeypatch.setattr(app_module, "validate_path", lambda p: p)
     monkeypatch.setattr(app_module, "_reject_base_path", lambda *_: None)
-    monkeypatch.setattr(app_module, "_ssh_stat_paths", lambda paths: {
-        "/test/a.mkv": {"exists": True, "inode": 100, "size_bytes": 1024,
-                        "mtime": 1000, "is_dir": False},
-    })
+    monkeypatch.setattr(
+        app_module,
+        "_ssh_stat_paths",
+        lambda paths: {
+            "/test/a.mkv": {
+                "exists": True,
+                "inode": 100,
+                "size_bytes": 1024,
+                "mtime": 1000,
+                "is_dir": False,
+            },
+        },
+    )
     monkeypatch.setattr(app_module, "_resolve_real_paths", lambda paths: {p: p for p in paths})
     monkeypatch.setattr(app_module, "_resolve_all_hardlink_paths", lambda paths: {})
     monkeypatch.setattr(app_module, "_enumerate_dir_files", lambda *_, **__: [])
@@ -282,17 +344,30 @@ def test_build_delete_snapshot_strict_all_match_not_blocked(monkeypatch):
 
 def test_build_delete_snapshot_lenient_ignores_expected_fields(monkeypatch):
     """lenient mode 即使带了 expected_* 也不对比，不阻塞。"""
-    cand = [{"path": "/test/a.mkv",
-             "expected_inode": 999,                # 故意 wrong
-             "expected_size": 9999,
-             "expected_mtime": 9999}]
+    cand = [
+        {
+            "path": "/test/a.mkv",
+            "expected_inode": 999,  # 故意 wrong
+            "expected_size": 9999,
+            "expected_mtime": 9999,
+        }
+    ]
 
     monkeypatch.setattr(app_module, "validate_path", lambda p: p)
     monkeypatch.setattr(app_module, "_reject_base_path", lambda *_: None)
-    monkeypatch.setattr(app_module, "_ssh_stat_paths", lambda paths: {
-        "/test/a.mkv": {"exists": True, "inode": 100, "size_bytes": 1024,
-                        "mtime": 1000, "is_dir": False},
-    })
+    monkeypatch.setattr(
+        app_module,
+        "_ssh_stat_paths",
+        lambda paths: {
+            "/test/a.mkv": {
+                "exists": True,
+                "inode": 100,
+                "size_bytes": 1024,
+                "mtime": 1000,
+                "is_dir": False,
+            },
+        },
+    )
     monkeypatch.setattr(app_module, "_resolve_real_paths", lambda paths: {p: p for p in paths})
     monkeypatch.setattr(app_module, "_resolve_all_hardlink_paths", lambda paths: {})
     monkeypatch.setattr(app_module, "_enumerate_dir_files", lambda *_, **__: [])

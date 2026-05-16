@@ -1,12 +1,12 @@
 """NAS 文件管理器 - 通过 SSH 连接威联通 NAS 进行文件管理"""
 
 import base64
-import subprocess
 import json
+import logging
 import os
 import re
 import shlex
-import logging
+import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -15,19 +15,21 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
-from flask import Flask, render_template, jsonify, request, abort, g, make_response
+from flask import Flask, abort, g, jsonify, make_response, render_template, request
 
-from services import dedup
-from services import destructive_action
+from services import (
+    dedup,
+    destructive_action,
+    llm,
+    metadata_cache,
+    nfo_writer,
+    organize_runner,
+    qbit_auto,
+    scanner,
+    watch_sync,
+)
 from services import identify as identify_svc
-from services import llm
-from services import metadata_cache
-from services import nfo_writer
 from services import organize as organize_svc
-from services import organize_runner
-from services import qbit_auto
-from services import scanner
-from services import watch_sync
 from services.metadata.tmdb import TMDBProvider
 
 # 配置日志
@@ -88,9 +90,7 @@ def save_nas_config(host: str, port: int, user: str, base_path: str, disk_patter
         "base_path": base_path.strip().rstrip("/"),
         "disk_pattern": _validate_glob_pattern(disk_pattern.strip()),
     }
-    NAS_CONFIG_FILE.write_text(
-        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    NAS_CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     load_nas_config()
 
 
@@ -133,8 +133,7 @@ def _load_api_token() -> str:
         f"  Generated new API token → {API_TOKEN_FILE}\n"
         f"  Token (copy into UI on first visit):\n\n"
         f"    {new_token}\n\n"
-        f"  Persists across restarts. Delete the file to rotate.\n"
-        + "=" * 60 + "\n\n"
+        f"  Persists across restarts. Delete the file to rotate.\n" + "=" * 60 + "\n\n"
     )
     return new_token
 
@@ -161,6 +160,7 @@ if WORKER_COUNT != 1:
         f"   which cannot span workers. Run gunicorn with -w 1 or use flask dev.\n"
     )
     sys.exit(1)
+
 
 # Layer 2: sys.argv check —— 拒 gunicorn --preload / -w >1
 # 这是 ground truth for preload 模式（fcntl 在 preload 下被 fork 继承绕过）
@@ -198,6 +198,7 @@ def _check_gunicorn_args() -> None:
             except ValueError:
                 pass
 
+
 _check_gunicorn_args()
 
 # Layer 3: fcntl.flock 跨进程文件锁 — fork-mode ground truth
@@ -216,7 +217,8 @@ if not _is_test_env:
     try:
         _worker_lock_fd = os.open(
             str(_WORKER_LOCK_FILE),
-            os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600,
+            os.O_CREAT | os.O_WRONLY | os.O_TRUNC,
+            0o600,
         )
         _fcntl.flock(_worker_lock_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         os.write(_worker_lock_fd, f"{os.getpid()}\n".encode())
@@ -250,7 +252,8 @@ def _enforce_singleton_after_fork() -> None:
     try:
         new_fd = os.open(
             str(_WORKER_LOCK_FILE),
-            os.O_CREAT | os.O_WRONLY, 0o600,
+            os.O_CREAT | os.O_WRONLY,
+            0o600,
         )
         _fcntl.flock(new_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         os.write(new_fd, f"{os.getpid()}\n".encode())
@@ -262,6 +265,7 @@ def _enforce_singleton_after_fork() -> None:
             f"   Use gunicorn -c gunicorn.conf.py app:app (no --preload).\n"
         )
         os._exit(1)
+
 
 # 注册条件：sys.argv[0] 路径含 'gunicorn' (覆盖 gunicorn 直跑 + gunicorn entrypoint)
 # 不在 pytest / flask 直跑时注册（避免测试场景被 callback 干扰）
@@ -285,6 +289,7 @@ _init_conn = destructive_action.open_connection(DB_PATH)
 try:
     destructive_action.init_schema(_init_conn, SCHEMA_PATH)
     from db import migrations as _migrations
+
     phase3_summary = _migrations.phase3_migrate(_init_conn)
     phase4_summary = _migrations.phase4_migrate(_init_conn)
     phase5_summary = _migrations.phase5_migrate(_init_conn)
@@ -428,6 +433,7 @@ def _emby_client():
     if not (cfg.get("url") and cfg.get("user_id") and key):
         return None
     from clients.watch.emby import EmbyClient
+
     return EmbyClient(base_url=cfg["url"], user_id=cfg["user_id"], api_key=key)
 
 
@@ -460,9 +466,9 @@ def save_organize_config(cfg: dict) -> None:
 
 QBIT_AUTO_ORGANIZE_DEFAULTS = {
     "enabled": False,
-    "categories": [],                  # qBit category 白名单（[] = 不触发任何种子；显式列表防误触）
-    "poll_interval_minutes": 5,        # cron 周期；最小 1min（防压垮 qBit API + DB）
-    "confidence_threshold": 0.85,      # identifier confidence 门槛；< 标 skipped_low_confidence
+    "categories": [],  # qBit category 白名单（[] = 不触发任何种子；显式列表防误触）
+    "poll_interval_minutes": 5,  # cron 周期；最小 1min（防压垮 qBit API + DB）
+    "confidence_threshold": 0.85,  # identifier confidence 门槛；< 标 skipped_low_confidence
 }
 
 
@@ -486,9 +492,7 @@ def load_qbit_auto_organize_config() -> dict:
     if not isinstance(cats, list):
         cats = []
     # 过滤 None / 空白 / 非字符串可转后为空的项；先 None check 防 str(None)='None' 入选
-    merged["categories"] = [
-        str(c).strip() for c in cats if c is not None and str(c).strip()
-    ]
+    merged["categories"] = [str(c).strip() for c in cats if c is not None and str(c).strip()]
     try:
         merged["poll_interval_minutes"] = max(1, int(merged.get("poll_interval_minutes", 5)))
     except (TypeError, ValueError):
@@ -519,9 +523,7 @@ def save_qbit_auto_organize_config(cfg: dict) -> None:
         conf = 0.85
     payload = {
         "enabled": bool(cfg.get("enabled", False)),
-        "categories": [
-            str(c).strip() for c in cats if c is not None and str(c).strip()
-        ],
+        "categories": [str(c).strip() for c in cats if c is not None and str(c).strip()],
         "poll_interval_minutes": poll,
         "confidence_threshold": conf,
     }
@@ -559,7 +561,7 @@ class QBitClient:
         legacy_plaintext_found = False
         if QBIT_CONFIG_FILE.exists():
             try:
-                with open(QBIT_CONFIG_FILE, "r", encoding="utf-8") as f:
+                with open(QBIT_CONFIG_FILE, encoding="utf-8") as f:
                     saved = json.load(f)
                 self._config["url"] = saved.get("url", self._config["url"])
                 self._config["user"] = saved.get("user", self._config["user"])
@@ -776,12 +778,14 @@ qbit = QBitClient()
 
 def require_token(f):
     """API Token 认证装饰器"""
+
     @wraps(f)
     def decorated(*args, **kwargs):
         token = request.headers.get("Authorization", "").replace("Bearer ", "")
         if not token or token != API_TOKEN:
             return jsonify({"error": "Unauthorized"}), 401
         return f(*args, **kwargs)
+
     return decorated
 
 
@@ -821,23 +825,25 @@ def ssh_exec(cmd: str, timeout: int = 30) -> tuple[int, str, str]:
     """执行 SSH 命令（ControlMaster 连接复用 + shlex 转义）"""
     ssh_cmd = [
         "ssh",
-        "-p", str(NAS_PORT),
-        "-o", "ConnectTimeout=5",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "BatchMode=yes",
-        "-o", "ControlMaster=auto",
-        "-o", f"ControlPath={SSH_CONTROL_PATH}",
-        "-o", "ControlPersist=300",
+        "-p",
+        str(NAS_PORT),
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        f"ControlPath={SSH_CONTROL_PATH}",
+        "-o",
+        "ControlPersist=300",
         f"{NAS_USER}@{NAS_HOST}",
-        cmd
+        cmd,
     ]
     try:
-        result = subprocess.run(
-            ssh_cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode != 0:
             logger.error(f"SSH command failed: {cmd[:100]}... stderr: {result.stderr[:200]}")
         return result.returncode, result.stdout, result.stderr
@@ -851,7 +857,7 @@ def ssh_exec(cmd: str, timeout: int = 30) -> tuple[int, str, str]:
 
 def human_size(size_bytes: int) -> str:
     """将字节数转换为人类可读格式"""
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
         if size_bytes < 1024.0:
             return f"{size_bytes:.1f} {unit}"
         size_bytes /= 1024.0
@@ -936,14 +942,16 @@ def test_qbit_connection():
 @require_token
 def get_nas_config():
     """获取 NAS 连接配置（不含敏感信息）"""
-    return jsonify({
-        "host": NAS_HOST,
-        "port": NAS_PORT,
-        "user": NAS_USER,
-        "base_path": NAS_BASE_PATH,
-        "disk_pattern": NAS_DISK_PATTERN,
-        "configured": NAS_CONFIG_FILE.exists(),
-    })
+    return jsonify(
+        {
+            "host": NAS_HOST,
+            "port": NAS_PORT,
+            "user": NAS_USER,
+            "base_path": NAS_BASE_PATH,
+            "disk_pattern": NAS_DISK_PATTERN,
+            "configured": NAS_CONFIG_FILE.exists(),
+        }
+    )
 
 
 @app.route("/api/config/nas", methods=["POST"])
@@ -997,10 +1005,14 @@ def test_nas_connection():
 
     cmd = [
         "ssh",
-        "-p", str(port),
-        "-o", "ConnectTimeout=5",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "BatchMode=yes",
+        "-p",
+        str(port),
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "BatchMode=yes",
         f"{user}@{host}",
         f"test -d {shlex.quote(base_path)} && echo nasvault-ok || echo missing-path",
     ]
@@ -1040,14 +1052,16 @@ def disk_usage():
     for line in stdout.strip().split("\n")[1:]:
         parts = line.split()
         if len(parts) >= 6:
-            disks.append({
-                "filesystem": parts[0],
-                "size": parts[1],
-                "used": parts[2],
-                "available": parts[3],
-                "use_percent": parts[4],
-                "mount": parts[5]
-            })
+            disks.append(
+                {
+                    "filesystem": parts[0],
+                    "size": parts[1],
+                    "used": parts[2],
+                    "available": parts[3],
+                    "use_percent": parts[4],
+                    "mount": parts[5],
+                }
+            )
     return jsonify({"disks": disks})
 
 
@@ -1094,19 +1108,21 @@ def list_files():
         if hardlinks > 1 and not is_dir:
             need_inode_paths.append(full_path)
 
-        files.append({
-            "name": name,
-            "path": full_path,
-            "is_dir": is_dir,
-            "size": size,
-            "size_human": human_size(size) if not is_dir else "-",
-            "modified": date,
-            "permissions": permissions,
-            "hardlinks": hardlinks,
-            "inode": 0,
-            "owner": owner,
-            "group": group
-        })
+        files.append(
+            {
+                "name": name,
+                "path": full_path,
+                "is_dir": is_dir,
+                "size": size,
+                "size_human": human_size(size) if not is_dir else "-",
+                "modified": date,
+                "permissions": permissions,
+                "hardlinks": hardlinks,
+                "inode": 0,
+                "owner": owner,
+                "group": group,
+            }
+        )
 
     # 批量获取 inode（一次 SSH 替代 N 次）
     if need_inode_paths:
@@ -1121,7 +1137,7 @@ def list_files():
                 # 格式: "inode path"（路径可能含空格，只 split 一次）
                 idx = stat_line.find(" ")
                 if idx > 0 and stat_line[:idx].isdigit():
-                    inode_map[stat_line[idx + 1:]] = int(stat_line[:idx])
+                    inode_map[stat_line[idx + 1 :]] = int(stat_line[:idx])
             for f in files:
                 if f["path"] in inode_map:
                     f["inode"] = inode_map[f["path"]]
@@ -1129,11 +1145,13 @@ def list_files():
     # 排序：目录在前，然后按名称
     files.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
 
-    resp = jsonify({
-        "path": validated_path,
-        "parent": os.path.dirname(validated_path) if validated_path != NAS_BASE_PATH else None,
-        "files": files
-    })
+    resp = jsonify(
+        {
+            "path": validated_path,
+            "parent": os.path.dirname(validated_path) if validated_path != NAS_BASE_PATH else None,
+            "files": files,
+        }
+    )
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -1173,12 +1191,14 @@ def find_hardlinks():
             filepath = parts[3]
         except (ValueError, IndexError):
             continue
-        entries.append({
-            "path": filepath,
-            "inode": inode,
-            "links": links,
-            "size": size,
-        })
+        entries.append(
+            {
+                "path": filepath,
+                "inode": inode,
+                "links": links,
+                "size": size,
+            }
+        )
         inodes_to_find.add(inode)
 
     # 一次 SSH：批量查找所有 inode 的关联路径
@@ -1200,24 +1220,23 @@ def find_hardlinks():
                     idx = stat_line.find(" ")
                     if idx > 0 and stat_line[:idx].isdigit():
                         ino = int(stat_line[:idx])
-                        found_path = stat_line[idx + 1:]
+                        found_path = stat_line[idx + 1 :]
                         if ino in inode_targets:
                             inode_targets[ino].append(found_path)
 
     hardlinks = []
     for entry in entries:
-        targets = [
-            t for t in inode_targets.get(entry["inode"], [])
-            if t != entry["path"]
-        ]
-        hardlinks.append({
-            "path": entry["path"],
-            "inode": entry["inode"],
-            "hardlinks": entry["links"],
-            "size": entry["size"],
-            "size_human": human_size(entry["size"]),
-            "targets": targets
-        })
+        targets = [t for t in inode_targets.get(entry["inode"], []) if t != entry["path"]]
+        hardlinks.append(
+            {
+                "path": entry["path"],
+                "inode": entry["inode"],
+                "hardlinks": entry["links"],
+                "size": entry["size"],
+                "size_human": human_size(entry["size"]),
+                "targets": targets,
+            }
+        )
 
     return jsonify({"hardlinks": hardlinks})
 
@@ -1316,10 +1335,29 @@ def _parse_emby_nfo(text: str) -> dict | None:
 
 # 文本类文件白名单（含 .nfo / 字幕 / 配置文件等）
 TEXT_PREVIEW_EXTS = {
-    ".nfo", ".txt", ".log", ".md", ".readme",
-    ".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt",
-    ".json", ".yml", ".yaml", ".ini", ".conf", ".cfg",
-    ".sh", ".py", ".js", ".html", ".xml", ".csv",
+    ".nfo",
+    ".txt",
+    ".log",
+    ".md",
+    ".readme",
+    ".srt",
+    ".ass",
+    ".ssa",
+    ".sub",
+    ".idx",
+    ".vtt",
+    ".json",
+    ".yml",
+    ".yaml",
+    ".ini",
+    ".conf",
+    ".cfg",
+    ".sh",
+    ".py",
+    ".js",
+    ".html",
+    ".xml",
+    ".csv",
 }
 MAX_PREVIEW_BYTES = 256 * 1024  # 256 KB
 
@@ -1341,10 +1379,7 @@ def file_content():
 
     # 先 stat 看大小；同时用 head -c | base64 读前 N 字节（一次 SSH）
     safe = shlex.quote(validated_path)
-    cmd = (
-        f"stat -c '%s' {safe} 2>/dev/null && "
-        f"head -c {MAX_PREVIEW_BYTES} {safe} | base64"
-    )
+    cmd = f"stat -c '%s' {safe} 2>/dev/null && head -c {MAX_PREVIEW_BYTES} {safe} | base64"
     code, stdout, stderr = ssh_exec(cmd, timeout=20)
     if code != 0:
         return jsonify({"error": "Read failed", "detail": stderr[:200]}), 500
@@ -1395,14 +1430,16 @@ def file_content():
                 if tv.get("year") and not parsed.get("year"):
                     parsed["year"] = tv["year"]
 
-    return jsonify({
-        "text": text,
-        "encoding": encoding_used,
-        "size": file_size,
-        "preview_bytes": min(MAX_PREVIEW_BYTES, file_size),
-        "truncated": file_size > MAX_PREVIEW_BYTES,
-        "parsed": parsed,
-    })
+    return jsonify(
+        {
+            "text": text,
+            "encoding": encoding_used,
+            "size": file_size,
+            "preview_bytes": min(MAX_PREVIEW_BYTES, file_size),
+            "truncated": file_size > MAX_PREVIEW_BYTES,
+            "parsed": parsed,
+        }
+    )
 
 
 @app.route("/api/inode/<int:inode>")
@@ -1429,12 +1466,14 @@ def delete_files():
     Migrate: 用 POST /api/action/preview (kind='delete') 拿 signed_token，
              再 POST /api/action/confirm 才能执行删除。
     """
-    return jsonify({
-        "error": "deprecated",
-        "use_preview": "/api/action/preview",
-        "use_confirm": "/api/action/confirm",
-        "doc": "Destructive operations now require preview→confirm with signed token.",
-    }), 410
+    return jsonify(
+        {
+            "error": "deprecated",
+            "use_preview": "/api/action/preview",
+            "use_confirm": "/api/action/confirm",
+            "doc": "Destructive operations now require preview→confirm with signed token.",
+        }
+    ), 410
 
 
 def _stat_path_types(paths: list[str]) -> dict[str, str]:
@@ -1591,7 +1630,7 @@ def _resolve_all_hardlink_paths(file_paths: list[str]) -> dict:
                     idx = stat_line.find(" ")
                     if idx > 0 and stat_line[:idx].isdigit():
                         ino = int(stat_line[:idx])
-                        inode_to_paths.setdefault(ino, []).append(stat_line[idx + 1:])
+                        inode_to_paths.setdefault(ino, []).append(stat_line[idx + 1 :])
                 for info in path_info.values():
                     info["all_paths"] = inode_to_paths.get(info["inode"], [])
 
@@ -1619,14 +1658,14 @@ def delete_complete():
     Migrate: POST /api/action/preview (kind='delete') → get signed_token,
              then POST /api/action/confirm to execute.
     """
-    return jsonify({
-        "error": "deprecated",
-        "use_preview": "/api/action/preview",
-        "use_confirm": "/api/action/confirm",
-        "doc": "Destructive operations now require preview→confirm with signed token.",
-    }), 410
-
-
+    return jsonify(
+        {
+            "error": "deprecated",
+            "use_preview": "/api/action/preview",
+            "use_confirm": "/api/action/confirm",
+            "doc": "Destructive operations now require preview→confirm with signed token.",
+        }
+    ), 410
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1718,9 +1757,7 @@ def _ssh_ln(src: str, dst: str) -> tuple[int, str, str]:
     return ssh_exec(cmd, timeout=10)
 
 
-def _build_delete_snapshot(
-    candidates: list[dict], *, mode: str = "lenient"
-) -> dict:
+def _build_delete_snapshot(candidates: list[dict], *, mode: str = "lenient") -> dict:
     """SSH 实时拉 ground truth + 硬链接 + qBit 匹配，生成 canonical snapshot。
 
     candidates: [{"path": ...}, ...]，client 提交的原始候选——其他字段在 lenient 模式下忽略。
@@ -1773,14 +1810,16 @@ def _build_delete_snapshot(
     try:
         matched = qbit.find_torrents_by_paths(list(all_paths))
         for t in matched:
-            torrents.append({
-                "hash": t["hash"],
-                "name": t["name"],
-                "size": t.get("total_size", 0),
-                "content_path": t.get("content_path", ""),
-                "save_path": t.get("save_path", ""),
-                "state": t.get("state", ""),
-            })
+            torrents.append(
+                {
+                    "hash": t["hash"],
+                    "name": t["name"],
+                    "size": t.get("total_size", 0),
+                    "content_path": t.get("content_path", ""),
+                    "save_path": t.get("save_path", ""),
+                    "state": t.get("state", ""),
+                }
+            )
     except Exception as e:
         logger.error(f"[snapshot] qBit lookup failed: {e}")
         qbit_status = {"ok": False, "message": str(e)}
@@ -1790,17 +1829,19 @@ def _build_delete_snapshot(
     for p in paths:
         stat = stat_map.get(p, {"exists": False})
         hl_info = hardlink_info.get(p, {})
-        items.append({
-            "path": p,
-            "realpath": realpath_map.get(p, p),
-            "exists": stat.get("exists", False),
-            "inode": stat.get("inode", 0),
-            "size_bytes": stat.get("size_bytes", 0),
-            "mtime": stat.get("mtime", 0),
-            "is_dir": stat.get("is_dir", False),
-            "real_size": real_sizes.get(p, 0),
-            "hardlinks": [hp for hp in hl_info.get("all_paths", []) if hp != p],
-        })
+        items.append(
+            {
+                "path": p,
+                "realpath": realpath_map.get(p, p),
+                "exists": stat.get("exists", False),
+                "inode": stat.get("inode", 0),
+                "size_bytes": stat.get("size_bytes", 0),
+                "mtime": stat.get("mtime", 0),
+                "is_dir": stat.get("is_dir", False),
+                "real_size": real_sizes.get(p, 0),
+                "hardlinks": [hp for hp in hl_info.get("all_paths", []) if hp != p],
+            }
+        )
 
     # Phase 3.3: strict mode 强制对比 expected_* 字段 → 任一不一致都生成 mismatches
     mismatches: list[dict] = []
@@ -1813,29 +1854,35 @@ def _build_delete_snapshot(
             if not stat.get("exists"):
                 diffs_for_path.append("missing")
             else:
-                if original.get("expected_inode") is not None and \
-                        original["expected_inode"] != stat.get("inode"):
+                if original.get("expected_inode") is not None and original[
+                    "expected_inode"
+                ] != stat.get("inode"):
                     diffs_for_path.append("inode_changed")
-                if original.get("expected_size") is not None and \
-                        original["expected_size"] != stat.get("size_bytes"):
+                if original.get("expected_size") is not None and original[
+                    "expected_size"
+                ] != stat.get("size_bytes"):
                     diffs_for_path.append("size_changed")
-                if original.get("expected_mtime") is not None and \
-                        original["expected_mtime"] != stat.get("mtime"):
+                if original.get("expected_mtime") is not None and original[
+                    "expected_mtime"
+                ] != stat.get("mtime"):
                     diffs_for_path.append("mtime_changed")
             if diffs_for_path:
-                mismatches.append({
-                    "path": p, "diffs": diffs_for_path,
-                    "expected": {
-                        "inode": original.get("expected_inode"),
-                        "size_bytes": original.get("expected_size"),
-                        "mtime": original.get("expected_mtime"),
-                    },
-                    "current": {
-                        "inode": stat.get("inode"),
-                        "size_bytes": stat.get("size_bytes"),
-                        "mtime": stat.get("mtime"),
-                    },
-                })
+                mismatches.append(
+                    {
+                        "path": p,
+                        "diffs": diffs_for_path,
+                        "expected": {
+                            "inode": original.get("expected_inode"),
+                            "size_bytes": original.get("expected_size"),
+                            "mtime": original.get("expected_mtime"),
+                        },
+                        "current": {
+                            "inode": stat.get("inode"),
+                            "size_bytes": stat.get("size_bytes"),
+                            "mtime": stat.get("mtime"),
+                        },
+                    }
+                )
         blocked = bool(mismatches)
 
     return {
@@ -1844,11 +1891,10 @@ def _build_delete_snapshot(
         "blocked": blocked,
         "mismatches": mismatches,
         "items": items,
-        "all_to_delete": sorted({
-            p for p in paths
-        } | {
-            hp for info in hardlink_info.values() for hp in info.get("all_paths", [])
-        }),
+        "all_to_delete": sorted(
+            {p for p in paths}
+            | {hp for info in hardlink_info.values() for hp in info.get("all_paths", [])}
+        ),
         "torrents": torrents,
         "qbit_status": qbit_status,
     }
@@ -1871,12 +1917,14 @@ def _diff_snapshots(expected: dict, current: dict) -> list[dict]:
         # exists / inode / size / mtime 任一变化都阻塞
         for key in ("exists", "inode", "size_bytes", "mtime"):
             if exp.get(key) != cur.get(key):
-                diffs.append({
-                    "path": path,
-                    "kind": f"{key}_changed",
-                    "expected": exp.get(key),
-                    "current": cur.get(key),
-                })
+                diffs.append(
+                    {
+                        "path": path,
+                        "kind": f"{key}_changed",
+                        "expected": exp.get(key),
+                        "current": cur.get(key),
+                    }
+                )
     return diffs
 
 
@@ -1906,13 +1954,17 @@ def _delete_executor(payload: dict) -> dict:
         try:
             qbit.delete_torrents(hashes, delete_files=True)
             for t in expected_snapshot["torrents"]:
-                torrent_results.append({
-                    "hash": t["hash"], "name": t["name"], "status": "deleted",
-                })
+                torrent_results.append(
+                    {
+                        "hash": t["hash"],
+                        "name": t["name"],
+                        "status": "deleted",
+                    }
+                )
                 if t.get("content_path"):
                     qbit_deleted_paths.add(t["content_path"])
             logger.info(f"[action/delete] removed {len(hashes)} torrents")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.error(f"[action/delete] qBit delete failed: {e}")
             torrent_results.append({"status": "error", "message": str(e)})
 
@@ -1930,7 +1982,7 @@ def _delete_executor(payload: dict) -> dict:
         if item["is_dir"]:
             # 目录：直接 rm -rf path（验证存在）
             safe_path = shlex.quote(path)
-            cmd = f'[ -e {safe_path} ] && rm -rf -- {safe_path} && echo OK || echo GONE'
+            cmd = f"[ -e {safe_path} ] && rm -rf -- {safe_path} && echo OK || echo GONE"
             _, out, _ = ssh_exec(cmd, timeout=300)
             last = out.strip().splitlines()[-1] if out.strip() else "GONE"
             if last == "OK":
@@ -1944,13 +1996,17 @@ def _delete_executor(payload: dict) -> dict:
                 continue
             inum = int(item["inode"])
             # -xdev 限制不跨文件系统；-print 让我们看删了哪些
-            cmd = f'find {safe_base} -xdev -inum {inum} -print -delete 2>/dev/null'
+            cmd = f"find {safe_base} -xdev -inum {inum} -print -delete 2>/dev/null"
             _, out, _ = ssh_exec(cmd, timeout=300)
             removed_paths = [ln for ln in out.strip().splitlines() if ln]
             if removed_paths:
-                file_results.append({
-                    "path": path, "status": "deleted", "inode_paths": removed_paths,
-                })
+                file_results.append(
+                    {
+                        "path": path,
+                        "status": "deleted",
+                        "inode_paths": removed_paths,
+                    }
+                )
             else:
                 file_results.append({"path": path, "status": "already_gone"})
 
@@ -1983,9 +2039,7 @@ def _delete_executor(payload: dict) -> dict:
         "total_files_deleted": sum(
             1 for r in file_results if r["status"] in ("deleted", "deleted_by_qbit")
         ),
-        "total_files_already_gone": sum(
-            1 for r in file_results if r["status"] == "already_gone"
-        ),
+        "total_files_already_gone": sum(1 for r in file_results if r["status"] == "already_gone"),
         "total_torrents_deleted": sum(1 for r in torrent_results if r.get("status") == "deleted"),
         "space_freed": total_freed,
         "space_freed_human": human_size(total_freed),
@@ -2014,10 +2068,14 @@ def _nfo_write_executor(payload: dict) -> dict:
 
         # video 文件如果消失 → 写 NFO 没意义，skip
         if not video_now.get("exists"):
-            results.append({
-                "video_path": video_path, "nfo_path": nfo_path,
-                "status": "skipped", "reason": "video_missing",
-            })
+            results.append(
+                {
+                    "video_path": video_path,
+                    "nfo_path": nfo_path,
+                    "status": "skipped",
+                    "reason": "video_missing",
+                }
+            )
             continue
 
         # nfo 的 preview-to-confirm 漂移检测
@@ -2028,20 +2086,27 @@ def _nfo_write_executor(payload: dict) -> dict:
                 pass
             else:
                 # 仍然存在：size/mtime 必须跟 snapshot 一致；否则有人改过，跳过
-                if (nfo_now["size_bytes"] != snap["size_bytes"]
-                        or nfo_now["mtime"] != snap["mtime"]):
-                    results.append({
-                        "video_path": video_path, "nfo_path": nfo_path,
-                        "status": "skipped", "reason": "nfo_changed_since_preview",
-                    })
+                if nfo_now["size_bytes"] != snap["size_bytes"] or nfo_now["mtime"] != snap["mtime"]:
+                    results.append(
+                        {
+                            "video_path": video_path,
+                            "nfo_path": nfo_path,
+                            "status": "skipped",
+                            "reason": "nfo_changed_since_preview",
+                        }
+                    )
                     continue
         else:
             # snapshot 时不存在；现在存在 → 别人写了一份
             if nfo_now.get("exists"):
-                results.append({
-                    "video_path": video_path, "nfo_path": nfo_path,
-                    "status": "skipped", "reason": "nfo_appeared_since_preview",
-                })
+                results.append(
+                    {
+                        "video_path": video_path,
+                        "nfo_path": nfo_path,
+                        "status": "skipped",
+                        "reason": "nfo_appeared_since_preview",
+                    }
+                )
                 continue
 
         # 执行写入：base64 over SSH，原子 mv
@@ -2053,8 +2118,7 @@ def _nfo_write_executor(payload: dict) -> dict:
 
             # 1. 若旧 .nfo 存在 → cp 到 .bak（覆盖之前的 .bak）
             backup_step = (
-                f"[ -e {safe_nfo} ] && cp -p {safe_nfo} {safe_bak}; "
-                if snap["existed"] else ""
+                f"[ -e {safe_nfo} ] && cp -p {safe_nfo} {safe_bak}; " if snap["existed"] else ""
             )
             # 2. 写 .tmp（base64 解码 + 重定向）
             # 3. 原子 mv
@@ -2071,30 +2135,44 @@ def _nfo_write_executor(payload: dict) -> dict:
             )
             rc, out, err = ssh_exec(cmd, timeout=30)
             if rc != 0:
-                results.append({
-                    "video_path": video_path, "nfo_path": nfo_path,
-                    "status": "failed",
-                    "reason": f"write_failed: {err.strip()[:200]}",
-                })
+                results.append(
+                    {
+                        "video_path": video_path,
+                        "nfo_path": nfo_path,
+                        "status": "failed",
+                        "reason": f"write_failed: {err.strip()[:200]}",
+                    }
+                )
                 continue
             # readback verify: grep -c 'tmdb' 至少应该 ≥ 1（我们写了 uniqueid + tmdbid）
             count = int(out.strip().splitlines()[-1]) if out.strip() else 0
             if tmdb_id and count < 1:
-                results.append({
-                    "video_path": video_path, "nfo_path": nfo_path,
-                    "status": "failed", "reason": "readback_missing_tmdbid",
-                })
+                results.append(
+                    {
+                        "video_path": video_path,
+                        "nfo_path": nfo_path,
+                        "status": "failed",
+                        "reason": "readback_missing_tmdbid",
+                    }
+                )
                 continue
-            results.append({
-                "video_path": video_path, "nfo_path": nfo_path,
-                "status": "overwrote" if snap["existed"] else "created",
-                "backup_path": (nfo_path + ".bak") if snap["existed"] else None,
-            })
-        except Exception as e:  # noqa: BLE001
-            results.append({
-                "video_path": video_path, "nfo_path": nfo_path,
-                "status": "failed", "reason": f"{type(e).__name__}: {e}",
-            })
+            results.append(
+                {
+                    "video_path": video_path,
+                    "nfo_path": nfo_path,
+                    "status": "overwrote" if snap["existed"] else "created",
+                    "backup_path": (nfo_path + ".bak") if snap["existed"] else None,
+                }
+            )
+        except Exception as e:
+            results.append(
+                {
+                    "video_path": video_path,
+                    "nfo_path": nfo_path,
+                    "status": "failed",
+                    "reason": f"{type(e).__name__}: {e}",
+                }
+            )
 
     counts: dict[str, int] = {}
     for r in results:
@@ -2149,6 +2227,7 @@ def _ssh_create_nfo_if_absent(
     """
     try:
         import uuid
+
         xml_b64 = base64.b64encode(xml.encode("utf-8")).decode("ascii")
         tmp_basename = f"{os.path.basename(nfo_path)}.tmp.{uuid.uuid4().hex[:12]}"
         nfo_dir = os.path.dirname(nfo_path)
@@ -2200,7 +2279,7 @@ def _ssh_create_nfo_if_absent(
             if count < 1:
                 return False, "readback_missing_tmdbid"
         return True, ""
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return False, f"{type(e).__name__}: {e}"
 
 
@@ -2217,7 +2296,7 @@ def _build_nfo_payload_for_organize(cached, nfo_kind: str):
         plot=cached.overview,
         tmdb_id=cached.tmdb_id,
         imdb_id=cached.imdb_id,
-        tvdb_id=None,                                   # cache 不存 tvdb_id
+        tvdb_id=None,  # cache 不存 tvdb_id
         rating=cached.vote_average,
         genres=cached.genres or [],
         cast=cached.cast or [],
@@ -2274,7 +2353,9 @@ def _write_organize_nfo(
         # 失败返回原 cached，<plot> 仍 fallback 到 series overview（旧行为，不退化）。
         if nfo_kind == "episode":
             cached, drift_detected = metadata_cache.ensure_episode_details(
-                get_db(), get_tmdb_provider(), cached,
+                get_db(),
+                get_tmdb_provider(),
+                cached,
             )
             # codex r2 BLOCKER: enrich 内 guarded UPDATE rowcount=0 显式 signal drift
             # → 不能信任 refreshed cached（可能 refresh 失败回退到旧 snapshot），
@@ -2290,12 +2371,13 @@ def _write_organize_nfo(
 
         payload = _build_nfo_payload_for_organize(cached, nfo_kind)
         xml = nfo_writer.build_nfo(payload)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         # DB error / build error 等 → Pattern D 返 nfo_status='failed: ...'
         # 不让 hardlink success 的 organize item 变 'executor_crashed'
         return f"failed: build_nfo {type(e).__name__}: {e}"
     ok, reason = _ssh_create_nfo_if_absent(
-        target_nfo_path, xml,
+        target_nfo_path,
+        xml,
         verify_tmdb=bool(cached.tmdb_id),
     )
     if ok:
@@ -2312,8 +2394,12 @@ def _write_organize_nfo(
 
 
 _ORGANIZE_REQUIRED_METADATA_KEYS = {
-    "tmdb_id", "title", "year", "media_type",
-    "season_number", "episode_number",
+    "tmdb_id",
+    "title",
+    "year",
+    "media_type",
+    "season_number",
+    "episode_number",
 }
 
 
@@ -2344,26 +2430,30 @@ def _organize_executor_one_item(item: dict, expected_metadata: dict | None) -> d
     # codex r3 IMPORTANT: metadata_snapshot 必须存在且完整
     if not isinstance(expected_metadata, dict):
         return {
-            "src_path": src_path, "status": "failed",
+            "src_path": src_path,
+            "status": "failed",
             "reason": "missing_metadata_snapshot_in_payload",
         }
     missing_keys = _ORGANIZE_REQUIRED_METADATA_KEYS - set(expected_metadata.keys())
     if missing_keys:
         return {
-            "src_path": src_path, "status": "failed",
+            "src_path": src_path,
+            "status": "failed",
             "reason": f"incomplete_metadata_snapshot: missing_keys={sorted(missing_keys)}",
         }
 
     src_now = _ssh_stat_paths([src_path]).get(src_path, {"exists": False})
     if not src_now.get("exists"):
         return {
-            "src_path": src_path, "status": "failed",
+            "src_path": src_path,
+            "status": "failed",
             "reason": "src_missing_at_confirm",
         }
     # Pattern C 锚 #1
     if src_now.get("inode") != src_snap_pre.get("inode"):
         return {
-            "src_path": src_path, "status": "failed",
+            "src_path": src_path,
+            "status": "failed",
             "reason": "src_inode_changed_since_preview",
             "preview_inode": src_snap_pre.get("inode"),
             "current_inode": src_now.get("inode"),
@@ -2374,13 +2464,15 @@ def _organize_executor_one_item(item: dict, expected_metadata: dict | None) -> d
 
     if dst_now.get("exists") and dst_now.get("inode") == src_now.get("inode"):
         return {
-            "src_path": src_path, "status": "already_linked",
+            "src_path": src_path,
+            "status": "already_linked",
             "dst_path": dst_path,
             "shared_inode": src_now.get("inode"),
         }
     if dst_now.get("exists"):
         return {
-            "src_path": src_path, "status": "failed",
+            "src_path": src_path,
+            "status": "failed",
             "reason": "dst_exists_different_inode",
             "dst_path": dst_path,
             "dst_inode": dst_now.get("inode"),
@@ -2391,7 +2483,8 @@ def _organize_executor_one_item(item: dict, expected_metadata: dict | None) -> d
     rc, _, err = _ssh_mkdir_p(plan["dst_dir"])
     if rc != 0:
         return {
-            "src_path": src_path, "status": "failed",
+            "src_path": src_path,
+            "status": "failed",
             "reason": f"mkdir_failed: {err.strip()[:200]}",
         }
 
@@ -2402,8 +2495,7 @@ def _organize_executor_one_item(item: dict, expected_metadata: dict | None) -> d
         if "DST_IS_DIR" in (ln_out or ""):
             item_result["reason"] = "dst_is_directory_at_ln"
             item_result["hint"] = (
-                f"dst 已是目录: {dst_path}. SSH 检查后再 organize "
-                f"(可能需要 mv 或 rm 该目录)"
+                f"dst 已是目录: {dst_path}. SSH 检查后再 organize (可能需要 mv 或 rm 该目录)"
             )
         elif "DST_NOT_REGULAR" in (ln_out or ""):
             item_result["reason"] = "ln_target_not_regular_race"
@@ -2421,7 +2513,8 @@ def _organize_executor_one_item(item: dict, expected_metadata: dict | None) -> d
     verify = _ssh_stat_paths([dst_path]).get(dst_path, {"exists": False})
     if not verify.get("exists") or verify.get("inode") != src_now.get("inode"):
         return {
-            "src_path": src_path, "status": "failed",
+            "src_path": src_path,
+            "status": "failed",
             "reason": "ln_verify_failed_inode_mismatch",
             "expected_inode": src_now.get("inode"),
             "actual_inode": verify.get("inode"),
@@ -2431,13 +2524,17 @@ def _organize_executor_one_item(item: dict, expected_metadata: dict | None) -> d
     # 4. 写 NFO（Pattern D：失败不回滚 hardlink）
     nfo_kind = "episode" if media_type == "tv" else "movie"
     nfo_status = _write_organize_nfo(
-        src_path, plan["nfo_path"], nfo_kind,
+        src_path,
+        plan["nfo_path"],
+        nfo_kind,
         expected_metadata=expected_metadata,
     )
     tvshow_nfo_status = "skipped"
     if media_type == "tv" and plan.get("tvshow_nfo_path"):
         tvshow_nfo_status = _write_organize_nfo(
-            src_path, plan["tvshow_nfo_path"], "tvshow",
+            src_path,
+            plan["tvshow_nfo_path"],
+            "tvshow",
             expected_metadata=expected_metadata,
         )
 
@@ -2454,9 +2551,7 @@ def _organize_executor_one_item(item: dict, expected_metadata: dict | None) -> d
     }
 
 
-def _organize_executor_one_item_threadsafe(
-    item: dict, expected_metadata: dict | None
-) -> dict:
+def _organize_executor_one_item_threadsafe(item: dict, expected_metadata: dict | None) -> dict:
     """Worker thread 调用的 wrapper：push 独立 Flask app context。
 
     Worker thread 不继承 request 的 app context，直接调 get_db() 拿 g.db 会撞
@@ -2495,14 +2590,16 @@ def _build_and_start_auto_organize_impl(paths: list[str], qbit_hash: str) -> dic
     movies_root = (org_cfg.get("movies_root") or "").strip()
     tv_root = (org_cfg.get("tv_root") or "").strip()
     if not (movies_root and tv_root):
-        return {"action_id": None, "status": "error",
-                "error": "organize_roots_not_configured"}
+        return {"action_id": None, "status": "error", "error": "organize_roots_not_configured"}
 
     if not paths:
         return {"action_id": None, "status": "error", "error": "empty_paths"}
     if len(paths) > MAX_ORGANIZE_BATCH_ITEMS:
-        return {"action_id": None, "status": "error",
-                "error": f"batch_too_large: {len(paths)} > {MAX_ORGANIZE_BATCH_ITEMS}"}
+        return {
+            "action_id": None,
+            "status": "error",
+            "error": f"batch_too_large: {len(paths)} > {MAX_ORGANIZE_BATCH_ITEMS}",
+        }
 
     try:
         # ── compute plan for each path ───
@@ -2511,11 +2608,10 @@ def _build_and_start_auto_organize_impl(paths: list[str], qbit_hash: str) -> dic
         db = get_db()
         current_stats = {
             p: {"inode": s.get("inode"), "mtime": s.get("mtime")}
-            for p, s in src_stat_now.items() if s.get("exists")
+            for p, s in src_stat_now.items()
+            if s.get("exists")
         }
-        cache_map = metadata_cache.get_many_by_path(
-            db, paths, current_stats=current_stats
-        )
+        cache_map = metadata_cache.get_many_by_path(db, paths, current_stats=current_stats)
 
         plans_by_src: dict[str, organize_svc.OrganizePlan] = {}
         dst_check_paths: list[str] = []
@@ -2526,13 +2622,19 @@ def _build_and_start_auto_organize_impl(paths: list[str], qbit_hash: str) -> dic
                 skipped_during_build.append({"path": sp, "reason": "src_missing"})
                 continue
             cached, cache_status = cache_map.get(sp, (None, "miss"))
-            if cached is None or cache_status == "stale" or cached.media_type not in ("movie", "tv"):
+            if (
+                cached is None
+                or cache_status == "stale"
+                or cached.media_type not in ("movie", "tv")
+            ):
                 # confidence_gate 之后到这里之间 cache 被改了 = 罕见 race；skip
-                skipped_during_build.append({
-                    "path": sp,
-                    "reason": f"cache_drift: status={cache_status} media_type="
-                              f"{getattr(cached, 'media_type', None)!r}",
-                })
+                skipped_during_build.append(
+                    {
+                        "path": sp,
+                        "reason": f"cache_drift: status={cache_status} media_type="
+                        f"{getattr(cached, 'media_type', None)!r}",
+                    }
+                )
                 continue
             try:
                 plan = organize_svc.compute_organize_plan(sp, cached, movies_root, tv_root)
@@ -2546,9 +2648,12 @@ def _build_and_start_auto_organize_impl(paths: list[str], qbit_hash: str) -> dic
 
         if not plans_by_src:
             # confidence_gate 通过但所有 path 都漂移 — 极罕见
-            return {"action_id": None, "status": "error",
-                    "error": f"no plans computed for {qbit_hash}; "
-                             f"all paths drifted: {skipped_during_build}"}
+            return {
+                "action_id": None,
+                "status": "error",
+                "error": f"no plans computed for {qbit_hash}; "
+                f"all paths drifted: {skipped_during_build}",
+            }
 
         dst_stat = _ssh_stat_paths(dst_check_paths) if dst_check_paths else {}
 
@@ -2558,48 +2663,49 @@ def _build_and_start_auto_organize_impl(paths: list[str], qbit_hash: str) -> dic
             src_stat = src_stat_now[sp]
             dst_now = dst_stat.get(plan.dst_path, {"exists": False})
             src_inode = src_stat.get("inode")
-            already_linked = bool(
-                dst_now.get("exists") and dst_now.get("inode") == src_inode
-            )
-            payload_items.append({
-                "src_path": sp,
-                "src_snapshot": {
-                    "inode": src_stat.get("inode"),
-                    "size_bytes": src_stat.get("size_bytes"),
-                    "mtime": src_stat.get("mtime"),
-                },
-                "media_type": plan.media_type,
-                "tmdb_id": plan.tmdb_id,
-                "title": plan.title,
-                "year": plan.year,
-                "season_number": plan.season_number,
-                "episode_number": plan.episode_number,
-                "computed_plan": {
-                    "dst_dir": plan.dst_dir,
-                    "dst_path": plan.dst_path,
-                    "nfo_path": plan.nfo_path,
-                    "tvshow_nfo_path": plan.tvshow_nfo_path,
-                },
-                "metadata_snapshot": {
+            already_linked = bool(dst_now.get("exists") and dst_now.get("inode") == src_inode)
+            payload_items.append(
+                {
+                    "src_path": sp,
+                    "src_snapshot": {
+                        "inode": src_stat.get("inode"),
+                        "size_bytes": src_stat.get("size_bytes"),
+                        "mtime": src_stat.get("mtime"),
+                    },
+                    "media_type": plan.media_type,
                     "tmdb_id": plan.tmdb_id,
                     "title": plan.title,
                     "year": plan.year,
-                    "media_type": plan.media_type,
                     "season_number": plan.season_number,
                     "episode_number": plan.episode_number,
-                },
-                "dst_status": {
-                    "dst_dir_exists": dst_stat.get(plan.dst_dir, {}).get("exists", False),
-                    "dst_path_exists": dst_now.get("exists", False),
-                    "nfo_path_exists": dst_stat.get(plan.nfo_path, {}).get("exists", False),
-                    "tvshow_nfo_exists": (
-                        dst_stat.get(plan.tvshow_nfo_path, {}).get("exists", False)
-                        if plan.tvshow_nfo_path else False
-                    ),
-                    "already_linked": already_linked,
-                    "conflict": dst_now.get("exists") and not already_linked,
-                },
-            })
+                    "computed_plan": {
+                        "dst_dir": plan.dst_dir,
+                        "dst_path": plan.dst_path,
+                        "nfo_path": plan.nfo_path,
+                        "tvshow_nfo_path": plan.tvshow_nfo_path,
+                    },
+                    "metadata_snapshot": {
+                        "tmdb_id": plan.tmdb_id,
+                        "title": plan.title,
+                        "year": plan.year,
+                        "media_type": plan.media_type,
+                        "season_number": plan.season_number,
+                        "episode_number": plan.episode_number,
+                    },
+                    "dst_status": {
+                        "dst_dir_exists": dst_stat.get(plan.dst_dir, {}).get("exists", False),
+                        "dst_path_exists": dst_now.get("exists", False),
+                        "nfo_path_exists": dst_stat.get(plan.nfo_path, {}).get("exists", False),
+                        "tvshow_nfo_exists": (
+                            dst_stat.get(plan.tvshow_nfo_path, {}).get("exists", False)
+                            if plan.tvshow_nfo_path
+                            else False
+                        ),
+                        "already_linked": already_linked,
+                        "conflict": dst_now.get("exists") and not already_linked,
+                    },
+                }
+            )
 
         payload = {
             "kind": "organize",
@@ -2628,23 +2734,35 @@ def _build_and_start_auto_organize_impl(paths: list[str], qbit_hash: str) -> dic
             (action_id,),
         ).fetchone()
         if pre_row is None:
-            return {"action_id": action_id, "status": "error",
-                    "error": "preview row missing after create (internal bug)"}
+            return {
+                "action_id": action_id,
+                "status": "error",
+                "error": "preview row missing after create (internal bug)",
+            }
         payload_hash = pre_row["payload_hash"]
 
         # ── atomic consume + verify（同 confirm 路由 background 分支）───
         row = destructive_action._atomic_consume(
-            db, action_id, payload_hash, int(time.time()),
+            db,
+            action_id,
+            payload_hash,
+            int(time.time()),
         )
         if row is None:
-            return {"action_id": action_id, "status": "error",
-                    "error": "atomic_consume_failed (internal race)"}
+            return {
+                "action_id": action_id,
+                "status": "error",
+                "error": "atomic_consume_failed (internal race)",
+            }
         if not destructive_action._verify_token(
             SERVER_SECRET, action_id, payload_hash, signed_token
         ):
             destructive_action._rollback_to_pending(db, action_id)
-            return {"action_id": action_id, "status": "error",
-                    "error": "verify_token_failed (internal bug)"}
+            return {
+                "action_id": action_id,
+                "status": "error",
+                "error": "verify_token_failed (internal bug)",
+            }
 
         # ── start worker ───
         try:
@@ -2658,14 +2776,16 @@ def _build_and_start_auto_organize_impl(paths: list[str], qbit_hash: str) -> dic
         except organize_runner.ConcurrentOrganizeError:
             destructive_action._rollback_to_pending(db, action_id)
             return {"action_id": action_id, "status": "locked", "error": None}
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.exception(f"[auto-organize] start worker failed for {qbit_hash}")
             destructive_action._mark_terminal(
-                db, action_id, status="failed", result=None,
+                db,
+                action_id,
+                status="failed",
+                result=None,
                 error=f"worker_start_failed: {type(e).__name__}: {e}",
             )
-            return {"action_id": action_id, "status": "error",
-                    "error": f"{type(e).__name__}: {e}"}
+            return {"action_id": action_id, "status": "error", "error": f"{type(e).__name__}: {e}"}
 
         logger.info(
             f"[auto-organize] started action_id={action_id} qbit_hash={qbit_hash} "
@@ -2673,10 +2793,9 @@ def _build_and_start_auto_organize_impl(paths: list[str], qbit_hash: str) -> dic
         )
         return {"action_id": action_id, "status": "started", "error": None}
 
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception(f"[auto-organize] build_and_start failed for {qbit_hash}")
-        return {"action_id": None, "status": "error",
-                "error": f"{type(e).__name__}: {e}"}
+        return {"action_id": None, "status": "error", "error": f"{type(e).__name__}: {e}"}
 
 
 def _organize_executor(payload: dict, selected_indices: list[int] | None = None) -> dict:
@@ -2695,16 +2814,24 @@ def _organize_executor(payload: dict, selected_indices: list[int] | None = None)
         logger.warning(
             f"[organize/inline] another organize active ({active!r}); rejecting {len(items)} items"
         )
-        results = [{
-            "src_path": it.get("src_path"), "status": "failed", "index": idx,
-            "reason": "another_organize_running",
-            "hint": f"另一个 organize ({active}) 正在执行；等其完成或中止后再试。",
-        } for idx, it in enumerate(items)]
+        results = [
+            {
+                "src_path": it.get("src_path"),
+                "status": "failed",
+                "index": idx,
+                "reason": "another_organize_running",
+                "hint": f"另一个 organize ({active}) 正在执行；等其完成或中止后再试。",
+            }
+            for idx, it in enumerate(items)
+        ]
         counts = {"failed": len(results)}
         return {
-            "items": results, "status_counts": counts,
-            "total_succeeded": 0, "total_already_linked": 0,
-            "total_failed": len(results), "total_skipped_by_user": 0,
+            "items": results,
+            "status_counts": counts,
+            "total_succeeded": 0,
+            "total_already_linked": 0,
+            "total_failed": len(results),
+            "total_skipped_by_user": 0,
         }
 
     try:
@@ -2716,18 +2843,23 @@ def _organize_executor(payload: dict, selected_indices: list[int] | None = None)
         for idx, it in enumerate(items):
             src_path = it.get("src_path")
             if selected_set is not None and idx not in selected_set:
-                results.append({
-                    "src_path": src_path, "status": "skipped_by_user", "index": idx,
-                })
+                results.append(
+                    {
+                        "src_path": src_path,
+                        "status": "skipped_by_user",
+                        "index": idx,
+                    }
+                )
                 continue
             try:
                 r = _organize_executor_one_item(it, it.get("metadata_snapshot"))
                 r.setdefault("src_path", src_path)
                 r.setdefault("status", "failed")
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.exception(f"[organize/inline] item {src_path!r} crashed")
                 r = {
-                    "src_path": src_path, "status": "failed",
+                    "src_path": src_path,
+                    "status": "failed",
                     "reason": f"executor_crashed: {type(e).__name__}: {e}",
                 }
             r["index"] = idx
@@ -2786,41 +2918,51 @@ def _do_action_preview(kind: str, raw_data: dict):
         # source: 显式 field，legacy 调用方（旧 file-browser 前端）不传则 fallback
         source = raw_data.get("source") or "file_browser"
         if source not in _VALID_DELETE_SOURCES:
-            return jsonify({
-                "error": "source_invalid",
-                "detail": f"source must be one of {sorted(_VALID_DELETE_SOURCES)}, got {source!r}",
-            }), 400
+            return jsonify(
+                {
+                    "error": "source_invalid",
+                    "detail": f"source must be one of {sorted(_VALID_DELETE_SOURCES)}, got {source!r}",
+                }
+            ), 400
 
         # snapshot_mode: dedup 强制 strict；file_browser 默认 lenient
         snapshot_mode = raw_data.get("snapshot_mode") or (
             "strict" if source == "dedup" else "lenient"
         )
         if snapshot_mode not in ("strict", "lenient"):
-            return jsonify({"error": f"snapshot_mode must be strict|lenient, got {snapshot_mode!r}"}), 400
+            return jsonify(
+                {"error": f"snapshot_mode must be strict|lenient, got {snapshot_mode!r}"}
+            ), 400
 
         # 互锁：dedup 来源**不允许** lenient（强 enforcement，避免前端 bug 绕过）
         if source == "dedup" and snapshot_mode != "strict":
-            return jsonify({
-                "error": "dedup_source_must_use_strict_mode",
-                "detail": "dedup-source delete must enforce strict expected_* snapshot",
-            }), 400
+            return jsonify(
+                {
+                    "error": "dedup_source_must_use_strict_mode",
+                    "detail": "dedup-source delete must enforce strict expected_* snapshot",
+                }
+            ), 400
 
         # Strict 模式必填 expected_inode + expected_size + expected_mtime
         if snapshot_mode == "strict":
             for i, c in enumerate(candidates_in):
                 if not isinstance(c, dict):
-                    return jsonify({
-                        "error": "strict_mode_requires_expected_fields",
-                        "candidate_index": i,
-                        "detail": "candidate must be object containing expected_inode/size/mtime",
-                    }), 400
-                for f in ("expected_inode", "expected_size", "expected_mtime"):
-                    if c.get(f) is None:
-                        return jsonify({
+                    return jsonify(
+                        {
                             "error": "strict_mode_requires_expected_fields",
                             "candidate_index": i,
-                            "missing": f,
-                        }), 400
+                            "detail": "candidate must be object containing expected_inode/size/mtime",
+                        }
+                    ), 400
+                for f in ("expected_inode", "expected_size", "expected_mtime"):
+                    if c.get(f) is None:
+                        return jsonify(
+                            {
+                                "error": "strict_mode_requires_expected_fields",
+                                "candidate_index": i,
+                                "missing": f,
+                            }
+                        ), 400
 
         # 兼容：candidates 可以是 [{path}, ...] 也可以是 [path, ...]
         candidates = []
@@ -2845,15 +2987,17 @@ def _do_action_preview(kind: str, raw_data: dict):
 
         # strict mode 撞到 mismatch → 立刻返 blocked，不生成 signed_token
         if snapshot.get("blocked"):
-            resp = jsonify({
-                "blocked": True,
-                "kind": "delete",
-                "source": source,
-                "snapshot_mode": snapshot_mode,
-                "mismatches": snapshot["mismatches"],
-                "message": "以下文件已变化，请刷新索引后重试",
-            })
-            resp.status_code = 409                      # Conflict: state diverged
+            resp = jsonify(
+                {
+                    "blocked": True,
+                    "kind": "delete",
+                    "source": source,
+                    "snapshot_mode": snapshot_mode,
+                    "mismatches": snapshot["mismatches"],
+                    "message": "以下文件已变化，请刷新索引后重试",
+                }
+            )
+            resp.status_code = 409  # Conflict: state diverged
             return resp
 
         payload = {
@@ -2872,30 +3016,37 @@ def _do_action_preview(kind: str, raw_data: dict):
             created_by="web_ui",
         )
         # 兼容旧 UI：preview 字段保留 delete-preview 原 shape 一部分
-        preview_files = [{
-            "path": it["path"],
-            "is_dir": it["is_dir"],
-            "inode": it["inode"],
-            "size": it["real_size"],
-            "size_human": human_size(it["real_size"]),
-            "hardlink_paths": it["hardlinks"],
-        } for it in snapshot["items"]]
-        return jsonify({
-            "action_id": res.action_id,
-            "signed_token": res.signed_token,
-            "expires_at": res.expires_at,
-            "kind": "delete",
-            "source": source,
-            "snapshot_mode": snapshot_mode,
-            "snapshot": snapshot,
-            # legacy-compatible preview shape
-            "files": preview_files,
-            "torrents": [{**t, "size_human": human_size(t["size"])} for t in snapshot["torrents"]],
-            "qbit_status": snapshot["qbit_status"],
-            "total_size": sum(it["real_size"] for it in snapshot["items"]),
-            "total_size_human": human_size(sum(it["real_size"] for it in snapshot["items"])),
-            "total_hardlinks": sum(len(it["hardlinks"]) for it in snapshot["items"]),
-        })
+        preview_files = [
+            {
+                "path": it["path"],
+                "is_dir": it["is_dir"],
+                "inode": it["inode"],
+                "size": it["real_size"],
+                "size_human": human_size(it["real_size"]),
+                "hardlink_paths": it["hardlinks"],
+            }
+            for it in snapshot["items"]
+        ]
+        return jsonify(
+            {
+                "action_id": res.action_id,
+                "signed_token": res.signed_token,
+                "expires_at": res.expires_at,
+                "kind": "delete",
+                "source": source,
+                "snapshot_mode": snapshot_mode,
+                "snapshot": snapshot,
+                # legacy-compatible preview shape
+                "files": preview_files,
+                "torrents": [
+                    {**t, "size_human": human_size(t["size"])} for t in snapshot["torrents"]
+                ],
+                "qbit_status": snapshot["qbit_status"],
+                "total_size": sum(it["real_size"] for it in snapshot["items"]),
+                "total_size_human": human_size(sum(it["real_size"] for it in snapshot["items"])),
+                "total_hardlinks": sum(len(it["hardlinks"]) for it in snapshot["items"]),
+            }
+        )
     if kind == "archive":
         # Phase 3.5 stub: preview 仍走完整契约 #1（产 signed_token），但不 SSH stat。
         # confirm 时 _archive_executor raise → destructive_action.confirm 落
@@ -2934,18 +3085,20 @@ def _do_action_preview(kind: str, raw_data: dict):
             server_secret=SERVER_SECRET,
             created_by="web_ui",
         )
-        return jsonify({
-            "action_id": res.action_id,
-            "signed_token": res.signed_token,
-            "expires_at": res.expires_at,
-            "kind": "archive",
-            "snapshot": snapshot_stub,
-            "warning": "archive_executor_disabled",
-            "warning_message": (
-                "Archive 操作目前未启用：confirm 会落 status='failed' + "
-                "error='ArchiveDisabledError: archive_kind_disabled_in_phase3: ...'"
-            ),
-        })
+        return jsonify(
+            {
+                "action_id": res.action_id,
+                "signed_token": res.signed_token,
+                "expires_at": res.expires_at,
+                "kind": "archive",
+                "snapshot": snapshot_stub,
+                "warning": "archive_executor_disabled",
+                "warning_message": (
+                    "Archive 操作目前未启用：confirm 会落 status='failed' + "
+                    "error='ArchiveDisabledError: archive_kind_disabled_in_phase3: ...'"
+                ),
+            }
+        )
     if kind == "organize":
         # Phase 4A.3 + Phase 4B：partial admission 多 item preview。
         # 契约 #1 双段 + Pattern C 双 inode 锚定 + 契约 #8 分类状态。
@@ -2957,23 +3110,27 @@ def _do_action_preview(kind: str, raw_data: dict):
 
         # 4B.2: soft cap 防 user 选 /share/ 根扫出 10000 文件爆 payload
         if len(items_in) > MAX_ORGANIZE_BATCH_ITEMS:
-            return jsonify({
-                "error": "batch_too_large",
-                "message": f"批量整理最多 {MAX_ORGANIZE_BATCH_ITEMS} 个文件，"
-                           f"请选更深子目录或减少范围",
-                "limit": MAX_ORGANIZE_BATCH_ITEMS,
-                "got": len(items_in),
-            }), 400
+            return jsonify(
+                {
+                    "error": "batch_too_large",
+                    "message": f"批量整理最多 {MAX_ORGANIZE_BATCH_ITEMS} 个文件，"
+                    f"请选更深子目录或减少范围",
+                    "limit": MAX_ORGANIZE_BATCH_ITEMS,
+                    "got": len(items_in),
+                }
+            ), 400
 
         # [code-enforced] 必须配置 MOVIES_ROOT / TV_ROOT
         org_cfg = load_organize_config()
         movies_root = (org_cfg.get("movies_root") or "").strip()
         tv_root = (org_cfg.get("tv_root") or "").strip()
         if not (movies_root and tv_root):
-            return jsonify({
-                "error": "organize_roots_not_configured",
-                "message": "请先在 UI 配置 MOVIES_ROOT / TV_ROOT 后再 organize",
-            }), 400
+            return jsonify(
+                {
+                    "error": "organize_roots_not_configured",
+                    "message": "请先在 UI 配置 MOVIES_ROOT / TV_ROOT 后再 organize",
+                }
+            ), 400
 
         # 收集 src_paths，逐 item 校验 src_path 字段存在
         src_paths: list[str] = []
@@ -2990,11 +3147,10 @@ def _do_action_preview(kind: str, raw_data: dict):
         db = get_db()
         current_stats = {
             p: {"inode": s.get("inode"), "mtime": s.get("mtime")}
-            for p, s in src_stat_now.items() if s.get("exists")
+            for p, s in src_stat_now.items()
+            if s.get("exists")
         }
-        cache_map = metadata_cache.get_many_by_path(
-            db, src_paths, current_stats=current_stats
-        )
+        cache_map = metadata_cache.get_many_by_path(db, src_paths, current_stats=current_stats)
 
         # Pass 1：算出每个 src 的 plan（如能算）+ 累积 dst paths 给 batch dst stat
         plans_by_src: dict[str, organize_svc.OrganizePlan] = {}
@@ -3010,9 +3166,7 @@ def _do_action_preview(kind: str, raw_data: dict):
             if cached.media_type not in ("movie", "tv"):
                 continue
             try:
-                plan = organize_svc.compute_organize_plan(
-                    sp, cached, movies_root, tv_root
-                )
+                plan = organize_svc.compute_organize_plan(sp, cached, movies_root, tv_root)
                 plans_by_src[sp] = plan
                 dst_check_paths.extend([plan.dst_dir, plan.dst_path, plan.nfo_path])
                 if plan.tvshow_nfo_path:
@@ -3035,8 +3189,12 @@ def _do_action_preview(kind: str, raw_data: dict):
         preview_items: list[dict] = []
         payload_items: list[dict] = []
         counts = {
-            "will_link": 0, "already_linked": 0, "conflict": 0,
-            "needs_identify": 0, "unsupported": 0, "not_applicable": 0,
+            "will_link": 0,
+            "already_linked": 0,
+            "conflict": 0,
+            "needs_identify": 0,
+            "unsupported": 0,
+            "not_applicable": 0,
         }
 
         for sp in src_paths:
@@ -3050,50 +3208,61 @@ def _do_action_preview(kind: str, raw_data: dict):
 
             # src 不存在
             if not src_stat.get("exists"):
-                preview_items.append({
-                    **base_item, "status": "not_applicable",
-                    "reason": "src_missing",
-                })
+                preview_items.append(
+                    {
+                        **base_item,
+                        "status": "not_applicable",
+                        "reason": "src_missing",
+                    }
+                )
                 counts["not_applicable"] += 1
                 continue
 
             # cache miss / stale
             if cached is None or cache_status == "stale":
-                preview_items.append({
-                    **base_item, "status": "needs_identify",
-                    "reason": "stale_cache" if cache_status == "stale" else "no_cache",
-                })
+                preview_items.append(
+                    {
+                        **base_item,
+                        "status": "needs_identify",
+                        "reason": "stale_cache" if cache_status == "stale" else "no_cache",
+                    }
+                )
                 counts["needs_identify"] += 1
                 continue
 
             # 不支持的 media_type（extra / part / unknown）
             if cached.media_type not in ("movie", "tv"):
-                preview_items.append({
-                    **base_item, "status": "unsupported",
-                    "media_type": cached.media_type,
-                    "title": cached.title,
-                    "reason": f"media_type={cached.media_type!r}",
-                })
+                preview_items.append(
+                    {
+                        **base_item,
+                        "status": "unsupported",
+                        "media_type": cached.media_type,
+                        "title": cached.title,
+                        "reason": f"media_type={cached.media_type!r}",
+                    }
+                )
                 counts["unsupported"] += 1
                 continue
 
             # compute_plan 抛 OrganizeNotApplicable
             if sp in plan_errors:
-                preview_items.append({
-                    **base_item, "status": "not_applicable",
-                    "media_type": cached.media_type,
-                    "title": cached.title, "year": cached.year,
-                    "reason": plan_errors[sp],
-                })
+                preview_items.append(
+                    {
+                        **base_item,
+                        "status": "not_applicable",
+                        "media_type": cached.media_type,
+                        "title": cached.title,
+                        "year": cached.year,
+                        "reason": plan_errors[sp],
+                    }
+                )
                 counts["not_applicable"] += 1
                 continue
 
             plan = plans_by_src[sp]
             dst_now = dst_stat.get(plan.dst_path, {"exists": False})
             src_inode = src_stat.get("inode")
-            already_linked = bool(
-                dst_now.get("exists") and dst_now.get("inode") == src_inode
-            )
+            already_linked = bool(dst_now.get("exists") and dst_now.get("inode") == src_inode)
             dst_conflict_with_fs = bool(dst_now.get("exists") and not already_linked)
 
             # batch 内 dst 重名检测
@@ -3154,7 +3323,8 @@ def _do_action_preview(kind: str, raw_data: dict):
                     "nfo_path_exists": dst_stat.get(plan.nfo_path, {}).get("exists", False),
                     "tvshow_nfo_exists": (
                         dst_stat.get(plan.tvshow_nfo_path, {}).get("exists", False)
-                        if plan.tvshow_nfo_path else False
+                        if plan.tvshow_nfo_path
+                        else False
                     ),
                     "already_linked": already_linked,
                     "conflict": dst_conflict_with_fs or duplicate_in_batch,
@@ -3166,9 +3336,12 @@ def _do_action_preview(kind: str, raw_data: dict):
 
             # preview_items 的紧凑视图（给 UI dashboard 用）
             pv = {
-                **base_item, "status": item_status,
-                "media_type": plan.media_type, "title": plan.title,
-                "year": plan.year, "tmdb_id": plan.tmdb_id,
+                **base_item,
+                "status": item_status,
+                "media_type": plan.media_type,
+                "title": plan.title,
+                "year": plan.year,
+                "tmdb_id": plan.tmdb_id,
                 "dst_path": plan.dst_path,
                 "nfo_path": plan.nfo_path,
                 "tvshow_nfo_path": plan.tvshow_nfo_path,
@@ -3186,13 +3359,15 @@ def _do_action_preview(kind: str, raw_data: dict):
         # 4B.2: payload_items 为空（全部 needs_identify / unsupported / not_applicable）
         # → 不签名、不落 destructive_actions row。
         if not payload_items:
-            return jsonify({
-                "kind": "organize",
-                "items_count": 0,
-                "preview_items": preview_items,
-                "counts": counts,
-                "message": "无可整理文件",
-            })
+            return jsonify(
+                {
+                    "kind": "organize",
+                    "items_count": 0,
+                    "preview_items": preview_items,
+                    "counts": counts,
+                    "message": "无可整理文件",
+                }
+            )
 
         payload = {
             "kind": "organize",
@@ -3206,17 +3381,19 @@ def _do_action_preview(kind: str, raw_data: dict):
             server_secret=SERVER_SECRET,
             created_by="web_ui",
         )
-        return jsonify({
-            "action_id": res.action_id,
-            "signed_token": res.signed_token,
-            "expires_at": res.expires_at,
-            "kind": "organize",
-            "items_count": len(payload_items),
-            "preview_items": preview_items,
-            "counts": counts,
-            # 4A 兼容：单文件 organize UI 用 'items' 字段读 plan
-            "items": payload_items,
-        })
+        return jsonify(
+            {
+                "action_id": res.action_id,
+                "signed_token": res.signed_token,
+                "expires_at": res.expires_at,
+                "kind": "organize",
+                "items_count": len(payload_items),
+                "preview_items": preview_items,
+                "counts": counts,
+                # 4A 兼容：单文件 organize UI 用 'items' 字段读 plan
+                "items": payload_items,
+            }
+        )
     return jsonify({"error": f"kind '{kind}' not supported in spike"}), 400
 
 
@@ -3243,8 +3420,7 @@ def action_confirm():
     # 必须先读 kind + items count，再决定路径。
     db = get_db()
     pre = db.execute(
-        "SELECT kind, payload_json, payload_hash FROM destructive_actions "
-        "WHERE action_id = ?",
+        "SELECT kind, payload_json, payload_hash FROM destructive_actions WHERE action_id = ?",
         (action_id,),
     ).fetchone()
     if pre is None:
@@ -3255,8 +3431,9 @@ def action_confirm():
     selected_indices_raw = data.get("selected_indices")
     selected_indices: list[int] | None = None
     if selected_indices_raw is not None:
-        if not isinstance(selected_indices_raw, list) or \
-           not all(type(i) is int for i in selected_indices_raw):
+        if not isinstance(selected_indices_raw, list) or not all(
+            type(i) is int for i in selected_indices_raw
+        ):
             return jsonify({"error": "selected_indices must be list[int]"}), 400
         if pre["kind"] != "organize":
             return jsonify({"error": "selected_indices only valid for organize"}), 400
@@ -3266,10 +3443,12 @@ def action_confirm():
             return jsonify({"error": "payload_corrupted", "action_id": action_id}), 500
         items_count = len(payload_for_check.get("items", []))
         if any(i < 0 or i >= items_count for i in selected_indices_raw):
-            return jsonify({
-                "error": "selected_indices_out_of_range",
-                "valid_range": [0, items_count - 1],
-            }), 400
+            return jsonify(
+                {
+                    "error": "selected_indices_out_of_range",
+                    "valid_range": [0, items_count - 1],
+                }
+            ), 400
         selected_indices = selected_indices_raw
 
     if pre["kind"] == "organize":
@@ -3288,7 +3467,8 @@ def action_confirm():
                 # 重查精确原因
                 cur = db.execute(
                     "SELECT status, consumed_at, expires_at FROM destructive_actions "
-                    "WHERE action_id = ?", (action_id,),
+                    "WHERE action_id = ?",
+                    (action_id,),
                 ).fetchone()
                 if cur is None:
                     return jsonify({"error": "action_not_found"}), 404
@@ -3319,28 +3499,37 @@ def action_confirm():
             except organize_runner.ConcurrentOrganizeError:
                 # 没启 worker，user 可以稍后 retry；回滚 row 到 pending 不浪费 preview
                 destructive_action._rollback_to_pending(db, action_id)
-                return jsonify({
-                    "error": "another_organize_running",
-                    "active_action_id": organize_runner.get_active_action_id(),
-                    "hint": "另一个 organize 在跑；中止它后重试当前 preview 即可。",
-                }), 409
-            except Exception as e:  # noqa: BLE001
+                return jsonify(
+                    {
+                        "error": "another_organize_running",
+                        "active_action_id": organize_runner.get_active_action_id(),
+                        "hint": "另一个 organize 在跑；中止它后重试当前 preview 即可。",
+                    }
+                ), 409
+            except Exception as e:
                 logger.exception(f"[action/confirm] start_organize_executor failed for {action_id}")
                 destructive_action._mark_terminal(
-                    db, action_id, status="failed", result=None,
+                    db,
+                    action_id,
+                    status="failed",
+                    result=None,
                     error=f"worker_start_failed: {type(e).__name__}: {e}",
                 )
-                return jsonify({
-                    "error": "worker_start_failed",
-                    "detail": f"{type(e).__name__}: {e}",
-                }), 500
+                return jsonify(
+                    {
+                        "error": "worker_start_failed",
+                        "detail": f"{type(e).__name__}: {e}",
+                    }
+                ), 500
 
-            return jsonify({
-                "action_id": action_id,
-                "status": "running",
-                "items_total": len(items),
-                "polling_url": f"/api/action/status?id={action_id}",
-            }), 202
+            return jsonify(
+                {
+                    "action_id": action_id,
+                    "status": "running",
+                    "items_total": len(items),
+                    "polling_url": f"/api/action/status?id={action_id}",
+                }
+            ), 202
 
     # Default path: inline confirm（Phase 4A 行为；4B 加 selected_indices 闭包绑定）
     # codex r1 BLOCKER 1: inline 路径也尊重 selected_indices（≤5 item 用户可勾子集）
@@ -3415,10 +3604,12 @@ def action_abort():
     if info is None:
         return jsonify({"error": "action_not_found"}), 404
     if info["status"] != "running":
-        return jsonify({
-            "error": "action_not_running",
-            "current_status": info["status"],
-        }), 409
+        return jsonify(
+            {
+                "error": "action_not_running",
+                "current_status": info["status"],
+            }
+        ), 409
 
     organize_runner.request_abort(action_id)
     logger.info(f"[action/abort] requested for {action_id}")
@@ -3476,6 +3667,7 @@ def test_deepseek_config():
         return jsonify({"ok": False, "message": "no key configured"}), 400
     try:
         import openai
+
         client = openai.OpenAI(api_key=key, base_url=llm.DEFAULT_BASE_URL, timeout=10)
         resp = client.chat.completions.create(
             model=llm.DEFAULT_MODEL,
@@ -3525,11 +3717,14 @@ def _probe_tmdb() -> dict:
         return {"state": "not_configured", "message": "TMDB key 未配置"}
     try:
         r = TMDBProvider(api_key=key).test_connection()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return {"state": _classify_provider_error(str(e)), "message": str(e)}
     if r.get("ok"):
         return {"state": "ok", "message": r.get("message") or "TMDB OK"}
-    return {"state": _classify_provider_error(r.get("message", "")), "message": r.get("message") or "unknown"}
+    return {
+        "state": _classify_provider_error(r.get("message", "")),
+        "message": r.get("message") or "unknown",
+    }
 
 
 def _probe_deepseek() -> dict:
@@ -3538,6 +3733,7 @@ def _probe_deepseek() -> dict:
         return {"state": "not_configured", "message": "DeepSeek key 未配置"}
     try:
         import openai
+
         client = openai.OpenAI(api_key=key, base_url=llm.DEFAULT_BASE_URL, timeout=10)
         client.chat.completions.create(
             model=llm.DEFAULT_MODEL,
@@ -3545,7 +3741,7 @@ def _probe_deepseek() -> dict:
             messages=[{"role": "user", "content": "ping"}],
         )
         return {"state": "ok", "message": f"DeepSeek OK ({llm.DEFAULT_MODEL})"}
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         msg = f"{type(e).__name__}: {e}"
         return {"state": _classify_provider_error(msg), "message": msg}
 
@@ -3556,14 +3752,41 @@ def _probe_emby() -> dict:
         return {"state": "not_configured", "message": "Emby 未配置"}
     try:
         r = client.test_connection()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return {"state": _classify_provider_error(str(e)), "message": str(e)}
     if r.get("ok"):
         return {"state": "ok", "message": r.get("message") or "Emby OK"}
     code = (r.get("code") or "").lower()
     if code == "auth_failed":
         return {"state": "auth_failed", "message": r.get("message") or "auth failed"}
-    return {"state": _classify_provider_error(r.get("message", "")), "message": r.get("message") or "unknown"}
+    return {
+        "state": _classify_provider_error(r.get("message", "")),
+        "message": r.get("message") or "unknown",
+    }
+
+
+def _probe_qbit() -> dict:
+    """qBit WebUI 探活：未配置密码 → not_configured；login fail → auth_failed；其他 → unreachable。
+
+    QBitClient.test_connection() 返 {status: 'ok' | 'error', message?}（schema 与 TMDB
+    不同），所以这里做一层适配映射成 providers/status 统一的 {state, message}。
+    """
+    try:
+        cfg = qbit.get_config()
+    except Exception as e:
+        return {"state": "error", "message": f"config read failed: {e}"}
+    if not cfg.get("url") or not cfg.get("user"):
+        return {"state": "not_configured", "message": "qBit URL/user 未配置"}
+    if not cfg.get("has_password"):
+        return {"state": "not_configured", "message": "qBit 密码未配置"}
+    try:
+        r = qbit.test_connection()
+    except Exception as e:
+        return {"state": _classify_provider_error(str(e)), "message": str(e)}
+    if r.get("status") == "ok":
+        return {"state": "ok", "message": f"qBit OK ({r.get('torrent_count', 0)} torrents)"}
+    msg = r.get("message", "")
+    return {"state": _classify_provider_error(msg), "message": msg or "unknown"}
 
 
 def _compute_providers_status() -> dict:
@@ -3572,17 +3795,19 @@ def _compute_providers_status() -> dict:
         "tmdb": {**_probe_tmdb(), "checked_at": now},
         "deepseek": {**_probe_deepseek(), "checked_at": now},
         "emby": {**_probe_emby(), "checked_at": now},
+        "qbit": {**_probe_qbit(), "checked_at": now},
     }
 
 
 @app.route("/api/providers/status", methods=["GET"])
 @require_token
 def providers_status():
-    """聚合 TMDB / DeepSeek / Emby 当前可用性。
+    """聚合 TMDB / DeepSeek / Emby / qBit 当前可用性。
 
     query ?refresh=1 跳过 cache 强制 re-probe；否则 60s TTL cache。
     每个 provider 真实跑一次 test_connection（TMDB /configuration、Emby
-    System/Info/Public 是免费的；DeepSeek 一次 5-token chat completion）。
+    System/Info/Public 是免费的；DeepSeek 一次 5-token chat completion；
+    qBit 走 WebUI /api/v2/auth/login + /api/v2/torrents/info）。
     """
     force = request.args.get("refresh") in ("1", "true", "yes")
     now = time.time()
@@ -3667,19 +3892,23 @@ def metadata_list_videos():
         st = stats.get(p, {})
         nfo_path = p.rsplit(".", 1)[0] + ".nfo"
         has_nfo = nfo_stats.get(nfo_path, {}).get("exists", False)
-        videos.append({
-            "path": p,
-            "name": p.rsplit("/", 1)[-1],
-            "size_bytes": st.get("size_bytes", 0),
-            "size_human": human_size(st.get("size_bytes", 0)),
-            "has_nfo": has_nfo,
-        })
+        videos.append(
+            {
+                "path": p,
+                "name": p.rsplit("/", 1)[-1],
+                "size_bytes": st.get("size_bytes", 0),
+                "size_human": human_size(st.get("size_bytes", 0)),
+                "has_nfo": has_nfo,
+            }
+        )
 
-    return jsonify({
-        "videos": videos,
-        "total": len(videos),
-        "truncated": truncated,
-    })
+    return jsonify(
+        {
+            "videos": videos,
+            "total": len(videos),
+            "truncated": truncated,
+        }
+    )
 
 
 @app.route("/api/organize/dir-preview", methods=["GET"])
@@ -3716,24 +3945,36 @@ def organize_dir_preview():
     movies_root = (org_cfg.get("movies_root") or "").strip()
     tv_root = (org_cfg.get("tv_root") or "").strip()
     if not (movies_root and tv_root):
-        return jsonify({
-            "error": "organize_roots_not_configured",
-            "message": "请先在 UI 配置 MOVIES_ROOT / TV_ROOT 后再批量整理",
-        }), 400
+        return jsonify(
+            {
+                "error": "organize_roots_not_configured",
+                "message": "请先在 UI 配置 MOVIES_ROOT / TV_ROOT 后再批量整理",
+            }
+        ), 400
 
     raw_paths = _list_video_paths(path, max_depth=max_depth, limit=limit)
     limit_reached = len(raw_paths) > limit
     raw_paths = raw_paths[:limit]
 
     counts = {
-        "will_link": 0, "already_linked": 0, "conflict": 0,
-        "needs_identify": 0, "unsupported": 0, "not_applicable": 0,
+        "will_link": 0,
+        "already_linked": 0,
+        "conflict": 0,
+        "needs_identify": 0,
+        "unsupported": 0,
+        "not_applicable": 0,
     }
     if not raw_paths:
-        return jsonify({
-            "base_path": path, "max_depth": max_depth, "limit_reached": False,
-            "counts": counts, "items": [], "total": 0,
-        })
+        return jsonify(
+            {
+                "base_path": path,
+                "max_depth": max_depth,
+                "limit_reached": False,
+                "counts": counts,
+                "items": [],
+                "total": 0,
+            }
+        )
 
     # 批量 SSH stat 所有 src（一次 round-trip）
     src_stats = _ssh_stat_paths(raw_paths)
@@ -3742,7 +3983,8 @@ def organize_dir_preview():
     db = get_db()
     current_stats = {
         p: {"inode": s.get("inode"), "mtime": s.get("mtime")}
-        for p, s in src_stats.items() if s.get("exists")
+        for p, s in src_stats.items()
+        if s.get("exists")
     }
     cache_map = metadata_cache.get_many_by_path(db, raw_paths, current_stats=current_stats)
 
@@ -3773,7 +4015,8 @@ def organize_dir_preview():
         name = p.rsplit("/", 1)[-1]
         size_bytes = src_stat.get("size_bytes", 0)
         item: dict = {
-            "path": p, "name": name,
+            "path": p,
+            "name": name,
             "size_bytes": size_bytes,
             "size_human": human_size(size_bytes),
         }
@@ -3842,14 +4085,16 @@ def organize_dir_preview():
             counts["will_link"] += 1
         items.append(item)
 
-    return jsonify({
-        "base_path": path,
-        "max_depth": max_depth,
-        "limit_reached": limit_reached,
-        "counts": counts,
-        "items": items,
-        "total": len(items),
-    })
+    return jsonify(
+        {
+            "base_path": path,
+            "max_depth": max_depth,
+            "limit_reached": limit_reached,
+            "counts": counts,
+            "items": items,
+            "total": len(items),
+        }
+    )
 
 
 @app.route("/api/metadata/identify", methods=["POST"])
@@ -3872,28 +4117,40 @@ def metadata_identify():
     if provider is None:
         # 仅文件名解析，不查 provider
         parse = identify_svc.parse_filename(path)
-        return jsonify({
-            "parse": {
-                "raw_name": parse.raw_name, "title": parse.title, "year": parse.year,
-                "season": parse.season, "episode": parse.episode,
-                "episode_title": parse.episode_title, "media_type": parse.media_type,
-                "resolution": parse.resolution, "source": parse.source,
-                "release_group": parse.release_group,
-            },
-            "candidates": [],
-            "top_pick": None,
-            "confidence": 0.0,
-            "reasoning": "TMDB API key not configured. Set it in settings to enable metadata lookup.",
-            "provider_state": "not_configured",
-        })
+        return jsonify(
+            {
+                "parse": {
+                    "raw_name": parse.raw_name,
+                    "title": parse.title,
+                    "year": parse.year,
+                    "season": parse.season,
+                    "episode": parse.episode,
+                    "episode_title": parse.episode_title,
+                    "media_type": parse.media_type,
+                    "resolution": parse.resolution,
+                    "source": parse.source,
+                    "release_group": parse.release_group,
+                },
+                "candidates": [],
+                "top_pick": None,
+                "confidence": 0.0,
+                "reasoning": "TMDB API key not configured. Set it in settings to enable metadata lookup.",
+                "provider_state": "not_configured",
+            }
+        )
 
     result = identify_svc.identify(path, provider, llm_api_key=load_deepseek_key() or None)
     response = {
         "parse": {
-            "raw_name": result.parse.raw_name, "title": result.parse.title, "year": result.parse.year,
-            "season": result.parse.season, "episode": result.parse.episode,
-            "episode_title": result.parse.episode_title, "media_type": result.parse.media_type,
-            "resolution": result.parse.resolution, "source": result.parse.source,
+            "raw_name": result.parse.raw_name,
+            "title": result.parse.title,
+            "year": result.parse.year,
+            "season": result.parse.season,
+            "episode": result.parse.episode,
+            "episode_title": result.parse.episode_title,
+            "media_type": result.parse.media_type,
+            "resolution": result.parse.resolution,
+            "source": result.parse.source,
             "release_group": result.parse.release_group,
         },
         "candidates": [_candidate_to_dict(c) for c in result.candidates],
@@ -3906,12 +4163,18 @@ def metadata_identify():
     }
 
     # tv 类型且有 top_pick → 顺手把单集详情也带上（episode title / overview / still）
-    if result.top_pick and result.parse.media_type == "episode" and result.top_pick.media_type == "tv":
+    if (
+        result.top_pick
+        and result.parse.media_type == "episode"
+        and result.top_pick.media_type == "tv"
+    ):
         tmdb_id = result.top_pick.external_ids.get("tmdb_id")
         if tmdb_id:
             details = provider.lookup_by_id(
-                tmdb_id, media_type="tv",
-                season=result.parse.season, episode=result.parse.episode,
+                tmdb_id,
+                media_type="tv",
+                season=result.parse.season,
+                episode=result.parse.episode,
             )
             if details:
                 response["details"] = {
@@ -3938,13 +4201,17 @@ def metadata_identify():
         if stat.get("exists"):
             db = get_db()
             metadata_cache.upsert_identification(
-                db, path=path, stat=stat, identify_result=result,
+                db,
+                path=path,
+                stat=stat,
+                identify_result=result,
             )
             # 把 lookup_by_id 拿到的 details 补丁式写入（不覆盖核心字段）
             d = response.get("details") or {}
             ep = d.get("episode") or {}
             metadata_cache.upsert_details(
-                db, path=path,
+                db,
+                path=path,
                 genres=d.get("genres") or None,
                 cast=d.get("cast") or None,
                 runtime_minutes=d.get("runtime_minutes"),
@@ -3953,7 +4220,7 @@ def metadata_identify():
                 episode_still_url=ep.get("still_url"),
             )
             response["cached"] = True
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         # cache 写失败不影响识别 response 返回（best-effort 持久化）
         logger.warning(f"[metadata_cache] upsert failed for {path}: {e}")
 
@@ -4015,9 +4282,11 @@ def metadata_bind():
         if val is None:
             continue
         if isinstance(val, bool) or not isinstance(val, int) or val < 0 or val > 9999:
-            return jsonify({
-                "error": f"{label} must be a non-negative integer ≤ 9999",
-            }), 400
+            return jsonify(
+                {
+                    "error": f"{label} must be a non-negative integer ≤ 9999",
+                }
+            ), 400
     if media_type == "tv":
         if season_arg is None:
             season_arg = parse.season
@@ -4027,10 +4296,12 @@ def metadata_bind():
     # lookup_by_id 拉权威详情（cast/genres/runtime/episode）
     try:
         details = provider.lookup_by_id(
-            tmdb_id, media_type=media_type,
-            season=season_arg, episode=episode_arg,
+            tmdb_id,
+            media_type=media_type,
+            season=season_arg,
+            episode=episode_arg,
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning(f"[metadata_bind] lookup failed {tmdb_id}: {e}")
         return jsonify({"error": f"tmdb_lookup_failed: {type(e).__name__}: {e}"}), 502
     if details is None:
@@ -4044,17 +4315,19 @@ def metadata_bind():
     # 走 parse 字段不行因 FilenameParse frozen，直接构造 new instance）。
     bound_parse = identify_svc.FilenameParse(
         raw_name=parse.raw_name,
-        title=cand.title,                           # 用 cand 权威 title 而非 guessit
+        title=cand.title,  # 用 cand 权威 title 而非 guessit
         year=cand.year or parse.year,
         season=season_arg if media_type == "tv" else None,
         episode=episode_arg if media_type == "tv" else None,
         episode_title=parse.episode_title,
-        media_type=media_type,                       # 强写 movie/tv
+        media_type=media_type,  # 强写 movie/tv
         resolution=parse.resolution,
         source=parse.source,
         release_group=parse.release_group,
-        codec=parse.codec, color_depth=parse.color_depth,
-        hdr_profiles=parse.hdr_profiles, container=parse.container,
+        codec=parse.codec,
+        color_depth=parse.color_depth,
+        hdr_profiles=parse.hdr_profiles,
+        container=parse.container,
         audio_codec=parse.audio_codec,
         raw=parse.raw,
     )
@@ -4062,7 +4335,7 @@ def metadata_bind():
         parse=bound_parse,
         candidates=[cand],
         top_pick=cand,
-        confidence=1.0,                              # manual = full confidence
+        confidence=1.0,  # manual = full confidence
         reasoning="manual binding by user",
         pick_source="manual",
     )
@@ -4070,12 +4343,16 @@ def metadata_bind():
     try:
         db = get_db()
         metadata_cache.upsert_identification(
-            db, path=path, stat=stat, identify_result=bound_result,
+            db,
+            path=path,
+            stat=stat,
+            identify_result=bound_result,
         )
         # 写 details（cast/genres/runtime + episode_*）
         ep = details.episode or {}
         metadata_cache.upsert_details(
-            db, path=path,
+            db,
+            path=path,
             genres=details.genres or None,
             cast=details.cast or None,
             runtime_minutes=details.runtime_minutes,
@@ -4083,16 +4360,18 @@ def metadata_bind():
             episode_overview=ep.get("overview"),
             episode_still_url=ep.get("still_url"),
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception(f"[metadata_bind] cache write failed for {path}")
         return jsonify({"error": f"cache_write_failed: {type(e).__name__}: {e}"}), 500
 
     # 重读返回最新 snapshot 给前端
     cached, _ = metadata_cache.get_by_path(db, path)
-    return jsonify({
-        "bound": True,
-        "cached": _cached_to_library_dict(cached) if cached else None,
-    })
+    return jsonify(
+        {
+            "bound": True,
+            "cached": _cached_to_library_dict(cached) if cached else None,
+        }
+    )
 
 
 @app.route("/api/metadata/cached", methods=["GET"])
@@ -4122,16 +4401,21 @@ def metadata_cached():
         return jsonify({"cached": False, "stale": False, "reason": "file_not_found"})
 
     cached, status = metadata_cache.get_by_path(
-        get_db(), validated,
-        current_mtime=stat["mtime"], current_inode=stat["inode"],
+        get_db(),
+        validated,
+        current_mtime=stat["mtime"],
+        current_inode=stat["inode"],
     )
     if status == "miss":
         return jsonify({"cached": False, "stale": False})
     if status == "stale":
-        return jsonify({
-            "cached": False, "stale": True,
-            "fetched_at": cached.metadata_fetched_at if cached else None,
-        })
+        return jsonify(
+            {
+                "cached": False,
+                "stale": True,
+                "fetched_at": cached.metadata_fetched_at if cached else None,
+            }
+        )
 
     # hit — 还原 shape 接近 /api/metadata/identify
     c = cached
@@ -4166,32 +4450,34 @@ def metadata_cached():
                 "still_url": c.episode_still_url,
                 "air_date": c.episode_air_date,
             }
-    return jsonify({
-        "cached": True,
-        "stale": False,
-        "fetched_at": c.metadata_fetched_at,
-        "parse": {
-            "raw_name": c.parse_raw_name,
-            "title": c.title,
-            "year": c.year,
-            "season": c.season_number,
-            "episode": c.episode_number,
-            "episode_title": c.episode_title,
-            "media_type": "episode" if c.media_type == "tv" else c.media_type,
-            "resolution": c.parse_resolution,
-            "source": c.parse_source,
-            "release_group": c.parse_release_group,
-        },
-        "candidates": [],  # cache 不存全候选；只要 top_pick 够前端展示
-        "top_pick": top_pick,
-        "confidence": c.metadata_confidence or 0.0,
-        "reasoning": c.metadata_reasoning or "",
-        "pick_source": c.metadata_pick_source or "cached",
-        "details": details,
-        "metadata_status": c.metadata_status,
-        "llm_configured": bool(load_deepseek_key()),
-        "provider_state": "ok",
-    })
+    return jsonify(
+        {
+            "cached": True,
+            "stale": False,
+            "fetched_at": c.metadata_fetched_at,
+            "parse": {
+                "raw_name": c.parse_raw_name,
+                "title": c.title,
+                "year": c.year,
+                "season": c.season_number,
+                "episode": c.episode_number,
+                "episode_title": c.episode_title,
+                "media_type": "episode" if c.media_type == "tv" else c.media_type,
+                "resolution": c.parse_resolution,
+                "source": c.parse_source,
+                "release_group": c.parse_release_group,
+            },
+            "candidates": [],  # cache 不存全候选；只要 top_pick 够前端展示
+            "top_pick": top_pick,
+            "confidence": c.metadata_confidence or 0.0,
+            "reasoning": c.metadata_reasoning or "",
+            "pick_source": c.metadata_pick_source or "cached",
+            "details": details,
+            "metadata_status": c.metadata_status,
+            "llm_configured": bool(load_deepseek_key()),
+            "provider_state": "ok",
+        }
+    )
 
 
 def _candidate_to_dict(c) -> dict:
@@ -4295,7 +4581,9 @@ def metadata_preview_nfo_write():
         try:
             video_path = validate_path(raw["video_path"])
         except Exception:
-            errors.append({"index": idx, "reason": f"invalid video_path: {raw.get('video_path')!r}"})
+            errors.append(
+                {"index": idx, "reason": f"invalid video_path: {raw.get('video_path')!r}"}
+            )
             continue
         tmdb_id = str(raw.get("tmdb_id") or "").strip()
         media_type = raw.get("media_type", "movie")
@@ -4343,40 +4631,46 @@ def metadata_preview_nfo_write():
         )
         xml = nfo_writer.build_nfo(nfo_payload)
         nfo_path = nfo_writer.nfo_path_for_video(video_path)
-        enriched_items.append({
-            "video_path": video_path,
-            "nfo_path": nfo_path,
-            "new_xml": xml,
-            "tmdb_id": nfo_payload.tmdb_id,
-            "media_type": nfo_media_type,
-        })
+        enriched_items.append(
+            {
+                "video_path": video_path,
+                "nfo_path": nfo_path,
+                "new_xml": xml,
+                "tmdb_id": nfo_payload.tmdb_id,
+                "media_type": nfo_media_type,
+            }
+        )
 
     if not enriched_items:
         return jsonify({"error": "no_valid_items", "errors": errors}), 400
 
     # Step 2: SSH stat video + nfo paths（一次性批量）
-    all_paths = [it["video_path"] for it in enriched_items] + [it["nfo_path"] for it in enriched_items]
+    all_paths = [it["video_path"] for it in enriched_items] + [
+        it["nfo_path"] for it in enriched_items
+    ]
     stat_map = _ssh_stat_paths(all_paths)
 
     snap_items: list[dict] = []
     for it in enriched_items:
         v_stat = stat_map.get(it["video_path"], {"exists": False})
         n_stat = stat_map.get(it["nfo_path"], {"exists": False})
-        snap_items.append({
-            **it,
-            "video_snapshot": {
-                "exists": v_stat.get("exists", False),
-                "inode": v_stat.get("inode", 0),
-                "size_bytes": v_stat.get("size_bytes", 0),
-                "mtime": v_stat.get("mtime", 0),
-            },
-            "nfo_snapshot": {
-                "existed": n_stat.get("exists", False),
-                "inode": n_stat.get("inode", 0),
-                "size_bytes": n_stat.get("size_bytes", 0),
-                "mtime": n_stat.get("mtime", 0),
-            },
-        })
+        snap_items.append(
+            {
+                **it,
+                "video_snapshot": {
+                    "exists": v_stat.get("exists", False),
+                    "inode": v_stat.get("inode", 0),
+                    "size_bytes": v_stat.get("size_bytes", 0),
+                    "mtime": v_stat.get("mtime", 0),
+                },
+                "nfo_snapshot": {
+                    "existed": n_stat.get("exists", False),
+                    "inode": n_stat.get("inode", 0),
+                    "size_bytes": n_stat.get("size_bytes", 0),
+                    "mtime": n_stat.get("mtime", 0),
+                },
+            }
+        )
 
     # Step 3: 落 destructive_actions 表
     payload = {
@@ -4393,31 +4687,36 @@ def metadata_preview_nfo_write():
     )
 
     # Step 4: 返回给前端的 preview shape（XML 太大不全返；只返 head 200 字符）
-    preview_items = [{
-        "video_path": it["video_path"],
-        "nfo_path": it["nfo_path"],
-        "tmdb_id": it["tmdb_id"],
-        "media_type": it["media_type"],
-        "video_exists": it["video_snapshot"]["exists"],
-        "nfo_existed": it["nfo_snapshot"]["existed"],
-        "action": "overwrite" if it["nfo_snapshot"]["existed"] else "create",
-        "xml_preview": it["new_xml"][:300],
-        "xml_size_bytes": len(it["new_xml"].encode("utf-8")),
-    } for it in snap_items]
+    preview_items = [
+        {
+            "video_path": it["video_path"],
+            "nfo_path": it["nfo_path"],
+            "tmdb_id": it["tmdb_id"],
+            "media_type": it["media_type"],
+            "video_exists": it["video_snapshot"]["exists"],
+            "nfo_existed": it["nfo_snapshot"]["existed"],
+            "action": "overwrite" if it["nfo_snapshot"]["existed"] else "create",
+            "xml_preview": it["new_xml"][:300],
+            "xml_size_bytes": len(it["new_xml"].encode("utf-8")),
+        }
+        for it in snap_items
+    ]
 
-    return jsonify({
-        "action_id": res.action_id,
-        "signed_token": res.signed_token,
-        "expires_at": res.expires_at,
-        "kind": "nfo_write",
-        "preview": {
-            "items": preview_items,
-            "errors": errors,
-            "total": len(preview_items),
-            "to_create": sum(1 for it in preview_items if it["action"] == "create"),
-            "to_overwrite": sum(1 for it in preview_items if it["action"] == "overwrite"),
-        },
-    })
+    return jsonify(
+        {
+            "action_id": res.action_id,
+            "signed_token": res.signed_token,
+            "expires_at": res.expires_at,
+            "kind": "nfo_write",
+            "preview": {
+                "items": preview_items,
+                "errors": errors,
+                "total": len(preview_items),
+                "to_create": sum(1 for it in preview_items if it["action"] == "create"),
+                "to_overwrite": sum(1 for it in preview_items if it["action"] == "overwrite"),
+            },
+        }
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -4461,7 +4760,7 @@ def scan_start():
         )
     except scanner.ConcurrentScanError as e:
         return jsonify({"error": "scan_already_running", "detail": str(e)}), 409
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return jsonify({"error": "scan_start_failed", "detail": str(e)}), 500
 
     return jsonify({"scan_run_id": scan_run_id, "base_path": base_path})
@@ -4477,20 +4776,22 @@ def scan_status():
     summary = scanner.get_status(get_db(), int(scan_run_id))
     if summary is None:
         return jsonify({"error": "scan_run_not_found"}), 404
-    resp = jsonify({
-        "scan_run_id": summary.scan_run_id,
-        "base_path": summary.base_path,
-        "max_depth": summary.max_depth,
-        "status": summary.status,
-        "files_total": summary.files_total,
-        "files_done": summary.files_done,
-        "files_failed": summary.files_failed,
-        "files_skipped": summary.files_skipped,
-        "current_path": summary.current_path,
-        "started_at": summary.started_at,
-        "completed_at": summary.completed_at,
-        "error": summary.error,
-    })
+    resp = jsonify(
+        {
+            "scan_run_id": summary.scan_run_id,
+            "base_path": summary.base_path,
+            "max_depth": summary.max_depth,
+            "status": summary.status,
+            "files_total": summary.files_total,
+            "files_done": summary.files_done,
+            "files_failed": summary.files_failed,
+            "files_skipped": summary.files_skipped,
+            "current_path": summary.current_path,
+            "started_at": summary.started_at,
+            "completed_at": summary.completed_at,
+            "error": summary.error,
+        }
+    )
     resp.headers["Cache-Control"] = "no-store"  # 轮询不能 cache
     return resp
 
@@ -4540,7 +4841,7 @@ def _cached_to_library_dict(c) -> dict:
     return {
         "path": c.path,
         "tmdb_id": c.tmdb_id,
-        "tmdb_series_id": c.tmdb_series_id,    # for frontend series aggregation
+        "tmdb_series_id": c.tmdb_series_id,  # for frontend series aggregation
         "imdb_id": c.imdb_id,
         "media_type": c.media_type,
         "title": c.title,
@@ -4556,7 +4857,7 @@ def _cached_to_library_dict(c) -> dict:
         "cast": c.cast[:6],
         "runtime_minutes": c.runtime_minutes,
         "first_seen_at": c.first_seen_at,
-        "size_bytes": c.size_bytes,            # for series card total size
+        "size_bytes": c.size_bytes,  # for series card total size
         "resolution": c.parse_resolution,
         "source": c.parse_source,
     }
@@ -4587,16 +4888,23 @@ def library_items():
 
     items, total = metadata_cache.query_library(
         get_db(),
-        media_type=media_type, year_from=year_from, year_to=year_to,
-        query=query, sort=sort, limit=limit, offset=offset,
+        media_type=media_type,
+        year_from=year_from,
+        year_to=year_to,
+        query=query,
+        sort=sort,
+        limit=limit,
+        offset=offset,
     )
-    resp = jsonify({
-        "items": [_cached_to_library_dict(c) for c in items],
-        "total": total,
-        "has_more": offset + len(items) < total,
-        "limit": limit,
-        "offset": offset,
-    })
+    resp = jsonify(
+        {
+            "items": [_cached_to_library_dict(c) for c in items],
+            "total": total,
+            "has_more": offset + len(items) < total,
+            "limit": limit,
+            "offset": offset,
+        }
+    )
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -4627,24 +4935,29 @@ def library_watched_stale():
     offset = max(0, args.get("offset", 0, type=int))
 
     items, total = dedup.find_watched_stale_media(
-        get_db(), days=days, limit=limit, offset=offset,
+        get_db(),
+        days=days,
+        limit=limit,
+        offset=offset,
     )
     total_bytes = sum(it.get("size_bytes", 0) or 0 for it in items)
-    resp = jsonify({
-        "items": items,
-        "total": total,
-        "total_bytes_on_page": total_bytes,
-        "limit": limit,
-        "offset": offset,
-        "has_more": offset + len(items) < total,
-        "days_threshold": days,
-    })
+    resp = jsonify(
+        {
+            "items": items,
+            "total": total,
+            "total_bytes_on_page": total_bytes,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(items) < total,
+            "days_threshold": days,
+        }
+    )
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
 
 @app.route("/api/library/companions-in-dir", methods=["GET"])
-@app.route("/api/library/extras-in-dir", methods=["GET"])           # 旧名 alias
+@app.route("/api/library/extras-in-dir", methods=["GET"])  # 旧名 alias
 @require_token
 def library_companions_in_dir():
     """列出某 main feature 同目录的附属文件：花絮（extra）+ 多盘分段（part）。
@@ -4659,21 +4972,23 @@ def library_companions_in_dir():
     validate_path(path)
     dir_path = path.rsplit("/", 1)[0] if "/" in path else ""
     companions = metadata_cache.list_companions_in_dir(get_db(), dir_path)
-    resp = jsonify({
-        "dir": dir_path,
-        "items": [
-            {
-                "path": c.path,
-                "raw_name": c.parse_raw_name,
-                "kind": c.media_type,                 # 'extra' | 'part'
-                "size_bytes": c.size_bytes,
-                "resolution": c.parse_resolution,
-                "source": c.parse_source,
-            }
-            for c in companions
-        ],
-        "count": len(companions),
-    })
+    resp = jsonify(
+        {
+            "dir": dir_path,
+            "items": [
+                {
+                    "path": c.path,
+                    "raw_name": c.parse_raw_name,
+                    "kind": c.media_type,  # 'extra' | 'part'
+                    "size_bytes": c.size_bytes,
+                    "resolution": c.parse_resolution,
+                    "source": c.parse_source,
+                }
+                for c in companions
+            ],
+            "count": len(companions),
+        }
+    )
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -4710,14 +5025,16 @@ def dedup_groups():
         offset=offset,
     )
     total_deletable = sum(g.deletable_size_bytes for g in groups)
-    resp = jsonify({
-        "groups": [dedup.group_to_dict(g) for g in groups],
-        "total_groups": total,
-        "total_deletable_bytes": total_deletable,
-        "limit": limit,
-        "offset": offset,
-        "has_more": offset + len(groups) < total,
-    })
+    resp = jsonify(
+        {
+            "groups": [dedup.group_to_dict(g) for g in groups],
+            "total_groups": total,
+            "total_deletable_bytes": total_deletable,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(groups) < total,
+        }
+    )
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -4725,14 +5042,18 @@ def dedup_groups():
 @app.route("/api/dedup/weights", methods=["GET"])
 @require_token
 def dedup_weights_get():
-    rows = get_db().execute(
-        "SELECT key, weight, updated_at FROM dedup_weights ORDER BY key"
-    ).fetchall()
+    rows = (
+        get_db()
+        .execute("SELECT key, weight, updated_at FROM dedup_weights ORDER BY key")
+        .fetchall()
+    )
     current_hash = dedup.get_current_hash(get_db())
-    return jsonify({
-        "weights": [dict(r) for r in rows],
-        "current_hash": current_hash,
-    })
+    return jsonify(
+        {
+            "weights": [dict(r) for r in rows],
+            "current_hash": current_hash,
+        }
+    )
 
 
 @app.route("/api/dedup/weights", methods=["POST"])
@@ -4787,11 +5108,13 @@ def dedup_refresh():
 @require_token
 def get_emby_config():
     cfg = load_emby_config()
-    return jsonify({
-        "url": cfg.get("url", ""),
-        "user_id": cfg.get("user_id", ""),
-        "has_key": bool(load_emby_key()),
-    })
+    return jsonify(
+        {
+            "url": cfg.get("url", ""),
+            "user_id": cfg.get("user_id", ""),
+            "has_key": bool(load_emby_key()),
+        }
+    )
 
 
 @app.route("/api/config/emby", methods=["POST"])
@@ -4822,8 +5145,9 @@ def test_emby_config():
         return jsonify({"ok": False, "message": "url, user_id, api_key all required"}), 400
     try:
         from clients.watch.emby import EmbyClient
+
         result = EmbyClient(base_url=url, user_id=user_id, api_key=api_key).test_connection()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return jsonify({"ok": False, "message": f"{type(e).__name__}: {e}"}), 200
     return jsonify(result)
 
@@ -4835,11 +5159,13 @@ def test_emby_config():
 @require_token
 def get_organize_config():
     cfg = load_organize_config()
-    return jsonify({
-        "movies_root": cfg.get("movies_root", ""),
-        "tv_root": cfg.get("tv_root", ""),
-        "configured": bool(cfg.get("movies_root") and cfg.get("tv_root")),
-    })
+    return jsonify(
+        {
+            "movies_root": cfg.get("movies_root", ""),
+            "tv_root": cfg.get("tv_root", ""),
+            "configured": bool(cfg.get("movies_root") and cfg.get("tv_root")),
+        }
+    )
 
 
 @app.route("/api/config/organize", methods=["POST"])
@@ -4881,13 +5207,15 @@ def test_organize_config():
         f"test -d {shlex.quote(tv_root)} -a -w {shlex.quote(tv_root)}",
         timeout=10,
     )
-    return jsonify({
-        "movies_ok": rc_m == 0,
-        "tv_ok": rc_t == 0,
-        "ok": rc_m == 0 and rc_t == 0,
-        "movies_root": movies_root,
-        "tv_root": tv_root,
-    })
+    return jsonify(
+        {
+            "movies_ok": rc_m == 0,
+            "tv_ok": rc_t == 0,
+            "ok": rc_m == 0 and rc_t == 0,
+            "movies_root": movies_root,
+            "tv_root": tv_root,
+        }
+    )
 
 
 def _open_db_conn():
@@ -4908,19 +5236,23 @@ def get_qbit_auto_organize_config():
     qbit_error: str | None = None
     try:
         torrents = qbit.get_torrents()
-        qbit_categories = sorted({
-            (t.get("category") or "").strip()
-            for t in torrents
-            if (t.get("category") or "").strip()
-        })
-    except Exception as e:  # noqa: BLE001
+        qbit_categories = sorted(
+            {
+                (t.get("category") or "").strip()
+                for t in torrents
+                if (t.get("category") or "").strip()
+            }
+        )
+    except Exception as e:
         qbit_error = f"{type(e).__name__}: {e}"
-    return jsonify({
-        **cfg,
-        "available_qbit_categories": qbit_categories,
-        "qbit_fetch_error": qbit_error,
-        "active_changes_require_restart": True,
-    })
+    return jsonify(
+        {
+            **cfg,
+            "available_qbit_categories": qbit_categories,
+            "qbit_fetch_error": qbit_error,
+            "active_changes_require_restart": True,
+        }
+    )
 
 
 @app.route("/api/config/qbit-auto-organize", methods=["POST"])
@@ -4940,20 +5272,24 @@ def set_qbit_auto_organize_config():
         cats = []
     cleaned_cats = [str(c).strip() for c in cats if c is not None and str(c).strip()]
     if enabled and not cleaned_cats:
-        return jsonify({
-            "ok": False,
-            "error": "categories_required_when_enabled",
-            "message": "启用前必须配置至少一个 qBit category 白名单",
-        }), 400
+        return jsonify(
+            {
+                "ok": False,
+                "error": "categories_required_when_enabled",
+                "message": "启用前必须配置至少一个 qBit category 白名单",
+            }
+        ), 400
     # 类型 / 边界清洗在 save 内做
     save_qbit_auto_organize_config(data)
     new_cfg = load_qbit_auto_organize_config()
-    return jsonify({
-        "ok": True,
-        **new_cfg,
-        "active_changes_require_restart": True,
-        "message": "保存成功；poll_interval 变更需重启 server 生效",
-    })
+    return jsonify(
+        {
+            "ok": True,
+            **new_cfg,
+            "active_changes_require_restart": True,
+            "message": "保存成功；poll_interval 变更需重启 server 生效",
+        }
+    )
 
 
 @app.route("/api/auto-organize/runs", methods=["GET"])
@@ -4976,7 +5312,10 @@ def list_auto_organize_runs():
     db = get_db()
     try:
         runs = qbit_auto.list_history(
-            db, limit=limit, offset=offset, status_filter=status_filter,
+            db,
+            limit=limit,
+            offset=offset,
+            status_filter=status_filter,
         )
     except ValueError as e:
         return jsonify({"error": "invalid_status_filter", "message": str(e)}), 400
@@ -4987,15 +5326,15 @@ def list_auto_organize_runs():
             (status_filter,),
         ).fetchone()[0]
     else:
-        total = db.execute(
-            "SELECT count(*) FROM auto_organize_runs"
-        ).fetchone()[0]
-    return jsonify({
-        "runs": runs,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-    })
+        total = db.execute("SELECT count(*) FROM auto_organize_runs").fetchone()[0]
+    return jsonify(
+        {
+            "runs": runs,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+    )
 
 
 @app.route("/api/auto-organize/reset", methods=["POST"])
@@ -5022,12 +5361,14 @@ def reset_auto_organize_run():
     if row is None:
         return jsonify({"ok": False, "error": "not_found"}), 404
     if row["status"] in ("pending", "organizing"):
-        return jsonify({
-            "ok": False,
-            "error": "cannot_reset_active",
-            "current_status": row["status"],
-            "message": f"row 当前 {row['status']}，等其变为 terminal 再 reset",
-        }), 409
+        return jsonify(
+            {
+                "ok": False,
+                "error": "cannot_reset_active",
+                "current_status": row["status"],
+                "message": f"row 当前 {row['status']}，等其变为 terminal 再 reset",
+            }
+        ), 409
     db.execute("DELETE FROM auto_organize_runs WHERE qbit_hash = ?", (qbit_hash,))
     db.commit()
 
@@ -5045,26 +5386,31 @@ def reset_auto_organize_run():
                 cfg = load_qbit_auto_organize_config()
                 threshold = cfg.get("confidence_threshold", 0.85)
                 trigger_result = qbit_auto.dispatch_one(
-                    db, target,
+                    db,
+                    target,
                     list_video_paths_fn=lambda cp: _list_video_paths(
-                        cp, max_depth=3, limit=MAX_ORGANIZE_BATCH_ITEMS,
+                        cp,
+                        max_depth=3,
+                        limit=MAX_ORGANIZE_BATCH_ITEMS,
                     ),
                     confidence_threshold=threshold,
                     build_and_start_organize_fn=_build_and_start_auto_organize,
                 )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.exception(f"[auto-organize] trigger_now failed for {qbit_hash}")
             trigger_result = {
                 "action": "trigger_failed",
                 "error": f"{type(e).__name__}: {e}",
                 "message": "立即触发失败（qBit 不可达？）；下周期 cron 仍会重试",
             }
-    return jsonify({
-        "ok": True,
-        "qbit_hash": qbit_hash,
-        "previous_status": row["status"],
-        "trigger_result": trigger_result,
-    })
+    return jsonify(
+        {
+            "ok": True,
+            "qbit_hash": qbit_hash,
+            "previous_status": row["status"],
+            "trigger_result": trigger_result,
+        }
+    )
 
 
 @app.route("/api/watch/sync", methods=["POST"])
@@ -5073,10 +5419,12 @@ def watch_sync_start():
     """Start an Emby sync run. Returns run_id; client polls /api/watch/sync/status."""
     client = _emby_client()
     if client is None:
-        return jsonify({
-            "error": "emby_not_configured",
-            "detail": "configure /api/config/emby first (url + user_id + api_key)",
-        }), 400
+        return jsonify(
+            {
+                "error": "emby_not_configured",
+                "detail": "configure /api/config/emby first (url + user_id + api_key)",
+            }
+        ), 400
 
     try:
         run_id = watch_sync.sync_emby(
@@ -5086,7 +5434,7 @@ def watch_sync_start():
         )
     except watch_sync.ConcurrentSyncError as e:
         return jsonify({"error": "concurrent_sync", "detail": str(e)}), 409
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
     return jsonify({"run_id": run_id})
 
@@ -5118,12 +5466,16 @@ def watch_provider_status():
     try:
         result = client.test_connection()
         state = "ok" if result.get("ok") else (result.get("code") or "error")
-        return jsonify({"emby": {
-            "state": state,
-            "message": result.get("message"),
-            "server_name": result.get("server_name"),
-        }})
-    except Exception as e:  # noqa: BLE001
+        return jsonify(
+            {
+                "emby": {
+                    "state": state,
+                    "message": result.get("message"),
+                    "server_name": result.get("server_name"),
+                }
+            }
+        )
+    except Exception as e:
         return jsonify({"emby": {"state": "error", "message": str(e)}})
 
 
@@ -5131,8 +5483,10 @@ def watch_provider_status():
 @require_token
 def action_recovery_list():
     """列出需要人工恢复的 action（spike 阶段简单只读视图）。"""
-    rows = get_db().execute(
-        """
+    rows = (
+        get_db()
+        .execute(
+            """
         SELECT action_id, kind, status, created_at, started_at, completed_at,
                error, recovery_hint, payload_json
           FROM destructive_actions
@@ -5140,10 +5494,14 @@ def action_recovery_list():
          ORDER BY created_at DESC
          LIMIT 50
         """
-    ).fetchall()
-    return jsonify({
-        "actions": [dict(r) for r in rows],
-    })
+        )
+        .fetchall()
+    )
+    return jsonify(
+        {
+            "actions": [dict(r) for r in rows],
+        }
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -5168,7 +5526,7 @@ def _cron_reap_stuck():
                 )
         finally:
             conn.close()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.error(f"[cron] reap failed: {e}")
 
 
@@ -5192,21 +5550,25 @@ def _cron_qbit_auto_organize():
             # 1. reconcile 上周期 organizing → terminal（独立 reconcile，dispatch 失败也跑）
             synced = qbit_auto.reconcile_organizing_rows(conn)
             if synced:
-                logger.info(f"[auto-organize] reconciled {len(synced)} organizing rows: "
-                            f"{[r['synced_to'] for r in synced]}")
+                logger.info(
+                    f"[auto-organize] reconciled {len(synced)} organizing rows: "
+                    f"{[r['synced_to'] for r in synced]}"
+                )
 
             cfg = load_qbit_auto_organize_config()
             if not cfg.get("enabled"):
                 return
             whitelist = cfg.get("categories", [])
             if not whitelist:
-                logger.warning("[auto-organize] enabled=True 但 categories 白名单空，不触发任何种子")
+                logger.warning(
+                    "[auto-organize] enabled=True 但 categories 白名单空，不触发任何种子"
+                )
                 return
 
             # 2. 拉 qBit completed torrents
             try:
                 torrents = qbit.get_torrents()
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.error(f"[auto-organize] qbit.get_torrents failed: {e}")
                 return
             completed = qbit_auto.list_completed_torrents(torrents, whitelist)
@@ -5231,11 +5593,14 @@ def _cron_qbit_auto_organize():
             for t in todo:
                 try:
                     out = qbit_auto.dispatch_one(
-                        conn, t,
+                        conn,
+                        t,
                         # cp 是 lambda 参数（dispatch_one 调用时传入），不是闭包捕获 —
                         # 不存在 Python late-binding 陷阱。
                         list_video_paths_fn=lambda cp: _list_video_paths(
-                            cp, max_depth=3, limit=MAX_ORGANIZE_BATCH_ITEMS,
+                            cp,
+                            max_depth=3,
+                            limit=MAX_ORGANIZE_BATCH_ITEMS,
                         ),
                         confidence_threshold=threshold,
                         build_and_start_organize_fn=_build_and_start_auto_organize,
@@ -5250,31 +5615,34 @@ def _cron_qbit_auto_organize():
                         )
                     # locked → 不会再 dispatch 别的 torrent，break 让 organize 跑完再说
                     if action == "locked":
-                        logger.info("[auto-organize] organize_runner locked，本周期剩余 torrents 推迟下周期")
+                        logger.info(
+                            "[auto-organize] organize_runner locked，本周期剩余 torrents 推迟下周期"
+                        )
                         break
-                except Exception as e:  # noqa: BLE001
-                    logger.exception(
-                        f"[auto-organize] dispatch failed for {t['hash'][:8]}: {e}"
-                    )
+                except Exception as e:
+                    logger.exception(f"[auto-organize] dispatch failed for {t['hash'][:8]}: {e}")
                     stats["exception"] = stats.get("exception", 0) + 1
             logger.info(f"[auto-organize] cycle done: {stats}")
         finally:
             conn.close()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.error(f"[auto-organize] cron job crashed: {e}", exc_info=True)
 
 
 def _start_scheduler():
     from apscheduler.schedulers.background import BackgroundScheduler
+
     sched = BackgroundScheduler(daemon=True)
-    sched.add_job(_cron_reap_stuck, "interval", minutes=1,
-                  id="reap_stuck", max_instances=1)
+    sched.add_job(_cron_reap_stuck, "interval", minutes=1, id="reap_stuck", max_instances=1)
     # Phase 4C.4: qBit auto-organize cron — interval 从配置读，最低 1min
     qbit_auto_cfg = load_qbit_auto_organize_config()
     poll_minutes = qbit_auto_cfg.get("poll_interval_minutes", 5)
     sched.add_job(
-        _cron_qbit_auto_organize, "interval", minutes=poll_minutes,
-        id="qbit_auto_organize", max_instances=1,
+        _cron_qbit_auto_organize,
+        "interval",
+        minutes=poll_minutes,
+        id="qbit_auto_organize",
+        max_instances=1,
         # coalesce=True: 多个 missed run 合并成一个执行（防 backlog）
         coalesce=True,
         # next_run_time 让 cron 启动后立刻跑一次 (而非等 poll_minutes 才第一次)

@@ -172,7 +172,11 @@ class TMDBProvider(MetadataProvider):
             # /configuration 是无副作用的最便宜验证 key 的 endpoint
             data = self._get("/configuration")
             # rate-limit header（v3 API 在 response headers 里）
-            return {"ok": True, "message": "TMDB OK", "images_base_url": data.get("images", {}).get("base_url")}
+            return {
+                "ok": True,
+                "message": "TMDB OK",
+                "images_base_url": data.get("images", {}).get("base_url"),
+            }
         except RuntimeError as e:
             return {"ok": False, "message": str(e)}
         except requests.RequestException as e:

@@ -41,15 +41,24 @@ logger = logging.getLogger(__name__)
 # Runtime always reads from dedup_weights table (UI may edit) — these are only
 # a fallback when the table is somehow empty (should not happen after migration).
 _FALLBACK_WEIGHTS: dict[str, float] = {
-    "resolution.4K": 40, "resolution.2160p": 40,
+    "resolution.4K": 40,
+    "resolution.2160p": 40,
     "resolution.1080p": 25,
     "resolution.720p": 10,
     "resolution.480p": 2,
-    "hdr.DolbyVision": 25, "hdr.HDR10+": 20, "hdr.HDR10": 10, "hdr.HLG": 5,
-    "source.UltraHDBluRay": 18, "source.BluRay": 15,
-    "source.WEB-DL": 10, "source.WEBRip": 6, "source.HDTV": 3,
-    "source.DVDRip": 1,                  # r2 BLOCKER fix: normalizer maps DVD/DVDRip here
-    "codec.AV1": 18, "codec.H.265": 15, "codec.H.264": 5,
+    "hdr.DolbyVision": 25,
+    "hdr.HDR10+": 20,
+    "hdr.HDR10": 10,
+    "hdr.HLG": 5,
+    "source.UltraHDBluRay": 18,
+    "source.BluRay": 15,
+    "source.WEB-DL": 10,
+    "source.WEBRip": 6,
+    "source.HDTV": 3,
+    "source.DVDRip": 1,  # r2 BLOCKER fix: normalizer maps DVD/DVDRip here
+    "codec.AV1": 18,
+    "codec.H.265": 15,
+    "codec.H.264": 5,
     "color_depth.10-bit": 5,
 }
 
@@ -76,33 +85,33 @@ def _now() -> int:
 
 @dataclass(frozen=True)
 class DedupCandidate:
-    media_file_id: int          # stable id for LLM grounding (not path) — representative row id
-    path: str                   # representative path (lexicographically smallest of linked_paths)
+    media_file_id: int  # stable id for LLM grounding (not path) — representative row id
+    path: str  # representative path (lexicographically smallest of linked_paths)
     inode: int | None
     size_bytes: int | None
     mtime: int | None
     parse_resolution: str | None
     parse_source: str | None
     parse_codec: str | None
-    hdr_profiles: list[str]     # canonical sorted
+    hdr_profiles: list[str]  # canonical sorted
     parse_release_group: str | None
     quality_score: float
-    score_breakdown: dict[str, float]   # {'resolution.4K': 40, ...}
+    score_breakdown: dict[str, float]  # {'resolution.4K': 40, ...}
     is_watched: bool
-    keep_recommended: bool      # set after group-level ranking
+    keep_recommended: bool  # set after group-level ranking
     # Hardlink merge (Phase 3 post-ship fix): same-inode rows are merged into one
     # candidate. linked_paths lists ALL paths sharing this inode (>=1; includes
     # `path` itself). When len(linked_paths) >= 2, this candidate represents a
     # hardlinked release — deleting it via the inode-anchored executor will
     # unlink all paths.
     linked_paths: list[str]
-    linked_media_file_ids: list[int]    # all media_files row ids sharing this inode
+    linked_media_file_ids: list[int]  # all media_files row ids sharing this inode
 
 
 @dataclass(frozen=True)
 class DedupGroup:
-    group_key: str              # 'movie:238' | 'tv:1399:s1e1' — stable UI id
-    media_type: str             # 'movie' | 'tv'
+    group_key: str  # 'movie:238' | 'tv:1399:s1e1' — stable UI id
+    media_type: str  # 'movie' | 'tv'
     tmdb_movie_id: str | None
     tmdb_series_id: str | None
     season_number: int | None
@@ -112,7 +121,7 @@ class DedupGroup:
     poster_url: str | None
     candidates: list[DedupCandidate]
     total_size_bytes: int
-    deletable_size_bytes: int   # = total - max(quality_score 那份)
+    deletable_size_bytes: int  # = total - max(quality_score 那份)
 
 
 # ─── Quality score ────────────────────────────────────────────────
@@ -129,9 +138,7 @@ def get_current_weights(conn: sqlite3.Connection) -> dict[str, float]:
 
 def get_current_hash(conn: sqlite3.Connection) -> str:
     """Read current_hash from dedup_weights_meta (single source of truth)."""
-    row = conn.execute(
-        "SELECT current_hash FROM dedup_weights_meta WHERE id=1"
-    ).fetchone()
+    row = conn.execute("SELECT current_hash FROM dedup_weights_meta WHERE id=1").fetchone()
     if row is None:
         # Self-heal: migrations should have written this; recompute from current weights.
         return _canonical_weights_hash(get_current_weights(conn))
@@ -270,22 +277,34 @@ def find_duplicate_groups(
 
     if media_type == "movie":
         movie_keys, total = _find_movie_group_keys(
-            conn, watched_only=watched_only, limit=limit, offset=offset,
+            conn,
+            watched_only=watched_only,
+            limit=limit,
+            offset=offset,
         )
         return _build_groups_for_movies(conn, movie_keys, weights), total
 
     if media_type == "tv":
         tv_keys, total = _find_tv_group_keys(
-            conn, watched_only=watched_only, limit=limit, offset=offset,
+            conn,
+            watched_only=watched_only,
+            limit=limit,
+            offset=offset,
         )
         return _build_groups_for_tv(conn, tv_keys, weights), total
 
     # media_type=None: merge both branches with combined limit/offset
     movie_keys, movie_total = _find_movie_group_keys(
-        conn, watched_only=watched_only, limit=10_000, offset=0,
+        conn,
+        watched_only=watched_only,
+        limit=10_000,
+        offset=0,
     )
     tv_keys, tv_total = _find_tv_group_keys(
-        conn, watched_only=watched_only, limit=10_000, offset=0,
+        conn,
+        watched_only=watched_only,
+        limit=10_000,
+        offset=0,
     )
     movie_groups = _build_groups_for_movies(conn, movie_keys, weights)
     tv_groups = _build_groups_for_tv(conn, tv_keys, weights)
@@ -295,7 +314,7 @@ def find_duplicate_groups(
         key=lambda g: (-g.deletable_size_bytes, g.group_key),
     )
     total = movie_total + tv_total
-    return merged[offset:offset + limit], total
+    return merged[offset : offset + limit], total
 
 
 def _find_movie_group_keys(
@@ -433,18 +452,23 @@ def _build_groups_for_movies(
             weights=weights,
             is_watched=mid in watched_movies,
         )
-        if len(cands) < 2:                              # safety: skip if HAVING race
+        if len(cands) < 2:  # safety: skip if HAVING race
             continue
         first = by_movie[mid][0]
-        groups.append(_make_group(
-            group_key=f"movie:{mid}",
-            media_type="movie",
-            tmdb_movie_id=mid, tmdb_series_id=None,
-            season_number=None, episode_number=None,
-            title=first["title"], year=first["year"],
-            poster_url=first["poster_url"],
-            candidates=cands,
-        ))
+        groups.append(
+            _make_group(
+                group_key=f"movie:{mid}",
+                media_type="movie",
+                tmdb_movie_id=mid,
+                tmdb_series_id=None,
+                season_number=None,
+                episode_number=None,
+                title=first["title"],
+                year=first["year"],
+                poster_url=first["poster_url"],
+                candidates=cands,
+            )
+        )
     return groups
 
 
@@ -509,21 +533,24 @@ def _build_groups_for_tv(
         if len(cands) < 2:
             continue
         first = bucket[0]
-        groups.append(_make_group(
-            group_key=f"tv:{series_id}:s{s}e{e}",
-            media_type="tv",
-            tmdb_movie_id=None, tmdb_series_id=series_id,
-            season_number=s, episode_number=e,
-            title=first["title"], year=first["year"],
-            poster_url=first["poster_url"],
-            candidates=cands,
-        ))
+        groups.append(
+            _make_group(
+                group_key=f"tv:{series_id}:s{s}e{e}",
+                media_type="tv",
+                tmdb_movie_id=None,
+                tmdb_series_id=series_id,
+                season_number=s,
+                episode_number=e,
+                title=first["title"],
+                year=first["year"],
+                poster_url=first["poster_url"],
+                candidates=cands,
+            )
+        )
     return groups
 
 
-def _bulk_fetch_hdr_profiles(
-    conn: sqlite3.Connection, file_ids: list[int]
-) -> dict[int, list[str]]:
+def _bulk_fetch_hdr_profiles(conn: sqlite3.Connection, file_ids: list[int]) -> dict[int, list[str]]:
     if not file_ids:
         return {}
     placeholders = ",".join("?" for _ in file_ids)
@@ -541,9 +568,7 @@ def _bulk_fetch_hdr_profiles(
     return out
 
 
-def _bulk_fetch_watched_movie_ids(
-    conn: sqlite3.Connection, movie_ids: list[str]
-) -> set[str]:
+def _bulk_fetch_watched_movie_ids(conn: sqlite3.Connection, movie_ids: list[str]) -> set[str]:
     """[Pattern B] Movie branch: media_type='movie' + double-sided NOT NULL."""
     if not movie_ids:
         return set()
@@ -582,9 +607,7 @@ def _bulk_fetch_watched_tv_keys(
     return db_keys & set(tv_keys)
 
 
-def _bulk_fetch_watched_episode_ids(
-    conn: sqlite3.Connection, series_ids: list[str]
-) -> set[str]:
+def _bulk_fetch_watched_episode_ids(conn: sqlite3.Connection, series_ids: list[str]) -> set[str]:
     """[Pattern B + scope fix B2] TV episode_id strong-signal join scoped to
     only series present in current dedup groups — avoids loading full watched
     table for libraries with 100k+ watched items.
@@ -633,7 +656,7 @@ def _build_candidates(
     for r in rows:
         ino = r["inode"]
         if ino is None:
-            null_buckets.append([r])      # singleton — never merged with anything
+            null_buckets.append([r])  # singleton — never merged with anything
         else:
             by_inode.setdefault(ino, []).append(r)
 
@@ -658,24 +681,26 @@ def _build_candidates(
             "parse_color_depth": rep["parse_color_depth"],
         }
         score, breakdown = compute_quality_score(row_dict, hdr_profiles, weights)
-        cands.append(DedupCandidate(
-            media_file_id=fid,
-            path=all_paths[0],              # representative = lexicographically smallest
-            inode=rep["inode"],
-            size_bytes=rep["size_bytes"],   # same inode → same size, take any
-            mtime=rep["mtime"],
-            parse_resolution=rep["parse_resolution"],
-            parse_source=rep["parse_source"],
-            parse_codec=rep["parse_codec"],
-            hdr_profiles=hdr_profiles,
-            parse_release_group=rep["parse_release_group"],
-            quality_score=score,
-            score_breakdown=breakdown,
-            is_watched=is_watched,
-            keep_recommended=False,         # set below after group ranking
-            linked_paths=all_paths,
-            linked_media_file_ids=all_ids,
-        ))
+        cands.append(
+            DedupCandidate(
+                media_file_id=fid,
+                path=all_paths[0],  # representative = lexicographically smallest
+                inode=rep["inode"],
+                size_bytes=rep["size_bytes"],  # same inode → same size, take any
+                mtime=rep["mtime"],
+                parse_resolution=rep["parse_resolution"],
+                parse_source=rep["parse_source"],
+                parse_codec=rep["parse_codec"],
+                hdr_profiles=hdr_profiles,
+                parse_release_group=rep["parse_release_group"],
+                quality_score=score,
+                score_breakdown=breakdown,
+                is_watched=is_watched,
+                keep_recommended=False,  # set below after group ranking
+                linked_paths=all_paths,
+                linked_media_file_ids=all_ids,
+            )
+        )
     if not cands:
         return cands
     # Mark the highest-score candidate as keep_recommended
@@ -690,9 +715,7 @@ def _build_candidates(
     # Use dataclasses.replace (safe idiom for frozen dataclass) — review I4 fix.
     # __dict__ unpacking would alias the list[str] hdr_profiles across copies.
     cands = [
-        dataclasses.replace(
-            c, keep_recommended=(c.media_file_id == winner.media_file_id)
-        )
+        dataclasses.replace(c, keep_recommended=(c.media_file_id == winner.media_file_id))
         for c in cands
     ]
     return cands
@@ -754,9 +777,7 @@ def _validate_weights(updates: dict[str, float]) -> None:
             raise InvalidWeightError(f"weight {key!r} must be >= 0, got {v!r}")
 
 
-def update_weights(
-    conn: sqlite3.Connection, updates: dict[str, float]
-) -> tuple[str, int]:
+def update_weights(conn: sqlite3.Connection, updates: dict[str, float]) -> tuple[str, int]:
     """Atomically merge weight updates and refresh current_hash.
 
     [code-enforced] Same-transaction UPDATE of dedup_weights + dedup_weights_meta.
@@ -956,7 +977,7 @@ def find_watched_stale_media(
     where_tv_se_fallback = (
         "m.first_seen_at < :cutoff "
         "AND m.media_type = 'tv' "
-        "AND m.tmdb_episode_id IS NULL "                # avoid double-match w/ branch 2
+        "AND m.tmdb_episode_id IS NULL "  # avoid double-match w/ branch 2
         "AND m.tmdb_series_id IS NOT NULL "
         "AND m.season_number IS NOT NULL "
         "AND m.episode_number IS NOT NULL "
@@ -1000,7 +1021,8 @@ def find_watched_stale_media(
         {
             **dict(r),
             "days_since_first_seen": (now - r["first_seen_at"]) // 86400
-                if r["first_seen_at"] else None,
+            if r["first_seen_at"]
+            else None,
         }
         for r in rows
     ], total

@@ -25,13 +25,14 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class CachedMetadata:
     """从 DB 读出的缓存条目。Shape 接近 IdentifyResult 但是 plain dict-friendly。"""
+
     path: str
     inode: int | None
     size_bytes: int | None
     mtime: int | None
     # 媒体字段
     tmdb_id: str | None
-    tmdb_series_id: str | None      # Phase 3 split id; only tv rows have this
+    tmdb_series_id: str | None  # Phase 3 split id; only tv rows have this
     imdb_id: str | None
     media_type: str | None
     title: str | None
@@ -99,7 +100,7 @@ def upsert_identification(
     *,
     path: str,
     stat: dict[str, Any],
-    identify_result: Any,                # services.identify.IdentifyResult
+    identify_result: Any,  # services.identify.IdentifyResult
     metadata_source: str = "tmdb",
     metadata_provider: str = "tmdb",
 ) -> None:
@@ -122,7 +123,7 @@ def upsert_identification(
 
     # 决定 metadata_status
     if is_companion:
-        status = "ok"                               # extras/parts 明确归类，不算"待审核"
+        status = "ok"  # extras/parts 明确归类，不算"待审核"
     elif top is None:
         status = "needs_review"
     else:
@@ -132,7 +133,7 @@ def upsert_identification(
     tmdb_id = top.external_ids.get("tmdb_id") if top else None
     imdb_id = top.external_ids.get("imdb_id") if top else None
     if is_companion:
-        media_type = parse.media_type               # 'extra' / 'part'（top 一定 None）
+        media_type = parse.media_type  # 'extra' / 'part'（top 一定 None）
     else:
         media_type = top.media_type if top else None
     title = top.title if top else parse.title  # 没 top 时退化到 guessit 解析的 title
@@ -243,18 +244,48 @@ def upsert_identification(
           last_updated_at      = excluded.last_updated_at
         """,
         (
-            path, stat.get("inode"), stat.get("size_bytes"), stat.get("mtime"),
-            tmdb_id, imdb_id, media_type, title, original_title, year,
-            season_number, episode_number, episode_title,
-            poster_url, overview, vote_average,
-            json.dumps(genres, ensure_ascii=False), json.dumps(cast, ensure_ascii=False), runtime_minutes,
-            episode_air_date, episode_overview, episode_still_url,
-            metadata_source, metadata_provider, now,
-            status, identify_result.confidence, identify_result.pick_source, identify_result.reasoning,
-            parse.raw_name, parse.resolution, parse.source, parse.release_group,
-            parse_codec, parse_color_depth, parse_container, parse_audio_codec,
-            tmdb_movie_id, tmdb_series_id, tmdb_episode_id,
-            now, now,
+            path,
+            stat.get("inode"),
+            stat.get("size_bytes"),
+            stat.get("mtime"),
+            tmdb_id,
+            imdb_id,
+            media_type,
+            title,
+            original_title,
+            year,
+            season_number,
+            episode_number,
+            episode_title,
+            poster_url,
+            overview,
+            vote_average,
+            json.dumps(genres, ensure_ascii=False),
+            json.dumps(cast, ensure_ascii=False),
+            runtime_minutes,
+            episode_air_date,
+            episode_overview,
+            episode_still_url,
+            metadata_source,
+            metadata_provider,
+            now,
+            status,
+            identify_result.confidence,
+            identify_result.pick_source,
+            identify_result.reasoning,
+            parse.raw_name,
+            parse.resolution,
+            parse.source,
+            parse.release_group,
+            parse_codec,
+            parse_color_depth,
+            parse_container,
+            parse_audio_codec,
+            tmdb_movie_id,
+            tmdb_series_id,
+            tmdb_episode_id,
+            now,
+            now,
         ),
     )
 
@@ -385,9 +416,7 @@ def get_by_path(
 
     current_mtime / current_inode 缺省时跳过 stale 检测（直接返 hit / miss）。
     """
-    row = conn.execute(
-        "SELECT * FROM media_files WHERE path = ?", (path,)
-    ).fetchone()
+    row = conn.execute("SELECT * FROM media_files WHERE path = ?", (path,)).fetchone()
     if row is None:
         return None, "miss"
     cached = _row_to_cached(row)
@@ -457,7 +486,7 @@ def delete_by_path(conn: sqlite3.Connection, path: str) -> bool:
 
 def ensure_episode_details(
     conn: sqlite3.Connection,
-    provider: Any,                         # MetadataProvider | None；用 Any 避免循环 import
+    provider: Any,  # MetadataProvider | None；用 Any 避免循环 import
     cached: CachedMetadata,
 ) -> tuple[CachedMetadata, bool]:
     """ROADMAP #9: tv episode lazy enrich. 缺 episode-specific 字段时调 TMDB 补全。
@@ -484,8 +513,9 @@ def ensure_episode_details(
         return cached, False
     if cached.media_type != "tv":
         return cached, False
-    if not (cached.tmdb_id and cached.season_number is not None
-            and cached.episode_number is not None):
+    if not (
+        cached.tmdb_id and cached.season_number is not None and cached.episode_number is not None
+    ):
         return cached, False
 
     # 任一字段已填 = 已 enrich 过（即使 TMDB 当时只给了 air_date 没 overview）
@@ -502,10 +532,12 @@ def ensure_episode_details(
     try:
         try:
             details = provider.lookup_by_id(
-                cached.tmdb_id, media_type="tv",
-                season=cached.season_number, episode=cached.episode_number,
+                cached.tmdb_id,
+                media_type="tv",
+                season=cached.season_number,
+                episode=cached.episode_number,
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning(
                 f"[ensure_episode_details] TMDB lookup failed for {cached.path}: "
                 f"{type(e).__name__}: {e}"
@@ -537,9 +569,14 @@ def ensure_episode_details(
                  AND season_number = ?
                  AND episode_number = ?""",
             (
-                ep_air_date, ep_overview, ep_still_url, _now(),
-                cached.path, cached.tmdb_id,
-                cached.season_number, cached.episode_number,
+                ep_air_date,
+                ep_overview,
+                ep_still_url,
+                _now(),
+                cached.path,
+                cached.tmdb_id,
+                cached.season_number,
+                cached.episode_number,
             ),
         )
         conn.commit()
@@ -551,13 +588,13 @@ def ensure_episode_details(
             # 试着读最新 cache 给 caller（仅作信息性，**caller 不应信任**它 reach happy path）
             try:
                 refreshed, _ = get_by_path(conn, cached.path)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 refreshed = None
-            return (refreshed or cached), True   # ← 第二个 flag 强制 caller 走 drift path
+            return (refreshed or cached), True  # ← 第二个 flag 强制 caller 走 drift path
 
         refreshed, _ = get_by_path(conn, cached.path)
         return (refreshed or cached), False
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         # SQLite locked / connection broken / 等任何 DB 异常 → 不让 hardlink success path crash
         logger.warning(
             f"[ensure_episode_details] persistence failed for {cached.path}: "
@@ -565,7 +602,7 @@ def ensure_episode_details(
         )
         try:
             conn.rollback()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         return cached, False
 
@@ -573,11 +610,11 @@ def ensure_episode_details(
 # ─── 库视图查询 ───
 
 _SORT_SQL = {
-    "added_desc":  "ORDER BY first_seen_at DESC, id DESC",
-    "year_desc":   "ORDER BY year DESC NULLS LAST, title COLLATE NOCASE",
-    "year_asc":    "ORDER BY year ASC NULLS LAST, title COLLATE NOCASE",
-    "vote_desc":   "ORDER BY vote_average DESC NULLS LAST, year DESC NULLS LAST",
-    "title_asc":   "ORDER BY title COLLATE NOCASE ASC",
+    "added_desc": "ORDER BY first_seen_at DESC, id DESC",
+    "year_desc": "ORDER BY year DESC NULLS LAST, title COLLATE NOCASE",
+    "year_asc": "ORDER BY year ASC NULLS LAST, title COLLATE NOCASE",
+    "vote_desc": "ORDER BY vote_average DESC NULLS LAST, year DESC NULLS LAST",
+    "title_asc": "ORDER BY title COLLATE NOCASE ASC",
 }
 
 
@@ -616,18 +653,16 @@ def query_library(
         params.append(year_to)
     if query:
         # 模糊匹配：title / original_title / parse_raw_name 任一命中
-        where.append(
-            "(title LIKE ? OR original_title LIKE ? OR parse_raw_name LIKE ?)"
-        )
+        where.append("(title LIKE ? OR original_title LIKE ? OR parse_raw_name LIKE ?)")
         like = f"%{query}%"
         params.extend([like, like, like])
     where_sql = " AND ".join(where)
 
     sort_sql = _SORT_SQL.get(sort, _SORT_SQL["added_desc"])
 
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM media_files WHERE {where_sql}", params
-    ).fetchone()[0]
+    total = conn.execute(f"SELECT COUNT(*) FROM media_files WHERE {where_sql}", params).fetchone()[
+        0
+    ]
 
     rows = conn.execute(
         f"SELECT * FROM media_files WHERE {where_sql} {sort_sql} LIMIT ? OFFSET ?",
@@ -636,9 +671,7 @@ def query_library(
     return [_row_to_cached(r) for r in rows], total
 
 
-def list_companions_in_dir(
-    conn: sqlite3.Connection, dir_path: str
-) -> list[CachedMetadata]:
+def list_companions_in_dir(conn: sqlite3.Connection, dir_path: str) -> list[CachedMetadata]:
     """列出同目录的附属文件（extra 花絮 + part 多盘分段，按 path prefix 匹配）。
 
     dir_path 不要带尾部斜杠。匹配 path LIKE 'dir/%' AND path NOT LIKE 'dir/%/%'
@@ -670,29 +703,31 @@ def get_library_stats(conn: sqlite3.Connection) -> dict[str, Any]:
         "SELECT COUNT(*) FROM media_files WHERE metadata_status = 'ok'"
     ).fetchone()[0]
 
-    by_type = dict(conn.execute(
-        """
+    by_type = dict(
+        conn.execute(
+            """
         SELECT media_type, COUNT(*) FROM media_files
          WHERE metadata_status = 'ok' AND media_type IS NOT NULL
          GROUP BY media_type
         """
-    ).fetchall())
+        ).fetchall()
+    )
 
     # 年代：1970s / 1980s / ...，用 (year/10)*10 算 decade
-    by_decade = dict(conn.execute(
-        """
+    by_decade = dict(
+        conn.execute(
+            """
         SELECT (year / 10) * 10 AS decade, COUNT(*)
           FROM media_files
          WHERE metadata_status = 'ok' AND year IS NOT NULL
          GROUP BY decade ORDER BY decade
         """
-    ).fetchall())
+        ).fetchall()
+    )
 
     # vote 分桶：[0-6) / [6-7) / [7-8) / [8-9) / [9-10]
     vote_buckets: dict[str, int] = {"<6": 0, "6-7": 0, "7-8": 0, "8-9": 0, "9-10": 0, "unrated": 0}
-    for row in conn.execute(
-        "SELECT vote_average FROM media_files WHERE metadata_status = 'ok'"
-    ):
+    for row in conn.execute("SELECT vote_average FROM media_files WHERE metadata_status = 'ok'"):
         v = row[0]
         if v is None:
             vote_buckets["unrated"] += 1

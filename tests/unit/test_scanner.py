@@ -13,7 +13,6 @@ from services import destructive_action, metadata_cache, scanner
 from services.identify import FilenameParse, IdentifyResult
 from services.metadata.base import MediaCandidate
 
-
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "db" / "schema.sql"
 
 
@@ -24,6 +23,7 @@ def db_path(tmp_path):
     conn = destructive_action.open_connection(p)
     destructive_action.init_schema(conn, SCHEMA_PATH)
     from db import migrations
+
     migrations.phase3_migrate(conn)
     conn.close()
     # Reset module-level guard between tests
@@ -48,19 +48,34 @@ def _candidate(tmdb_id: str = "60625") -> MediaCandidate:
     return MediaCandidate(
         id=f"tmdb:tv:{tmdb_id}",
         external_ids={"tmdb_id": tmdb_id},
-        title="Show", original_title="Show", year=2020,
-        media_type="tv", poster_url=None, overview=None,
-        vote_average=8.0, raw={},
+        title="Show",
+        original_title="Show",
+        year=2020,
+        media_type="tv",
+        poster_url=None,
+        overview=None,
+        vote_average=8.0,
+        raw={},
     )
 
 
 def _identify_result(path: str, *, top: MediaCandidate | None = None) -> IdentifyResult:
     parse = FilenameParse(
-        raw_name=path.rsplit("/", 1)[-1], title="Show", year=2020,
-        season=1, episode=1, episode_title=None,
-        media_type="episode", resolution="1080p",
-        source="WEB-DL", release_group=None,
-        codec=None, color_depth=None, hdr_profiles=[], container=None, audio_codec=None,
+        raw_name=path.rsplit("/", 1)[-1],
+        title="Show",
+        year=2020,
+        season=1,
+        episode=1,
+        episode_title=None,
+        media_type="episode",
+        resolution="1080p",
+        source="WEB-DL",
+        release_group=None,
+        codec=None,
+        color_depth=None,
+        hdr_profiles=[],
+        container=None,
+        audio_codec=None,
         raw={},
     )
     return IdentifyResult(
@@ -100,8 +115,12 @@ def test_happy_path_three_files_all_identified(db_path):
     list_paths = MagicMock(return_value=paths)
 
     run_id = scanner.start_scan(
-        db_path=db_path, base_path="/share", max_depth=5,
-        list_video_paths=list_paths, ssh_stat=ssh_stat, identify=identify,
+        db_path=db_path,
+        base_path="/share",
+        max_depth=5,
+        list_video_paths=list_paths,
+        ssh_stat=ssh_stat,
+        identify=identify,
     )
     _wait_for_completion(db_path, run_id)
 
@@ -128,7 +147,8 @@ def test_cached_files_are_skipped(db_path):
     conn = destructive_action.open_connection(db_path)
     try:
         metadata_cache.upsert_identification(
-            conn, path="/a.mkv",
+            conn,
+            path="/a.mkv",
             stat={"inode": 1, "size_bytes": 100, "mtime": 2000},
             identify_result=_identify_result("/a.mkv", top=_candidate()),
         )
@@ -140,9 +160,12 @@ def test_cached_files_are_skipped(db_path):
     ssh_stat = MagicMock(side_effect=lambda ps: {ps[0]: _stat(ps[0], mtime=2000)})
 
     run_id = scanner.start_scan(
-        db_path=db_path, base_path="/share", max_depth=5,
+        db_path=db_path,
+        base_path="/share",
+        max_depth=5,
         list_video_paths=lambda *a: ["/a.mkv"],
-        ssh_stat=ssh_stat, identify=identify,
+        ssh_stat=ssh_stat,
+        identify=identify,
     )
     _wait_for_completion(db_path, run_id)
 
@@ -161,7 +184,8 @@ def test_stale_cache_triggers_reidentify(db_path):
     conn = destructive_action.open_connection(db_path)
     try:
         metadata_cache.upsert_identification(
-            conn, path="/a.mkv",
+            conn,
+            path="/a.mkv",
             stat={"inode": 1, "size_bytes": 100, "mtime": 1000},  # 老 mtime
             identify_result=_identify_result("/a.mkv", top=_candidate()),
         )
@@ -173,9 +197,12 @@ def test_stale_cache_triggers_reidentify(db_path):
     ssh_stat = MagicMock(side_effect=lambda ps: {ps[0]: _stat(ps[0], mtime=9999)})
 
     run_id = scanner.start_scan(
-        db_path=db_path, base_path="/share", max_depth=5,
+        db_path=db_path,
+        base_path="/share",
+        max_depth=5,
         list_video_paths=lambda *a: ["/a.mkv"],
-        ssh_stat=ssh_stat, identify=identify,
+        ssh_stat=ssh_stat,
+        identify=identify,
     )
     _wait_for_completion(db_path, run_id)
 
@@ -206,9 +233,12 @@ def test_failed_item_doesnt_stop_subsequent(db_path):
     ssh_stat = MagicMock(side_effect=lambda ps: {ps[0]: _stat(ps[0])})
 
     run_id = scanner.start_scan(
-        db_path=db_path, base_path="/share", max_depth=5,
+        db_path=db_path,
+        base_path="/share",
+        max_depth=5,
         list_video_paths=lambda *a: ["/a.mkv", "/bad.mkv", "/c.mkv"],
-        ssh_stat=ssh_stat, identify=identify,
+        ssh_stat=ssh_stat,
+        identify=identify,
     )
     _wait_for_completion(db_path, run_id)
 
@@ -235,9 +265,12 @@ def test_file_not_found_marks_failed(db_path):
     ssh_stat = MagicMock(side_effect=lambda ps: {ps[0]: {"exists": False}})
 
     run_id = scanner.start_scan(
-        db_path=db_path, base_path="/share", max_depth=5,
+        db_path=db_path,
+        base_path="/share",
+        max_depth=5,
         list_video_paths=lambda *a: ["/gone.mkv"],
-        ssh_stat=ssh_stat, identify=identify,
+        ssh_stat=ssh_stat,
+        identify=identify,
     )
     _wait_for_completion(db_path, run_id)
 
@@ -270,9 +303,12 @@ def test_abort_stops_worker_loop(db_path):
     ssh_stat = MagicMock(side_effect=lambda ps: {ps[0]: _stat(ps[0])})
 
     run_id = scanner.start_scan(
-        db_path=db_path, base_path="/share", max_depth=5,
+        db_path=db_path,
+        base_path="/share",
+        max_depth=5,
         list_video_paths=lambda *a: ["/a.mkv", "/b.mkv", "/c.mkv", "/d.mkv"],
-        ssh_stat=ssh_stat, identify=identify,
+        ssh_stat=ssh_stat,
+        identify=identify,
     )
 
     # 等 worker 卡在第一个 item
@@ -310,21 +346,29 @@ def test_abort_stops_worker_loop(db_path):
 def test_concurrent_start_raises(db_path):
     """全局只允许一个 active scan。"""
     pause = threading.Event()
-    identify = MagicMock(side_effect=lambda p: (pause.wait(timeout=2.0), _identify_result(p, top=_candidate()))[1])
+    identify = MagicMock(
+        side_effect=lambda p: (pause.wait(timeout=2.0), _identify_result(p, top=_candidate()))[1]
+    )
     ssh_stat = MagicMock(side_effect=lambda ps: {ps[0]: _stat(ps[0])})
 
     scanner.start_scan(
-        db_path=db_path, base_path="/share", max_depth=5,
+        db_path=db_path,
+        base_path="/share",
+        max_depth=5,
         list_video_paths=lambda *a: ["/a.mkv"],
-        ssh_stat=ssh_stat, identify=identify,
+        ssh_stat=ssh_stat,
+        identify=identify,
     )
 
     # 第二次 start 应当 raise
     with pytest.raises(scanner.ConcurrentScanError):
         scanner.start_scan(
-            db_path=db_path, base_path="/share", max_depth=5,
+            db_path=db_path,
+            base_path="/share",
+            max_depth=5,
             list_video_paths=lambda *a: ["/b.mkv"],
-            ssh_stat=ssh_stat, identify=identify,
+            ssh_stat=ssh_stat,
+            identify=identify,
         )
 
     pause.set()  # 让 worker 完成
@@ -340,8 +384,12 @@ def test_list_paths_failure_marks_run_failed(db_path):
     identify = MagicMock()
     ssh_stat = MagicMock()
     run_id = scanner.start_scan(
-        db_path=db_path, base_path="/share", max_depth=5,
-        list_video_paths=bad_list, ssh_stat=ssh_stat, identify=identify,
+        db_path=db_path,
+        base_path="/share",
+        max_depth=5,
+        list_video_paths=bad_list,
+        ssh_stat=ssh_stat,
+        identify=identify,
     )
     _wait_for_completion(db_path, run_id)
 
@@ -370,9 +418,12 @@ def test_list_recent_runs_returns_most_recent_first(db_path):
         if ids:
             _wait_for_completion(db_path, ids[-1])
         run_id = scanner.start_scan(
-            db_path=db_path, base_path=f"/share/{i}", max_depth=5,
+            db_path=db_path,
+            base_path=f"/share/{i}",
+            max_depth=5,
             list_video_paths=lambda *a: ["/x.mkv"],
-            ssh_stat=ssh_stat, identify=identify,
+            ssh_stat=ssh_stat,
+            identify=identify,
         )
         ids.append(run_id)
         time.sleep(0.05)  # 让 started_at 严格递增

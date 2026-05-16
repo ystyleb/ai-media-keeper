@@ -95,10 +95,10 @@ class FilenameExtraction:
 
 @dataclass(frozen=True)
 class LLMSelection:
-    selected_id: str | None       # 必 ∈ {c.id for c in candidates}，否则置 None
-    confidence: float             # 0.0-1.0
-    reasoning: str                # 简短解释
-    raw_response: str             # provenance：原始 LLM 输出，便于 audit
+    selected_id: str | None  # 必 ∈ {c.id for c in candidates}，否则置 None
+    confidence: float  # 0.0-1.0
+    reasoning: str  # 简短解释
+    raw_response: str  # provenance：原始 LLM 输出，便于 audit
 
 
 def load_api_key(config_path: Path | str | None = None) -> str:
@@ -159,7 +159,7 @@ def extract_title_from_filename(
             temperature=0.1,
             messages=[{"role": "user", "content": prompt}],
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         msg = str(e)[:200]
         logger.error(f"[llm] extract_title call failed: {type(e).__name__}: {msg}")
         return None, f"llm_error: {type(e).__name__}: {msg}"
@@ -171,7 +171,7 @@ def extract_title_from_filename(
         # 而非 content。content 可能完全空 → 必须 fallback。
         if not raw and hasattr(msg, "reasoning_content") and msg.reasoning_content:
             raw = msg.reasoning_content.strip()
-            logger.info(f"[llm] using reasoning_content (model is in reasoning mode)")
+            logger.info("[llm] using reasoning_content (model is in reasoning mode)")
     except (AttributeError, IndexError):
         return None, "empty_response"
 
@@ -190,7 +190,7 @@ def extract_title_from_filename(
         last_open = json_text.rfind("{")
         last_close = json_text.rfind("}")
         if last_open != -1 and last_close > last_open:
-            json_text = json_text[last_open:last_close + 1]
+            json_text = json_text[last_open : last_close + 1]
 
     try:
         data = json.loads(json_text)
@@ -215,7 +215,9 @@ def extract_title_from_filename(
 
     return FilenameExtraction(
         title=title.strip(),
-        alt_title=(data.get("alt_title") or None) if isinstance(data.get("alt_title"), str) else None,
+        alt_title=(data.get("alt_title") or None)
+        if isinstance(data.get("alt_title"), str)
+        else None,
         year=_int_or_none(data.get("year")),
         season=_int_or_none(data.get("season")),
         episode=_int_or_none(data.get("episode")),
@@ -283,7 +285,7 @@ def select_candidate(
             # DeepSeek 支持 response_format={'type':'json_object'} 但有的网关不支持；
             # 我们靠 prompt 要求 JSON + markdown-fence 容忍的解析做兜底，更可移植
         )
-    except Exception as e:  # noqa: BLE001 — SDK 多种异常都视作 LLM 不可用
+    except Exception as e:
         logger.error(f"[llm] call failed: {e}")
         return LLMSelection(None, 0.0, f"llm_error: {type(e).__name__}", "")
 
@@ -310,7 +312,7 @@ def select_candidate(
         last_open = json_text.rfind("{")
         last_close = json_text.rfind("}")
         if last_open != -1 and last_close > last_open:
-            json_text = json_text[last_open:last_close + 1]
+            json_text = json_text[last_open : last_close + 1]
 
     try:
         parsed = json.loads(json_text)
@@ -331,15 +333,19 @@ def select_candidate(
             f"[llm] fabricated id rejected: got={selected!r}, valid={list(valid_ids)[:3]}..."
         )
         return LLMSelection(
-            None, 0.0,
-            f"fabricated_id_rejected (got {selected!r})", raw,
+            None,
+            0.0,
+            f"fabricated_id_rejected (got {selected!r})",
+            raw,
         )
 
     # 契约 #3 强制：confidence < 0.7 → needs_review
     if confidence < 0.7 or selected is None:
         return LLMSelection(
-            None, confidence,
-            reasoning or "low_confidence_or_null", raw,
+            None,
+            confidence,
+            reasoning or "low_confidence_or_null",
+            raw,
         )
 
     return LLMSelection(selected, confidence, reasoning, raw)

@@ -7,7 +7,6 @@ abort flag / selected_indices skip / 全局 lock / 异常 catch / partial failur
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -57,8 +56,12 @@ def _seed_running_action(db_path, n_items=3):
             "src_snapshot": {"inode": 100 + i, "size_bytes": 1024, "mtime": 1000},
             "media_type": "movie",
             "metadata_snapshot": {
-                "tmdb_id": f"{i}", "title": f"M{i}", "year": 2020,
-                "media_type": "movie", "season_number": None, "episode_number": None,
+                "tmdb_id": f"{i}",
+                "title": f"M{i}",
+                "year": 2020,
+                "media_type": "movie",
+                "season_number": None,
+                "episode_number": None,
             },
         }
         for i in range(n_items)
@@ -69,7 +72,10 @@ def _seed_running_action(db_path, n_items=3):
     c = destructive_action.open_connection(db_path)
     try:
         res = destructive_action.create_preview(
-            c, kind="organize", payload=payload, server_secret=secret,
+            c,
+            kind="organize",
+            payload=payload,
+            server_secret=secret,
         )
         # consume → running
         pre = c.execute(
@@ -110,11 +116,16 @@ def test_runner_processes_all_items_in_order(db_path):
 
     def fake_exec(item, expected):
         seen.append(item["src_path"])
-        return {"src_path": item["src_path"], "status": "succeeded",
-                "dst_path": item["computed_plan"]["dst_path"]}
+        return {
+            "src_path": item["src_path"],
+            "status": "succeeded",
+            "dst_path": item["computed_plan"]["dst_path"],
+        }
 
     organize_runner.start_organize_executor(
-        db_path=db_path, action_id=action_id, payload=payload,
+        db_path=db_path,
+        action_id=action_id,
+        payload=payload,
         execute_one_item=fake_exec,
     )
     _wait_until_terminal(db_path, action_id)
@@ -149,7 +160,9 @@ def test_runner_progressive_result_json_updates_during_run(db_path):
         return {"src_path": item["src_path"], "status": "succeeded"}
 
     organize_runner.start_organize_executor(
-        db_path=db_path, action_id=action_id, payload=payload,
+        db_path=db_path,
+        action_id=action_id,
+        payload=payload,
         execute_one_item=fake_exec,
     )
     _wait_until_terminal(db_path, action_id, timeout=10)
@@ -157,7 +170,7 @@ def test_runner_progressive_result_json_updates_during_run(db_path):
     # 看到至少 2 个不同的中间 items_completed 值（不是一次写全 5）
     assert len(set(seen_progress)) >= 2
     assert max(seen_progress) >= 1  # 至少看到过 1
-    assert max(seen_progress) < 5    # 没看到 5（终态写在 _mark_terminal）
+    assert max(seen_progress) < 5  # 没看到 5（终态写在 _mark_terminal）
 
 
 def test_runner_abort_skips_remaining_items(db_path):
@@ -172,7 +185,9 @@ def test_runner_abort_skips_remaining_items(db_path):
         return {"src_path": item["src_path"], "status": "succeeded"}
 
     organize_runner.start_organize_executor(
-        db_path=db_path, action_id=action_id, payload=payload,
+        db_path=db_path,
+        action_id=action_id,
+        payload=payload,
         execute_one_item=fake_exec,
     )
     _wait_until_terminal(db_path, action_id)
@@ -201,8 +216,11 @@ def test_runner_selected_indices_skips_unselected(db_path):
         return {"src_path": item["src_path"], "status": "succeeded"}
 
     organize_runner.start_organize_executor(
-        db_path=db_path, action_id=action_id, payload=payload,
-        execute_one_item=fake_exec, selected_indices=[0, 2],
+        db_path=db_path,
+        action_id=action_id,
+        payload=payload,
+        execute_one_item=fake_exec,
+        selected_indices=[0, 2],
     )
     _wait_until_terminal(db_path, action_id)
 
@@ -229,13 +247,17 @@ def test_runner_global_lock_rejects_second_organize(db_path):
         return {"src_path": item["src_path"], "status": "succeeded"}
 
     organize_runner.start_organize_executor(
-        db_path=db_path, action_id=action_id_1, payload=payload_1,
+        db_path=db_path,
+        action_id=action_id_1,
+        payload=payload_1,
         execute_one_item=slow_exec,
     )
 
     with pytest.raises(organize_runner.ConcurrentOrganizeError):
         organize_runner.start_organize_executor(
-            db_path=db_path, action_id=action_id_2, payload=payload_2,
+            db_path=db_path,
+            action_id=action_id_2,
+            payload=payload_2,
             execute_one_item=slow_exec,
         )
 
@@ -254,7 +276,9 @@ def test_runner_executor_exception_marks_item_failed(db_path):
         return {"src_path": item["src_path"], "status": "succeeded"}
 
     organize_runner.start_organize_executor(
-        db_path=db_path, action_id=action_id, payload=payload,
+        db_path=db_path,
+        action_id=action_id,
+        payload=payload,
         execute_one_item=fake_exec,
     )
     _wait_until_terminal(db_path, action_id)
@@ -282,7 +306,9 @@ def test_runner_clears_active_state_after_completion(db_path):
     action_id, payload = _seed_running_action(db_path, n_items=2)
 
     organize_runner.start_organize_executor(
-        db_path=db_path, action_id=action_id, payload=payload,
+        db_path=db_path,
+        action_id=action_id,
+        payload=payload,
         execute_one_item=lambda it, _md: {"src_path": it["src_path"], "status": "succeeded"},
     )
     _wait_until_terminal(db_path, action_id)
@@ -305,7 +331,9 @@ def test_runner_handles_action_with_zero_items(db_path):
     payload = {"kind": "organize", "items": [], "snapshot": {"captured_at": 1000}}
 
     organize_runner.start_organize_executor(
-        db_path=db_path, action_id=action_id, payload=payload,
+        db_path=db_path,
+        action_id=action_id,
+        payload=payload,
         execute_one_item=lambda it, _md: {"src_path": "n/a", "status": "succeeded"},
     )
     _wait_until_terminal(db_path, action_id)
@@ -338,7 +366,8 @@ def test_runner_aborts_when_reaper_intervenes_mid_run(db_path):
                 c.execute(
                     "UPDATE destructive_actions "
                     "SET status='needs_manual_recovery', recovery_hint='test_reaper' "
-                    "WHERE action_id = ?", (action_id,),
+                    "WHERE action_id = ?",
+                    (action_id,),
                 )
                 c.commit()
             finally:
@@ -346,7 +375,9 @@ def test_runner_aborts_when_reaper_intervenes_mid_run(db_path):
         return {"src_path": item["src_path"], "status": "succeeded"}
 
     organize_runner.start_organize_executor(
-        db_path=db_path, action_id=action_id, payload=payload,
+        db_path=db_path,
+        action_id=action_id,
+        payload=payload,
         execute_one_item=fake_exec,
     )
     # 等 worker 真退出（不能直接 _wait_until_terminal 因为 terminal 已写）
@@ -376,10 +407,13 @@ def test_runner_malformed_selected_indices_does_not_leak_active_lock(db_path):
     class _BadList(list):
         def __iter__(self):
             raise TypeError("intentional iter failure")
+
     bad_indices = _BadList([0])
 
     organize_runner.start_organize_executor(
-        db_path=db_path, action_id=action_id, payload=payload,
+        db_path=db_path,
+        action_id=action_id,
+        payload=payload,
         execute_one_item=lambda it, _md: {"src_path": it["src_path"], "status": "succeeded"},
         selected_indices=bad_indices,
     )

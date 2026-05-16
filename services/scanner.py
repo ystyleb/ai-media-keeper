@@ -48,9 +48,11 @@ class ConcurrentScanError(RuntimeError):
 
 
 # Dependency-inject 的 callable 签名
-ListVideoPaths = Callable[[str, int], list[str]]              # (base_path, max_depth) → paths
-SSHStat = Callable[[list[str]], dict[str, dict[str, Any]]]    # paths → {path: {inode, size_bytes, mtime, exists, is_dir}}
-Identify = Callable[[str], Any]                               # path → IdentifyResult
+ListVideoPaths = Callable[[str, int], list[str]]  # (base_path, max_depth) → paths
+SSHStat = Callable[
+    [list[str]], dict[str, dict[str, Any]]
+]  # paths → {path: {inode, size_bytes, mtime, exists, is_dir}}
+Identify = Callable[[str], Any]  # path → IdentifyResult
 
 
 @dataclass(frozen=True)
@@ -96,9 +98,7 @@ def start_scan(
 
     with _active_lock:
         if _active_scan_id is not None:
-            raise ConcurrentScanError(
-                f"scan {_active_scan_id} is already running; abort it first"
-            )
+            raise ConcurrentScanError(f"scan {_active_scan_id} is already running; abort it first")
 
         # 1. 创建 scan_runs row
         conn = destructive_action.open_connection(db_path)
@@ -119,8 +119,7 @@ def start_scan(
         # 2. 启动 worker thread
         t = threading.Thread(
             target=_worker_main,
-            args=(scan_run_id, db_path, base_path, max_depth,
-                  list_video_paths, ssh_stat, identify),
+            args=(scan_run_id, db_path, base_path, max_depth, list_video_paths, ssh_stat, identify),
             name=f"scan-worker-{scan_run_id}",
             daemon=True,
         )
@@ -149,7 +148,7 @@ def _worker_main(
         # Phase 1: list paths + populate scan_items
         try:
             paths = list_video_paths(base_path, max_depth)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.exception(f"[scan] list_video_paths failed for run {scan_run_id}")
             _mark_run_failed(conn, scan_run_id, f"list_failed: {e}")
             return
@@ -195,7 +194,7 @@ def _worker_main(
 
             try:
                 _process_one_item(conn, scan_run_id, path, ssh_stat, identify)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.exception(f"[scan] item {path} crashed")
                 _mark_item(conn, item["id"], "failed", error=f"{type(e).__name__}: {e}")
                 _bump_count(conn, scan_run_id, "files_failed")
@@ -253,7 +252,8 @@ def _process_one_item(
 
     # 看 cache 是否 fresh (mtime + inode 都一致 → skip identify)
     cached, cache_status = metadata_cache.get_by_path(
-        conn, path,
+        conn,
+        path,
         current_mtime=stat.get("mtime"),
         current_inode=stat.get("inode"),
     )
@@ -265,15 +265,16 @@ def _process_one_item(
     # 跑识别 + 写 cache
     result = identify(path)
     metadata_cache.upsert_identification(
-        conn, path=path, stat=stat, identify_result=result,
+        conn,
+        path=path,
+        stat=stat,
+        identify_result=result,
     )
     _mark_item(conn, item_id, "done")
     _bump_count(conn, scan_run_id, "files_done")
 
 
-def _claim_next_pending(
-    conn: sqlite3.Connection, scan_run_id: int
-) -> sqlite3.Row | None:
+def _claim_next_pending(conn: sqlite3.Connection, scan_run_id: int) -> sqlite3.Row | None:
     """原子 claim：找到一个 pending → in_progress，返回该行。
 
     SQLite 没有 SELECT FOR UPDATE，用 guarded UPDATE：
@@ -307,9 +308,7 @@ def _claim_next_pending(
         conn.rollback()
         return None
     conn.commit()
-    return conn.execute(
-        "SELECT * FROM scan_items WHERE id = ?", (pick["id"],)
-    ).fetchone()
+    return conn.execute("SELECT * FROM scan_items WHERE id = ?", (pick["id"],)).fetchone()
 
 
 def _mark_item(
@@ -341,15 +340,11 @@ def _bump_count(conn: sqlite3.Connection, scan_run_id: int, col: str) -> None:
 
 
 def _get_run_status(conn: sqlite3.Connection, scan_run_id: int) -> str:
-    row = conn.execute(
-        "SELECT status FROM scan_runs WHERE id = ?", (scan_run_id,)
-    ).fetchone()
+    row = conn.execute("SELECT status FROM scan_runs WHERE id = ?", (scan_run_id,)).fetchone()
     return row["status"] if row else "unknown"
 
 
-def _mark_run_failed(
-    conn: sqlite3.Connection, scan_run_id: int, error: str
-) -> None:
+def _mark_run_failed(conn: sqlite3.Connection, scan_run_id: int, error: str) -> None:
     conn.execute(
         """
         UPDATE scan_runs
@@ -379,9 +374,7 @@ def abort_scan(conn: sqlite3.Connection, scan_run_id: int) -> bool:
 
 
 def get_status(conn: sqlite3.Connection, scan_run_id: int) -> ScanRunSummary | None:
-    row = conn.execute(
-        "SELECT * FROM scan_runs WHERE id = ?", (scan_run_id,)
-    ).fetchone()
+    row = conn.execute("SELECT * FROM scan_runs WHERE id = ?", (scan_run_id,)).fetchone()
     if row is None:
         return None
     return ScanRunSummary(
@@ -400,9 +393,7 @@ def get_status(conn: sqlite3.Connection, scan_run_id: int) -> ScanRunSummary | N
     )
 
 
-def list_failed_items(
-    conn: sqlite3.Connection, scan_run_id: int, limit: int = 100
-) -> list[dict]:
+def list_failed_items(conn: sqlite3.Connection, scan_run_id: int, limit: int = 100) -> list[dict]:
     rows = conn.execute(
         """
         SELECT path, error, last_attempt_at

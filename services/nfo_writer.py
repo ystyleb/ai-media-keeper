@@ -26,17 +26,18 @@ from xml.dom import minidom
 @dataclass(frozen=True)
 class NFOPayload:
     """构造 NFO 需要的输入（来自 identify 结果 + lookup_by_id）。"""
-    media_type: str                   # 'episode' | 'movie' | 'tvshow'
-    title: str                        # 本地化标题（zh-CN 下"瑞克和莫蒂"）
-    original_title: str | None        # 原始语言标题
+
+    media_type: str  # 'episode' | 'movie' | 'tvshow'
+    title: str  # 本地化标题（zh-CN 下"瑞克和莫蒂"）
+    original_title: str | None  # 原始语言标题
     year: int | None
-    plot: str | None                  # overview
+    plot: str | None  # overview
     tmdb_id: str | None
     imdb_id: str | None
     tvdb_id: str | None
-    rating: float | None              # vote_average 0-10
+    rating: float | None  # vote_average 0-10
     genres: list[str]
-    cast: list[str]                   # 仅 name；NFO actor 元素需要 name+role 时降级为 only name
+    cast: list[str]  # 仅 name；NFO actor 元素需要 name+role 时降级为 only name
     runtime_minutes: int | None
     poster_url: str | None
     # episode-specific

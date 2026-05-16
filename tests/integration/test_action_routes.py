@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import os
 import sys
-import json
-from pathlib import Path
 
 import pytest
 
@@ -51,7 +49,10 @@ def client(monkeypatch):
         return {p: p for p in paths}
 
     def fake_resolve_all_hardlink_paths(paths):
-        return {p: {"inode": 1000 + i, "size": 1024 * (i + 1), "all_paths": [p]} for i, p in enumerate(paths)}
+        return {
+            p: {"inode": 1000 + i, "size": 1024 * (i + 1), "all_paths": [p]}
+            for i, p in enumerate(paths)
+        }
 
     def fake_get_real_sizes(paths):
         return {p: 1024 * (i + 1) for i, p in enumerate(paths)}
@@ -87,6 +88,7 @@ def client(monkeypatch):
         if "find " in cmd and "-inum" in cmd:
             # 提取 inode；返回模拟"被删除的 path 列表"
             import re
+
             m = re.search(r"-inum (\d+)", cmd)
             inum = m.group(1) if m else "0"
             return 0, f"/share/test/inode-{inum}-anchor\n", ""
@@ -213,13 +215,17 @@ def test_confirm_replay_returns_409(client):
         json={"kind": "delete", "candidates": [{"path": "/share/test/a.mkv"}]},
         headers=AUTH,
     ).get_json()
-    c.post("/api/action/confirm",
-           json={"action_id": pv["action_id"], "signed_token": pv["signed_token"]},
-           headers=AUTH)
+    c.post(
+        "/api/action/confirm",
+        json={"action_id": pv["action_id"], "signed_token": pv["signed_token"]},
+        headers=AUTH,
+    )
     # replay
-    rv = c.post("/api/action/confirm",
-                json={"action_id": pv["action_id"], "signed_token": pv["signed_token"]},
-                headers=AUTH)
+    rv = c.post(
+        "/api/action/confirm",
+        json={"action_id": pv["action_id"], "signed_token": pv["signed_token"]},
+        headers=AUTH,
+    )
     assert rv.status_code == 409
 
 
@@ -230,17 +236,19 @@ def test_confirm_bad_token_returns_401(client):
         json={"kind": "delete", "candidates": [{"path": "/share/test/a.mkv"}]},
         headers=AUTH,
     ).get_json()
-    rv = c.post("/api/action/confirm",
-                json={"action_id": pv["action_id"], "signed_token": "deadbeef" * 8},
-                headers=AUTH)
+    rv = c.post(
+        "/api/action/confirm",
+        json={"action_id": pv["action_id"], "signed_token": "deadbeef" * 8},
+        headers=AUTH,
+    )
     assert rv.status_code == 401
 
 
 def test_confirm_unknown_action_404(client):
     c, _ = client
-    rv = c.post("/api/action/confirm",
-                json={"action_id": "no-such-id", "signed_token": "x"},
-                headers=AUTH)
+    rv = c.post(
+        "/api/action/confirm", json={"action_id": "no-such-id", "signed_token": "x"}, headers=AUTH
+    )
     assert rv.status_code == 404
 
 
@@ -255,17 +263,24 @@ def test_snapshot_mismatch_returns_target_already_changed(client, monkeypatch):
 
     # 切换 fake stat 返回不同的 mtime（模拟文件被改过）
     def stat_after_change(paths):
-        return {p: {
-            "exists": True, "inode": 1000, "size_bytes": 1024,
-            "mtime": 1_700_000_999,  # 不同！
-            "is_dir": False,
-        } for p in paths}
+        return {
+            p: {
+                "exists": True,
+                "inode": 1000,
+                "size_bytes": 1024,
+                "mtime": 1_700_000_999,  # 不同！
+                "is_dir": False,
+            }
+            for p in paths
+        }
 
     monkeypatch.setattr(app_mod, "_ssh_stat_paths", stat_after_change)
 
-    rv = c.post("/api/action/confirm",
-                json={"action_id": pv["action_id"], "signed_token": pv["signed_token"]},
-                headers=AUTH)
+    rv = c.post(
+        "/api/action/confirm",
+        json={"action_id": pv["action_id"], "signed_token": pv["signed_token"]},
+        headers=AUTH,
+    )
     assert rv.status_code == 200
     body = rv.get_json()
     assert body["status"] == "target_already_changed"

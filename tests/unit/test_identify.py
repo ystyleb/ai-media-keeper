@@ -7,11 +7,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from services import identify as identify_svc
 from services.metadata.base import MediaCandidate
-
 
 # ---------------- parse_filename ---------------- #
 
@@ -29,9 +26,7 @@ def test_parse_filename_tv_episode():
 
 
 def test_parse_filename_movie():
-    p = identify_svc.parse_filename(
-        "/share/.../Dune.Part.Two.2024.2160p.UHD.BluRay.x265-FRDS.mkv"
-    )
+    p = identify_svc.parse_filename("/share/.../Dune.Part.Two.2024.2160p.UHD.BluRay.x265-FRDS.mkv")
     assert "Dune" in p.title
     assert p.year == 2024
     assert p.resolution == "2160p"
@@ -53,9 +48,7 @@ def test_parse_filename_ambiguous_returns_int_not_list():
 
     Regression test: 1916 默片 Judex 命名引起的 ProgrammingError。
     """
-    p = identify_svc.parse_filename(
-        "/share/.../Judex.1916.BD2.BluRay.1080p.DD2.0.x264-BMDru.mkv"
-    )
+    p = identify_svc.parse_filename("/share/.../Judex.1916.BD2.BluRay.1080p.DD2.0.x264-BMDru.mkv")
     # 不强校验 guessit 怎么解析（它的启发式可能升级），但严格要求
     # 类型为 int 或 None，永远不是 list
     assert p.season is None or isinstance(p.season, int)
@@ -68,11 +61,11 @@ def test_normalize_int_handles_list_and_scalars():
     f = identify_svc._normalize_int
     assert f(None) is None
     assert f(5) == 5
-    assert f([7]) == 7              # 单元素 list → 取值
-    assert f([1916, 16]) is None    # 多元素 ambiguous → None
-    assert f("string") is None      # 异常类型 → None
+    assert f([7]) == 7  # 单元素 list → 取值
+    assert f([1916, 16]) is None  # 多元素 ambiguous → None
+    assert f("string") is None  # 异常类型 → None
     assert f([]) is None
-    assert f(["not_int"]) is None   # list 里非 int → None
+    assert f(["not_int"]) is None  # list 里非 int → None
 
 
 def test_parse_filename_empty_returns_unknown():
@@ -97,9 +90,7 @@ def test_parse_filename_extras_dash_number():
 
 
 def test_parse_filename_featurette():
-    p = identify_svc.parse_filename(
-        "/share/Moives/Foo.2020.Featurette.1080p.mkv"
-    )
+    p = identify_svc.parse_filename("/share/Moives/Foo.2020.Featurette.1080p.mkv")
     assert p.media_type == "extra"
     assert p.raw.get("_extra_kind") == "featurette"
 
@@ -209,9 +200,7 @@ def test_identify_part_short_circuits_provider():
 def test_parse_filename_sequel_part_merged_to_title():
     """guessit 把 'Part II' 抽到 part 字段，title 留下 'The Godfather'。
     为了 TMDB 能搜到正确续集，要把 'Part N' 合并回 title。"""
-    p = identify_svc.parse_filename(
-        "/x/The.Godfather.Part.II.1974.BluRay.1080p.mkv"
-    )
+    p = identify_svc.parse_filename("/x/The.Godfather.Part.II.1974.BluRay.1080p.mkv")
     assert p.title == "The Godfather Part 2"
     assert p.year == 1974
     assert p.media_type == "movie"
@@ -220,17 +209,13 @@ def test_parse_filename_sequel_part_merged_to_title():
 
 
 def test_parse_filename_sequel_part_iii():
-    p = identify_svc.parse_filename(
-        "/x/The.Godfather.Part.III.1990.BluRay.1080p.mkv"
-    )
+    p = identify_svc.parse_filename("/x/The.Godfather.Part.III.1990.BluRay.1080p.mkv")
     assert p.title == "The Godfather Part 3"
 
 
 def test_parse_filename_bd1_does_not_inject_part_n():
     """BD1 是分盘 marker，guessit 不会同时给 part 字段，title 不该被注入 'Part N'。"""
-    p = identify_svc.parse_filename(
-        "/x/Judex.1916/Judex.1916.BD1.BluRay.1080p.mkv"
-    )
+    p = identify_svc.parse_filename("/x/Judex.1916/Judex.1916.BD1.BluRay.1080p.mkv")
     # title 应该是 guessit 给的 raw，不带 'Part N'
     assert "Part" not in p.title
     assert p.raw.get("_part_index") == 1
@@ -254,7 +239,10 @@ def test_pick_top_penalizes_year_mismatch():
             original_title="The Godfather",
             year=1972,
             media_type="movie",
-            poster_url=None, overview=None, vote_average=8.7, raw={},
+            poster_url=None,
+            overview=None,
+            vote_average=8.7,
+            raw={},
         ),
         MediaCandidate(
             id="tmdb:movie:240",
@@ -263,7 +251,10 @@ def test_pick_top_penalizes_year_mismatch():
             original_title="The Godfather Part II",
             year=1974,
             media_type="movie",
-            poster_url=None, overview=None, vote_average=8.6, raw={},
+            poster_url=None,
+            overview=None,
+            vote_average=8.6,
+            raw={},
         ),
     ]
     parse = identify_svc.parse_filename("/x/The.Godfather.Part.II.1974.BluRay.1080p.mkv")
@@ -278,19 +269,35 @@ def test_pick_top_penalizes_year_mismatch():
 
 def _cand(id_, title, year=None, media_type="tv", vote=7.5):
     return MediaCandidate(
-        id=id_, external_ids={"tmdb_id": id_.split(":")[-1]},
-        title=title, original_title=title, year=year,
-        media_type=media_type, poster_url=None, overview=None,
+        id=id_,
+        external_ids={"tmdb_id": id_.split(":")[-1]},
+        title=title,
+        original_title=title,
+        year=year,
+        media_type=media_type,
+        poster_url=None,
+        overview=None,
         vote_average=vote,
     )
 
 
 def _parse(title, year=None, season=None, episode=None, media_type="episode"):
     return identify_svc.FilenameParse(
-        raw_name="x.mkv", title=title, year=year, season=season,
-        episode=episode, episode_title=None, media_type=media_type,
-        resolution=None, source=None, release_group=None,
-        codec=None, color_depth=None, hdr_profiles=[], container=None, audio_codec=None,
+        raw_name="x.mkv",
+        title=title,
+        year=year,
+        season=season,
+        episode=episode,
+        episode_title=None,
+        media_type=media_type,
+        resolution=None,
+        source=None,
+        release_group=None,
+        codec=None,
+        color_depth=None,
+        hdr_profiles=[],
+        container=None,
+        audio_codec=None,
         raw={},
     )
 
@@ -337,10 +344,15 @@ def test_top_pick_matches_original_title_when_localized():
     parse = _parse("Rick and Morty", media_type="episode")
     cands = [
         MediaCandidate(
-            id="tmdb:tv:1", external_ids={"tmdb_id": "1"},
-            title="瑞克和莫蒂", original_title="Rick and Morty",
-            year=2013, media_type="tv",
-            poster_url=None, overview=None, vote_average=8.7,
+            id="tmdb:tv:1",
+            external_ids={"tmdb_id": "1"},
+            title="瑞克和莫蒂",
+            original_title="Rick and Morty",
+            year=2013,
+            media_type="tv",
+            poster_url=None,
+            overview=None,
+            vote_average=8.7,
         )
     ]
     top, score, reasoning = identify_svc._pick_top(parse, cands)
@@ -370,9 +382,7 @@ def test_identify_full_pipeline():
     provider.search.return_value = [
         _cand("tmdb:tv:1", "Rick and Morty", year=2013, media_type="tv"),
     ]
-    result = identify_svc.identify(
-        "/share/Rick and Morty - S06E02 WEBDL-1080p.mkv", provider
-    )
+    result = identify_svc.identify("/share/Rick and Morty - S06E02 WEBDL-1080p.mkv", provider)
     assert result.parse.title == "Rick and Morty"
     assert result.parse.season == 6
     assert result.parse.episode == 2
@@ -417,12 +427,17 @@ def test_identify_llm_rescue_when_provider_returns_zero():
     ]
 
     fake_extraction = llm_module.FilenameExtraction(
-        title="死亡笔记", alt_title="Death Note",
-        year=2006, season=1, episode=None, media_type="tv",
+        title="死亡笔记",
+        alt_title="Death Note",
+        year=2006,
+        season=1,
+        episode=None,
+        media_type="tv",
         raw_response='{"title":"死亡笔记"}',
     )
-    with patch.object(llm_module, "extract_title_from_filename",
-                      return_value=(fake_extraction, "")):
+    with patch.object(
+        llm_module, "extract_title_from_filename", return_value=(fake_extraction, "")
+    ):
         result = identify_svc.identify(
             "/share/.../死亡笔记.BDrip1080P.X264.AC3.LGGZ S.01.mkv",
             provider,
@@ -441,11 +456,8 @@ def test_identify_llm_rescue_returns_no_title_falls_through():
 
     provider = MagicMock()
     provider.search.return_value = []  # 无论怎么搜都 0
-    with patch.object(llm_module, "extract_title_from_filename",
-                      return_value=(None, "no_title")):
-        result = identify_svc.identify(
-            "/share/.../random.mkv", provider, llm_api_key="fake-key"
-        )
+    with patch.object(llm_module, "extract_title_from_filename", return_value=(None, "no_title")):
+        result = identify_svc.identify("/share/.../random.mkv", provider, llm_api_key="fake-key")
     assert result.top_pick is None
     assert result.candidates == []
 
@@ -457,9 +469,7 @@ def test_identify_no_llm_key_no_rescue():
     provider = MagicMock()
     provider.search.return_value = []
     with patch.object(llm_module, "extract_title_from_filename") as mock_extract:
-        result = identify_svc.identify(
-            "/share/.../random.mkv", provider, llm_api_key=None
-        )
+        result = identify_svc.identify("/share/.../random.mkv", provider, llm_api_key=None)
         mock_extract.assert_not_called()
     assert result.top_pick is None
 
@@ -469,9 +479,7 @@ def test_identify_no_llm_key_no_rescue():
 
 def test_parse_filename_extracts_codec_h265():
     """h265/HEVC release 的 video_codec 应被抽出。"""
-    p = identify_svc.parse_filename(
-        "/share/Movies/Movie.2020.1080p.BluRay.x265.10bit-GROUP.mkv"
-    )
+    p = identify_svc.parse_filename("/share/Movies/Movie.2020.1080p.BluRay.x265.10bit-GROUP.mkv")
     assert p.codec == "H.265"
     assert p.color_depth == "10-bit"
     assert p.container == "mkv"
@@ -479,17 +487,13 @@ def test_parse_filename_extracts_codec_h265():
 
 def test_parse_filename_extracts_codec_av1():
     """AV1 是新一代 codec，guessit 应识别。"""
-    p = identify_svc.parse_filename(
-        "/share/Movies/Movie.2024.2160p.WEB-DL.AV1.10bit-GROUP.mkv"
-    )
+    p = identify_svc.parse_filename("/share/Movies/Movie.2024.2160p.WEB-DL.AV1.10bit-GROUP.mkv")
     assert p.codec == "AV1"
 
 
 def test_parse_filename_extracts_hdr10_only():
     """HDR10 标记应抽出，不带 + 号。"""
-    p = identify_svc.parse_filename(
-        "/share/Movies/Movie.2020.2160p.BluRay.HDR10.x265-GROUP.mkv"
-    )
+    p = identify_svc.parse_filename("/share/Movies/Movie.2020.2160p.BluRay.HDR10.x265-GROUP.mkv")
     assert "HDR10" in p.hdr_profiles
     assert "HDR10+" not in p.hdr_profiles
     assert "DolbyVision" not in p.hdr_profiles
@@ -497,9 +501,7 @@ def test_parse_filename_extracts_hdr10_only():
 
 def test_parse_filename_extracts_dolby_vision():
     """Dolby Vision (with space) 应归一化到 'DolbyVision'。"""
-    p = identify_svc.parse_filename(
-        "/share/Movies/Movie.2020.2160p.BluRay.DV.HDR.x265-GROUP.mkv"
-    )
+    p = identify_svc.parse_filename("/share/Movies/Movie.2020.2160p.BluRay.DV.HDR.x265-GROUP.mkv")
     # guessit 把 'DV' 也识别成 Dolby Vision
     assert "DolbyVision" in p.hdr_profiles
 
@@ -534,24 +536,18 @@ def test_hdr_hdr10_plus_implies_no_plain_hdr10():
 
 def test_parse_filename_extracts_container_mkv():
     """容器字段应抽对。"""
-    p = identify_svc.parse_filename(
-        "/share/Movies/Movie.2020.1080p.BluRay.x264-GROUP.mp4"
-    )
+    p = identify_svc.parse_filename("/share/Movies/Movie.2020.1080p.BluRay.x264-GROUP.mp4")
     assert p.container == "mp4"
 
 
 def test_parse_filename_no_hdr_returns_empty_list():
     """无 HDR 标记时 hdr_profiles 是空 list（不是 None）。"""
-    p = identify_svc.parse_filename(
-        "/share/Movies/Movie.2020.1080p.BluRay.x264-GROUP.mkv"
-    )
+    p = identify_svc.parse_filename("/share/Movies/Movie.2020.1080p.BluRay.x264-GROUP.mkv")
     assert p.hdr_profiles == []
 
 
 def test_parse_filename_color_depth_10bit():
-    p = identify_svc.parse_filename(
-        "/share/Movies/Movie.2020.2160p.BluRay.x265.10bit-GROUP.mkv"
-    )
+    p = identify_svc.parse_filename("/share/Movies/Movie.2020.2160p.BluRay.x265.10bit-GROUP.mkv")
     assert p.color_depth == "10-bit"
 
 
@@ -579,9 +575,7 @@ def test_extras_short_circuit_still_no_codec():
 
 def test_part_filename_still_extracts_codec():
     """多盘 BD2/CD2 即 media_type='part' 仍应抽 codec（plan：分盘有真实视频信息）。"""
-    p = identify_svc.parse_filename(
-        "/share/Movies/Judex.1916.BD2.BluRay.1080p.x265-GROUP.mkv"
-    )
+    p = identify_svc.parse_filename("/share/Movies/Judex.1916.BD2.BluRay.1080p.x265-GROUP.mkv")
     assert p.media_type == "part"
     assert p.codec == "H.265"
     assert p.container == "mkv"
@@ -642,7 +636,5 @@ def test_codec_fallback_does_not_match_within_word():
 
 def test_extracts_codec_av1_in_full_pipeline():
     """完整 parse_filename 在 AV1 release 上能拿到 codec='AV1'。"""
-    p = identify_svc.parse_filename(
-        "/share/Movies/Movie.2024.2160p.WEB-DL.AV1.10bit-GROUP.mkv"
-    )
+    p = identify_svc.parse_filename("/share/Movies/Movie.2024.2160p.WEB-DL.AV1.10bit-GROUP.mkv")
     assert p.codec == "AV1"

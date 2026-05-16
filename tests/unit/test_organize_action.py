@@ -32,6 +32,7 @@ def token():
 @dataclass
 class _CachedStub:
     """Stand-in for services.metadata_cache.CachedMetadata."""
+
     title: str
     media_type: str
     year: int | None = None
@@ -52,7 +53,8 @@ def _dst_stat_missing(paths: list[str]) -> dict:
 
 def _patch_organize_config(monkeypatch, movies_root="/media/movies", tv_root="/media/tv"):
     monkeypatch.setattr(
-        app_module, "load_organize_config",
+        app_module,
+        "load_organize_config",
         lambda: {"movies_root": movies_root, "tv_root": tv_root},
     )
 
@@ -65,12 +67,14 @@ def _patch_cache(monkeypatch, cached_or_none):
     """
     status = "hit" if cached_or_none else "miss"
     monkeypatch.setattr(
-        app_module.metadata_cache, "get_many_by_path",
+        app_module.metadata_cache,
+        "get_many_by_path",
         lambda conn, paths, *, current_stats=None: {p: (cached_or_none, status) for p in paths},
     )
     # 同时 patch 旧 get_by_path（confirm 路径仍走它）
     monkeypatch.setattr(
-        app_module.metadata_cache, "get_by_path",
+        app_module.metadata_cache,
+        "get_by_path",
         lambda conn, path, current_mtime=None, current_inode=None: (cached_or_none, status),
     )
 
@@ -109,7 +113,8 @@ def test_preview_src_missing_marks_not_applicable(client, token, monkeypatch):
     """
     _patch_organize_config(monkeypatch)
     monkeypatch.setattr(
-        app_module, "_ssh_stat_paths",
+        app_module,
+        "_ssh_stat_paths",
         lambda paths: {p: {"exists": False} for p in paths},
     )
     resp = client.post(
@@ -130,7 +135,8 @@ def test_preview_src_not_identified_marks_needs_identify(client, token, monkeypa
     """Phase 4B：cache miss → 200 + needs_identify（旧 4A 是 400 src_not_identified）."""
     _patch_organize_config(monkeypatch)
     monkeypatch.setattr(
-        app_module, "_ssh_stat_paths",
+        app_module,
+        "_ssh_stat_paths",
         lambda paths: _src_stat("/dl/x.mkv"),
     )
     _patch_cache(monkeypatch, None)
@@ -150,10 +156,16 @@ def test_preview_tv_missing_episode_marks_not_applicable(client, token, monkeypa
     """Phase 4B：TV 但 episode_number=None → 200 + not_applicable + reason 提示。"""
     _patch_organize_config(monkeypatch)
     monkeypatch.setattr(app_module, "_ssh_stat_paths", lambda paths: _src_stat("/dl/x.mkv"))
-    _patch_cache(monkeypatch, _CachedStub(
-        title="Show", media_type="tv", year=2020,
-        season_number=2, episode_number=None,
-    ))
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="Show",
+            media_type="tv",
+            year=2020,
+            season_number=2,
+            episode_number=None,
+        ),
+    )
     resp = client.post(
         "/api/action/preview",
         json={"kind": "organize", "items": [{"src_path": "/dl/x.mkv"}]},
@@ -197,9 +209,15 @@ def test_preview_movie_happy_path_returns_token_and_plan(client, token, monkeypa
         return result
 
     monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
-    _patch_cache(monkeypatch, _CachedStub(
-        title="The Movie", media_type="movie", year=2024, tmdb_id="111",
-    ))
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="The Movie",
+            media_type="movie",
+            year=2024,
+            tmdb_id="111",
+        ),
+    )
     resp = client.post(
         "/api/action/preview",
         json={"kind": "organize", "items": [{"src_path": "/dl/movie.mkv"}]},
@@ -234,10 +252,17 @@ def test_preview_tv_happy_path_includes_tvshow_nfo_path(client, token, monkeypat
         return result
 
     monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
-    _patch_cache(monkeypatch, _CachedStub(
-        title="My Show", media_type="tv", year=2020, tmdb_id="222",
-        season_number=2, episode_number=5,
-    ))
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="My Show",
+            media_type="tv",
+            year=2020,
+            tmdb_id="222",
+            season_number=2,
+            episode_number=5,
+        ),
+    )
     resp = client.post(
         "/api/action/preview",
         json={"kind": "organize", "items": [{"src_path": "/dl/show.s02e05.mkv"}]},
@@ -267,9 +292,14 @@ def test_preview_dst_already_linked_marks_flag(client, token, monkeypatch):
         return result
 
     monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
-    _patch_cache(monkeypatch, _CachedStub(
-        title="Movie", media_type="movie", year=2024,
-    ))
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="Movie",
+            media_type="movie",
+            year=2024,
+        ),
+    )
     resp = client.post(
         "/api/action/preview",
         json={"kind": "organize", "items": [{"src_path": "/dl/movie.mkv"}]},
@@ -375,14 +405,16 @@ def test_confirm_src_inode_changed_aborts_no_mkdir(client, token, monkeypatch):
     src = "/dl/movie.mkv"
     # preview 阶段 stat：src inode=100, dst missing
     monkeypatch.setattr(
-        app_module, "_ssh_stat_paths",
+        app_module,
+        "_ssh_stat_paths",
         _make_stat_fn({src: {"exists": True, "inode": 100, "size_bytes": 1, "mtime": 1}}),
     )
     action_id, signed = _do_preview_and_get_token(client, token, src)
 
     # confirm 阶段 stat：src inode 变了
     monkeypatch.setattr(
-        app_module, "_ssh_stat_paths",
+        app_module,
+        "_ssh_stat_paths",
         _make_stat_fn({src: {"exists": True, "inode": 999, "size_bytes": 1, "mtime": 1}}),
     )
     mkdir_called = []
@@ -416,7 +448,8 @@ def test_confirm_movie_happy_path_inode_shared(client, token, monkeypatch):
 
     # preview 阶段
     monkeypatch.setattr(
-        app_module, "_ssh_stat_paths",
+        app_module,
+        "_ssh_stat_paths",
         _make_stat_fn({src: src_stat}),
     )
     action_id, signed = _do_preview_and_get_token(client, token, src)
@@ -443,7 +476,8 @@ def test_confirm_movie_happy_path_inode_shared(client, token, monkeypatch):
     monkeypatch.setattr(app_module, "_ssh_mkdir_p", lambda p: (0, "", ""))
     monkeypatch.setattr(app_module, "_ssh_ln", lambda s, d: (0, "", ""))
     monkeypatch.setattr(
-        app_module, "_write_organize_nfo",
+        app_module,
+        "_write_organize_nfo",
         lambda src_path, nfo, kind, **kw: "created",
     )
 
@@ -495,7 +529,8 @@ def test_confirm_tv_writes_episode_and_tvshow_nfo(client, token, monkeypatch):
 
     nfo_calls = []
     monkeypatch.setattr(
-        app_module, "_write_organize_nfo",
+        app_module,
+        "_write_organize_nfo",
         lambda src_path, nfo, kind, **kw: nfo_calls.append((nfo, kind)) or "created",
     )
 
@@ -526,7 +561,8 @@ def test_confirm_dst_already_linked_idempotent_skip(client, token, monkeypatch):
 
     # 整个流程 dst 都存在 + 同 inode
     monkeypatch.setattr(
-        app_module, "_ssh_stat_paths",
+        app_module,
+        "_ssh_stat_paths",
         _make_stat_fn({src: src_stat, dst_path: src_stat}),
     )
     action_id, signed = _do_preview_and_get_token(client, token, src)
@@ -537,7 +573,8 @@ def test_confirm_dst_already_linked_idempotent_skip(client, token, monkeypatch):
     monkeypatch.setattr(app_module, "_ssh_mkdir_p", lambda p: mkdir_called.append(p) or (0, "", ""))
     monkeypatch.setattr(app_module, "_ssh_ln", lambda s, d: ln_called.append((s, d)) or (0, "", ""))
     monkeypatch.setattr(
-        app_module, "_write_organize_nfo",
+        app_module,
+        "_write_organize_nfo",
         lambda *a, **kw: nfo_called.append(a) or "created",
     )
 
@@ -715,7 +752,8 @@ def test_confirm_nfo_failure_does_not_rollback_hardlink(client, token, monkeypat
     monkeypatch.setattr(app_module, "_ssh_ln", lambda s, d: (0, "", ""))
     # NFO 写失败
     monkeypatch.setattr(
-        app_module, "_write_organize_nfo",
+        app_module,
+        "_write_organize_nfo",
         lambda src_path, nfo, kind, **kw: "failed: write_failed: permission",
     )
 
@@ -782,7 +820,7 @@ def test_confirm_existing_nfo_returns_skipped(client, token, monkeypatch):
 
     def fake_write(src_p, nfo, kind, **kw):
         write_calls.append((nfo, kind, kw))
-        return "skipped: nfo_exists"   # 模拟 atomic ln 失败因为 dst 已存在
+        return "skipped: nfo_exists"  # 模拟 atomic ln 失败因为 dst 已存在
 
     monkeypatch.setattr(app_module, "_write_organize_nfo", fake_write)
 
@@ -802,19 +840,31 @@ def test_write_organize_nfo_atomic_ln_dst_exists_returns_skipped(monkeypatch):
     """codex r3 BLOCKER fix: helper _ssh_create_nfo_if_absent 返 (False, 'nfo_exists')
     → _write_organize_nfo 转 'skipped: nfo_exists'."""
     cached = _CachedStub(title="X", media_type="movie", year=2024, tmdb_id="1")
-    for attr in ("original_title", "imdb_id", "overview", "vote_average",
-                 "genres", "cast", "runtime_minutes", "poster_url",
-                 "episode_title", "episode_overview", "episode_air_date",
-                 "episode_still_url"):
+    for attr in (
+        "original_title",
+        "imdb_id",
+        "overview",
+        "vote_average",
+        "genres",
+        "cast",
+        "runtime_minutes",
+        "poster_url",
+        "episode_title",
+        "episode_overview",
+        "episode_air_date",
+        "episode_still_url",
+    ):
         if not hasattr(cached, attr):
             setattr(cached, attr, None)
     monkeypatch.setattr(app_module, "get_db", lambda: None)
     monkeypatch.setattr(
-        app_module.metadata_cache, "get_by_path",
+        app_module.metadata_cache,
+        "get_by_path",
         lambda conn, path, **kw: (cached, "hit"),
     )
     monkeypatch.setattr(
-        app_module, "_ssh_create_nfo_if_absent",
+        app_module,
+        "_ssh_create_nfo_if_absent",
         lambda nfo, xml, **kw: (False, "nfo_exists"),
     )
     out = app_module._write_organize_nfo("/dl/x.mkv", "/m/X (2024)/x.nfo", "movie")
@@ -825,7 +875,8 @@ def test_write_organize_nfo_no_cache_returns_failed(monkeypatch):
     """codex r1 B5: cache miss → 'failed: no_cache'（而不是 'no_cache'）。"""
     monkeypatch.setattr(app_module, "get_db", lambda: None)
     monkeypatch.setattr(
-        app_module.metadata_cache, "get_by_path",
+        app_module.metadata_cache,
+        "get_by_path",
         lambda conn, path, **kw: (None, "miss"),
     )
     out = app_module._write_organize_nfo("/dl/x.mkv", "/m/x.nfo", "movie")
@@ -836,20 +887,32 @@ def test_write_organize_nfo_no_cache_returns_failed(monkeypatch):
 def test_write_organize_nfo_real_build_succeeds_for_movie(monkeypatch):
     """codex r1 B4: 不 mock _write_organize_nfo，验证 NFOPayload 含 tvdb_id=None 不抛 TypeError。"""
     cached = _CachedStub(title="X", media_type="movie", year=2024, tmdb_id="1")
-    for attr in ("original_title", "imdb_id", "overview", "vote_average",
-                 "genres", "cast", "runtime_minutes", "poster_url",
-                 "episode_title", "episode_overview", "episode_air_date",
-                 "episode_still_url"):
+    for attr in (
+        "original_title",
+        "imdb_id",
+        "overview",
+        "vote_average",
+        "genres",
+        "cast",
+        "runtime_minutes",
+        "poster_url",
+        "episode_title",
+        "episode_overview",
+        "episode_air_date",
+        "episode_still_url",
+    ):
         if not hasattr(cached, attr):
             setattr(cached, attr, None)
     monkeypatch.setattr(app_module, "get_db", lambda: None)
     monkeypatch.setattr(
-        app_module.metadata_cache, "get_by_path",
+        app_module.metadata_cache,
+        "get_by_path",
         lambda conn, path, **kw: (cached, "hit"),
     )
     captured = []
     monkeypatch.setattr(
-        app_module, "_ssh_create_nfo_if_absent",
+        app_module,
+        "_ssh_create_nfo_if_absent",
         lambda nfo, xml, **kw: captured.append(xml) or (True, ""),
     )
     out = app_module._write_organize_nfo("/dl/movie.mkv", "/m/X (2024)/movie.nfo", "movie")
@@ -862,24 +925,36 @@ def test_write_organize_nfo_real_build_succeeds_for_movie(monkeypatch):
 def test_write_organize_nfo_cache_drift_skipped(monkeypatch):
     """codex r1 I1: preview 抓 tmdb_id='1' 但 confirm 时 cache 变成 tmdb_id='2' → skipped."""
     cached = _CachedStub(title="X", media_type="movie", year=2024, tmdb_id="2")
-    for attr in ("original_title", "imdb_id", "overview", "vote_average",
-                 "genres", "cast", "runtime_minutes", "poster_url",
-                 "episode_title", "episode_overview", "episode_air_date",
-                 "episode_still_url"):
+    for attr in (
+        "original_title",
+        "imdb_id",
+        "overview",
+        "vote_average",
+        "genres",
+        "cast",
+        "runtime_minutes",
+        "poster_url",
+        "episode_title",
+        "episode_overview",
+        "episode_air_date",
+        "episode_still_url",
+    ):
         if not hasattr(cached, attr):
             setattr(cached, attr, None)
     monkeypatch.setattr(app_module, "get_db", lambda: None)
     monkeypatch.setattr(
-        app_module.metadata_cache, "get_by_path",
+        app_module.metadata_cache,
+        "get_by_path",
         lambda conn, path, **kw: (cached, "hit"),
     )
     write_called = []
     monkeypatch.setattr(
-        app_module, "_ssh_create_nfo_if_absent",
+        app_module,
+        "_ssh_create_nfo_if_absent",
         lambda *a, **kw: write_called.append(a) or (True, ""),
     )
     expected_pre = {
-        "tmdb_id": "1",                # preview 时
+        "tmdb_id": "1",  # preview 时
         "title": "X",
         "year": 2024,
         "media_type": "movie",
@@ -887,12 +962,14 @@ def test_write_organize_nfo_cache_drift_skipped(monkeypatch):
         "episode_number": None,
     }
     out = app_module._write_organize_nfo(
-        "/dl/x.mkv", "/m/X (2024)/x.nfo", "movie",
+        "/dl/x.mkv",
+        "/m/X (2024)/x.nfo",
+        "movie",
         expected_metadata=expected_pre,
     )
     assert out.startswith("skipped: cache_drift")
     assert "tmdb_id" in out
-    assert write_called == []   # cache drift 必须 short-circuit
+    assert write_called == []  # cache drift 必须 short-circuit
 
 
 def test_ssh_create_nfo_if_absent_tmp_filename_has_unique_suffix(monkeypatch):
@@ -919,7 +996,9 @@ def test_ssh_create_nfo_if_absent_tmp_filename_has_unique_suffix(monkeypatch):
         if m:
             tmps.append(m.group(1))
 
-    assert len(tmps) == 2, f"expected 2 ln commands with tmp paths; got {tmps}, cmds={captured_cmds}"
+    assert len(tmps) == 2, (
+        f"expected 2 ln commands with tmp paths; got {tmps}, cmds={captured_cmds}"
+    )
     assert tmps[0] != tmps[1]
     pat = re.compile(r"^/m/x\.nfo\.tmp\.[0-9a-f]{12}$")
     assert pat.match(tmps[0]) and pat.match(tmps[1])
@@ -929,23 +1008,29 @@ def test_ssh_create_nfo_if_absent_returns_nfo_exists_when_ln_fails(monkeypatch):
     """codex r3 BLOCKER: atomic ln 失败 + dst 已存在 → return (False, 'nfo_exists')。
 
     模拟 ssh_exec 返非零 rc 且 stdout 含 NFO_EXISTS（Python 用此 marker 区分两种 ln 失败）。"""
+
     def fake_ssh_exec(cmd, timeout=30):
         # 模拟 ln 失败 + dst 存在的 shell 行为
         return (1, "NFO_EXISTS\n", "ln: failed to create hard link: File exists")
 
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
-    ok, reason = app_module._ssh_create_nfo_if_absent("/m/x.nfo", "<movie>x</movie>", verify_tmdb=False)
+    ok, reason = app_module._ssh_create_nfo_if_absent(
+        "/m/x.nfo", "<movie>x</movie>", verify_tmdb=False
+    )
     assert ok is False
     assert reason == "nfo_exists"
 
 
 def test_ssh_create_nfo_if_absent_returns_create_failed_when_ln_fails_other(monkeypatch):
     """ln 失败 + dst 不存在（如目录权限错）→ 'create_failed: <err>'，不是 'nfo_exists'."""
+
     def fake_ssh_exec(cmd, timeout=30):
-        return (1, "", "Permission denied")    # 无 NFO_EXISTS marker
+        return (1, "", "Permission denied")  # 无 NFO_EXISTS marker
 
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
-    ok, reason = app_module._ssh_create_nfo_if_absent("/m/x.nfo", "<movie>x</movie>", verify_tmdb=False)
+    ok, reason = app_module._ssh_create_nfo_if_absent(
+        "/m/x.nfo", "<movie>x</movie>", verify_tmdb=False
+    )
     assert ok is False
     assert reason.startswith("create_failed:")
     assert "Permission denied" in reason
@@ -954,12 +1039,15 @@ def test_ssh_create_nfo_if_absent_returns_create_failed_when_ln_fails_other(monk
 def test_ssh_create_nfo_if_absent_rejects_directory_target(monkeypatch):
     """codex r4 BLOCKER: dst 是目录（不是普通文件）时必须返 'nfo_is_directory'。
     `ln src dir/` 默认在 dir 内创建 hardlink，不能让那种 silent ln-into-dir 发生。"""
+
     def fake_ssh_exec(cmd, timeout=30):
         # 模拟 shell `[ -d ] && exit 99` 行为
         return (99, "NFO_IS_DIR\n", "")
 
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
-    ok, reason = app_module._ssh_create_nfo_if_absent("/m/x.nfo", "<movie>x</movie>", verify_tmdb=False)
+    ok, reason = app_module._ssh_create_nfo_if_absent(
+        "/m/x.nfo", "<movie>x</movie>", verify_tmdb=False
+    )
     assert ok is False
     assert reason == "nfo_is_directory"
 
@@ -988,6 +1076,7 @@ def test_ssh_create_nfo_if_absent_count_zero_not_misclassified(monkeypatch):
     """codex r4 NIT: grep -c 返 count=0 时不能被误归类成 create_failed。
 
     实际 shell `... || echo 0` 让 rc 永远 0，stdout 末行是 count。"""
+
     def fake_ssh_exec(cmd, timeout=30):
         # 模拟 grep -c 找不到 → || echo 0 输出 "0\n"，整条 rc=0
         return (0, "0\n", "")
@@ -995,7 +1084,7 @@ def test_ssh_create_nfo_if_absent_count_zero_not_misclassified(monkeypatch):
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
     ok, reason = app_module._ssh_create_nfo_if_absent("/m/x.nfo", "<a/>", verify_tmdb=True)
     assert ok is False
-    assert reason == "readback_missing_tmdbid"   # 不是 create_failed
+    assert reason == "readback_missing_tmdbid"  # 不是 create_failed
 
 
 def test_executor_rejects_payload_missing_metadata_snapshot(monkeypatch):
@@ -1003,20 +1092,26 @@ def test_executor_rejects_payload_missing_metadata_snapshot(monkeypatch):
 
     保护 legacy / 不完整 payload 走到 NFO 写时 silent 漂移降级（cache_drift guard 失效）。
     """
-    monkeypatch.setattr(app_module, "_ssh_stat_paths", lambda paths: {
-        p: {"exists": True, "inode": 1, "size_bytes": 1, "mtime": 1} for p in paths
-    })
+    monkeypatch.setattr(
+        app_module,
+        "_ssh_stat_paths",
+        lambda paths: {p: {"exists": True, "inode": 1, "size_bytes": 1, "mtime": 1} for p in paths},
+    )
     payload_no_snapshot = {
-        "items": [{
-            "src_path": "/dl/x.mkv",
-            "src_snapshot": {"inode": 1, "size_bytes": 1, "mtime": 1},
-            "media_type": "movie",
-            "computed_plan": {
-                "dst_dir": "/m/X (2024)", "dst_path": "/m/X (2024)/x.mkv",
-                "nfo_path": "/m/X (2024)/x.nfo", "tvshow_nfo_path": None,
-            },
-            # 缺 metadata_snapshot
-        }],
+        "items": [
+            {
+                "src_path": "/dl/x.mkv",
+                "src_snapshot": {"inode": 1, "size_bytes": 1, "mtime": 1},
+                "media_type": "movie",
+                "computed_plan": {
+                    "dst_dir": "/m/X (2024)",
+                    "dst_path": "/m/X (2024)/x.mkv",
+                    "nfo_path": "/m/X (2024)/x.nfo",
+                    "tvshow_nfo_path": None,
+                },
+                # 缺 metadata_snapshot
+            }
+        ],
     }
     result = app_module._organize_executor(payload_no_snapshot)
     item = result["items"][0]
@@ -1026,8 +1121,10 @@ def test_executor_rejects_payload_missing_metadata_snapshot(monkeypatch):
 
 def test_ssh_ln_rejects_directory_dst(monkeypatch):
     """codex r5 BLOCKER 2: _ssh_ln pre-check [ -d dst ] 防 silent ln-into-dir."""
+
     def fake_ssh_exec(cmd, timeout=10):
         return (99, "DST_IS_DIR\n", "")
+
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
     rc, out, err = app_module._ssh_ln("/src/x.mkv", "/dst/dir_target")
     assert rc == 99
@@ -1040,8 +1137,10 @@ def test_ssh_ln_detects_race_ln_into_dir(monkeypatch):
 
     r7 修订：不自动 cleanup（ownership 无法 path-based 证明），返 marker 让
     调用方告知 user 手工查 orphan."""
+
     def fake_ssh_exec(cmd, timeout=10):
         return (98, "DST_NOT_REGULAR\n", "")
+
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
     rc, out, err = app_module._ssh_ln("/src/x.mkv", "/dst/race_dir")
     assert rc == 98
@@ -1055,9 +1154,11 @@ def test_ssh_ln_shell_cmd_includes_dir_check_and_post_stat(monkeypatch):
     含 rm；只 echo marker + exit，让调用方提示 user 手工查 orphan。
     """
     captured = []
+
     def fake_ssh_exec(cmd, timeout=10):
         captured.append(cmd)
         return (0, "", "")
+
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
     app_module._ssh_ln("/src/x.mkv", "/dst/y.mkv")
     cmd = captured[0]
@@ -1074,9 +1175,11 @@ def test_ssh_ln_shell_cmd_no_basename_expansion(monkeypatch):
     """codex r6 + r7: shell cmd 不含 $(basename ...) 也不含自动 rm cleanup。
     src 含空格时不会引入 word-split 风险（因为根本没有 cleanup path 拼接）。"""
     captured = []
+
     def fake_ssh_exec(cmd, timeout=10):
         captured.append(cmd)
         return (0, "", "")
+
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
     app_module._ssh_ln("/dl/My Movie.mkv", "/media/My Show (2024)")
     cmd = captured[0]
@@ -1099,7 +1202,8 @@ def test_executor_ln_target_not_regular_includes_orphan_hint(monkeypatch, client
     monkeypatch.setattr(app_module, "_ssh_mkdir_p", lambda p: (0, "", ""))
     # ln 失败返 DST_NOT_REGULAR marker（race-into-dir）
     monkeypatch.setattr(
-        app_module, "_ssh_ln",
+        app_module,
+        "_ssh_ln",
         lambda s, d: (98, "DST_NOT_REGULAR\n", ""),
     )
 
@@ -1120,8 +1224,10 @@ def test_executor_ln_target_not_regular_includes_orphan_hint(monkeypatch, client
 def test_ssh_create_nfo_if_absent_detects_race_ln_into_dir(monkeypatch):
     """codex r5 BLOCKER 1: _ssh_create_nfo_if_absent pre-check 后 race-dir →
     post-stat [ -f final ] 抓到 + cleanup `<final>/<basename(tmp)>` + exit 98."""
+
     def fake_ssh_exec(cmd, timeout=30):
         return (98, "NFO_TARGET_NOT_REGULAR\n", "")
+
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
     ok, reason = app_module._ssh_create_nfo_if_absent("/m/x.nfo", "<a/>", verify_tmdb=False)
     assert ok is False
@@ -1131,9 +1237,11 @@ def test_ssh_create_nfo_if_absent_detects_race_ln_into_dir(monkeypatch):
 def test_ssh_create_nfo_if_absent_shell_cmd_includes_post_stat(monkeypatch):
     """codex r5 BLOCKER 1: shell 命令必须含 post-stat `[ ! -f final ]` race-protect."""
     captured = []
+
     def fake_ssh_exec(cmd, timeout=30):
         captured.append(cmd)
         return (0, "1\n", "")
+
     monkeypatch.setattr(app_module, "ssh_exec", fake_ssh_exec)
     app_module._ssh_create_nfo_if_absent("/m/x.nfo", "<a/>", verify_tmdb=True)
     cmd = captured[0]
@@ -1145,23 +1253,31 @@ def test_ssh_create_nfo_if_absent_shell_cmd_includes_post_stat(monkeypatch):
 
 def test_executor_rejects_incomplete_metadata_snapshot(monkeypatch):
     """缺 required key (如 tmdb_id) → failed incomplete_metadata_snapshot."""
-    monkeypatch.setattr(app_module, "_ssh_stat_paths", lambda paths: {
-        p: {"exists": True, "inode": 1, "size_bytes": 1, "mtime": 1} for p in paths
-    })
+    monkeypatch.setattr(
+        app_module,
+        "_ssh_stat_paths",
+        lambda paths: {p: {"exists": True, "inode": 1, "size_bytes": 1, "mtime": 1} for p in paths},
+    )
     payload = {
-        "items": [{
-            "src_path": "/dl/x.mkv",
-            "src_snapshot": {"inode": 1, "size_bytes": 1, "mtime": 1},
-            "media_type": "movie",
-            "computed_plan": {
-                "dst_dir": "/m/X (2024)", "dst_path": "/m/X (2024)/x.mkv",
-                "nfo_path": "/m/X (2024)/x.nfo", "tvshow_nfo_path": None,
-            },
-            "metadata_snapshot": {
-                # 缺 tmdb_id / season_number / episode_number
-                "title": "X", "year": 2024, "media_type": "movie",
-            },
-        }],
+        "items": [
+            {
+                "src_path": "/dl/x.mkv",
+                "src_snapshot": {"inode": 1, "size_bytes": 1, "mtime": 1},
+                "media_type": "movie",
+                "computed_plan": {
+                    "dst_dir": "/m/X (2024)",
+                    "dst_path": "/m/X (2024)/x.mkv",
+                    "nfo_path": "/m/X (2024)/x.nfo",
+                    "tvshow_nfo_path": None,
+                },
+                "metadata_snapshot": {
+                    # 缺 tmdb_id / season_number / episode_number
+                    "title": "X",
+                    "year": 2024,
+                    "media_type": "movie",
+                },
+            }
+        ],
     }
     result = app_module._organize_executor(payload)
     item = result["items"][0]
@@ -1236,8 +1352,9 @@ def test_confirm_nfo_appearing_after_preview_atomic_ln_handles_race(client, toke
 def test_preview_batch_too_large_returns_400(client, token, monkeypatch):
     """Phase 4B：> MAX_ORGANIZE_BATCH_ITEMS 直接 400 防爆 payload。"""
     _patch_organize_config(monkeypatch)
-    too_many = [{"src_path": f"/dl/{i}.mkv"}
-                for i in range(app_module.MAX_ORGANIZE_BATCH_ITEMS + 1)]
+    too_many = [
+        {"src_path": f"/dl/{i}.mkv"} for i in range(app_module.MAX_ORGANIZE_BATCH_ITEMS + 1)
+    ]
     resp = client.post(
         "/api/action/preview",
         json={"kind": "organize", "items": too_many},
@@ -1262,15 +1379,14 @@ def test_preview_mixed_batch_classifies_correctly(client, token, monkeypatch):
         out = {}
         for p in qpaths:
             if p in src_inodes:
-                out[p] = {"exists": True, "inode": src_inodes[p],
-                          "size_bytes": 1024, "mtime": 1000}
+                out[p] = {"exists": True, "inode": src_inodes[p], "size_bytes": 1024, "mtime": 1000}
             elif "linked" in p and p.endswith("linked.mkv"):
                 # dst path for /dl/linked.mkv → 同 inode
-                out[p] = {"exists": True, "inode": 300,
-                          "size_bytes": 1024, "mtime": 1000}
+                out[p] = {"exists": True, "inode": 300, "size_bytes": 1024, "mtime": 1000}
             else:
                 out[p] = {"exists": False}
         return out
+
     monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
 
     def fake_get_many(conn, qpaths, *, current_stats=None):
@@ -1279,18 +1395,22 @@ def test_preview_mixed_batch_classifies_correctly(client, token, monkeypatch):
             if "needs" in p:
                 out[p] = (None, "miss")
             else:
-                out[p] = (_CachedStub(
-                    title="Linked Movie" if "linked" in p else "Will Link",
-                    media_type="movie", year=2020,
-                    tmdb_id="222" if "linked" in p else "111",
-                ), "hit")
+                out[p] = (
+                    _CachedStub(
+                        title="Linked Movie" if "linked" in p else "Will Link",
+                        media_type="movie",
+                        year=2020,
+                        tmdb_id="222" if "linked" in p else "111",
+                    ),
+                    "hit",
+                )
         return out
+
     monkeypatch.setattr(app_module.metadata_cache, "get_many_by_path", fake_get_many)
 
     resp = client.post(
         "/api/action/preview",
-        json={"kind": "organize",
-              "items": [{"src_path": p} for p in paths]},
+        json={"kind": "organize", "items": [{"src_path": p} for p in paths]},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200
@@ -1316,14 +1436,21 @@ def test_preview_signed_token_locks_only_payload_items(client, token, monkeypatc
     """
     _patch_organize_config(monkeypatch)
     monkeypatch.setattr(
-        app_module, "_ssh_stat_paths",
-        lambda paths: {p: {"exists": True, "inode": 100,
-                           "size_bytes": 1024, "mtime": 1000}
-                       for p in paths},
+        app_module,
+        "_ssh_stat_paths",
+        lambda paths: {
+            p: {"exists": True, "inode": 100, "size_bytes": 1024, "mtime": 1000} for p in paths
+        },
     )
-    _patch_cache(monkeypatch, _CachedStub(
-        title="M", media_type="movie", year=2020, tmdb_id="111",
-    ))
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="M",
+            media_type="movie",
+            year=2020,
+            tmdb_id="111",
+        ),
+    )
 
     resp = client.post(
         "/api/action/preview",
@@ -1352,20 +1479,25 @@ def test_preview_duplicate_dst_within_batch_marks_conflict(client, token, monkey
         out = {}
         for p in qpaths:
             if p in src_inodes:
-                out[p] = {"exists": True, "inode": src_inodes[p],
-                          "size_bytes": 1024, "mtime": 1000}
+                out[p] = {"exists": True, "inode": src_inodes[p], "size_bytes": 1024, "mtime": 1000}
             else:
                 out[p] = {"exists": False}
         return out
+
     monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
-    _patch_cache(monkeypatch, _CachedStub(
-        title="Same Movie", media_type="movie", year=2020, tmdb_id="111",
-    ))
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="Same Movie",
+            media_type="movie",
+            year=2020,
+            tmdb_id="111",
+        ),
+    )
 
     resp = client.post(
         "/api/action/preview",
-        json={"kind": "organize",
-              "items": [{"src_path": p} for p in paths]},
+        json={"kind": "organize", "items": [{"src_path": p} for p in paths]},
         headers={"Authorization": f"Bearer {token}"},
     )
     body = resp.get_json()
@@ -1389,21 +1521,30 @@ def test_preview_batch_uses_minimal_ssh_calls(client, token, monkeypatch):
     paths = [f"/dl/m{i}.mkv" for i in range(n)]
 
     stat_calls = {"n": 0}
+
     def fake_stat(qpaths):
         stat_calls["n"] += 1
-        return {p: {"exists": True, "inode": 100 + i,
-                    "size_bytes": 1024, "mtime": 1000}
-                if i < n else {"exists": False}
-                for i, p in enumerate(qpaths)}
+        return {
+            p: {"exists": True, "inode": 100 + i, "size_bytes": 1024, "mtime": 1000}
+            if i < n
+            else {"exists": False}
+            for i, p in enumerate(qpaths)
+        }
+
     monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
-    _patch_cache(monkeypatch, _CachedStub(
-        title="M", media_type="movie", year=2020, tmdb_id="111",
-    ))
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="M",
+            media_type="movie",
+            year=2020,
+            tmdb_id="111",
+        ),
+    )
 
     resp = client.post(
         "/api/action/preview",
-        json={"kind": "organize",
-              "items": [{"src_path": p} for p in paths]},
+        json={"kind": "organize", "items": [{"src_path": p} for p in paths]},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200
@@ -1415,17 +1556,17 @@ def test_preview_all_unidentified_returns_zero_no_token(client, token, monkeypat
     """全部 needs_identify → items_count=0 + 不签名（不创建 destructive_actions row）."""
     _patch_organize_config(monkeypatch)
     monkeypatch.setattr(
-        app_module, "_ssh_stat_paths",
-        lambda paths: {p: {"exists": True, "inode": 100,
-                           "size_bytes": 1024, "mtime": 1000}
-                       for p in paths},
+        app_module,
+        "_ssh_stat_paths",
+        lambda paths: {
+            p: {"exists": True, "inode": 100, "size_bytes": 1024, "mtime": 1000} for p in paths
+        },
     )
     _patch_cache(monkeypatch, None)  # 全部 miss
 
     resp = client.post(
         "/api/action/preview",
-        json={"kind": "organize",
-              "items": [{"src_path": f"/dl/{i}.mkv"} for i in range(5)]},
+        json={"kind": "organize", "items": [{"src_path": f"/dl/{i}.mkv"} for i in range(5)]},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200
@@ -1451,30 +1592,39 @@ def test_confirm_organize_above_threshold_returns_202_background(client, token, 
 
     def fake_stat(paths):
         return {
-            p: ({"exists": True, "inode": 1000 + i, "size_bytes": 1024, "mtime": 1000}
+            p: (
+                {"exists": True, "inode": 1000 + i, "size_bytes": 1024, "mtime": 1000}
                 if p.startswith("/dl/m") and p in src_paths
-                else {"exists": False})
+                else {"exists": False}
+            )
             for i, p in enumerate(paths)
         }
+
     monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
-    _patch_cache(monkeypatch, _CachedStub(
-        title="Movie", media_type="movie", year=2024, tmdb_id="111",
-    ))
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="Movie",
+            media_type="movie",
+            year=2024,
+            tmdb_id="111",
+        ),
+    )
 
     # mock organize_runner.start_organize_executor 不真起 thread
     started_with = {}
-    def fake_start(*, db_path, action_id, payload, execute_one_item,
-                   selected_indices=None):
+
+    def fake_start(*, db_path, action_id, payload, execute_one_item, selected_indices=None):
         started_with["action_id"] = action_id
         started_with["items_count"] = len(payload["items"])
         started_with["selected_indices"] = selected_indices
+
     monkeypatch.setattr(organize_runner, "start_organize_executor", fake_start)
 
     # Preview
     resp = client.post(
         "/api/action/preview",
-        json={"kind": "organize",
-              "items": [{"src_path": p} for p in src_paths]},
+        json={"kind": "organize", "items": [{"src_path": p} for p in src_paths]},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200
@@ -1484,8 +1634,7 @@ def test_confirm_organize_above_threshold_returns_202_background(client, token, 
     # Confirm with selected_indices subset
     resp2 = client.post(
         "/api/action/confirm",
-        json={"action_id": action_id, "signed_token": signed,
-              "selected_indices": [0, 1, 3]},
+        json={"action_id": action_id, "signed_token": signed, "selected_indices": [0, 1, 3]},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp2.status_code == 202
@@ -1506,32 +1655,44 @@ def test_confirm_organize_at_threshold_uses_inline_path(client, token, monkeypat
     src_paths = [f"/dl/m{i}.mkv" for i in range(n)]
 
     def fake_stat(paths):
-        return {p: ({"exists": True, "inode": 1000 + i,
-                     "size_bytes": 1024, "mtime": 1000}
-                    if p in src_paths
-                    else {"exists": False})
-                for i, p in enumerate(paths)}
+        return {
+            p: (
+                {"exists": True, "inode": 1000 + i, "size_bytes": 1024, "mtime": 1000}
+                if p in src_paths
+                else {"exists": False}
+            )
+            for i, p in enumerate(paths)
+        }
+
     monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
-    _patch_cache(monkeypatch, _CachedStub(
-        title="Movie", media_type="movie", year=2024, tmdb_id="111",
-    ))
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="Movie",
+            media_type="movie",
+            year=2024,
+            tmdb_id="111",
+        ),
+    )
 
     # 如果错走 background path 会调 start_organize_executor — patch 让它 fail loudly
     def boom_start(**_kw):
         raise AssertionError("should NOT take background path at threshold boundary")
+
     monkeypatch.setattr(organize_runner, "start_organize_executor", boom_start)
 
     # 走 inline path → executor 真跑 → 我们 patch 它返 succeeded
     inline_calls = {"n": 0}
+
     def fake_one_item(item, expected_metadata):
         inline_calls["n"] += 1
         return {"src_path": item["src_path"], "status": "succeeded"}
+
     monkeypatch.setattr(app_module, "_organize_executor_one_item", fake_one_item)
 
     resp = client.post(
         "/api/action/preview",
-        json={"kind": "organize",
-              "items": [{"src_path": p} for p in src_paths]},
+        json={"kind": "organize", "items": [{"src_path": p} for p in src_paths]},
         headers={"Authorization": f"Bearer {token}"},
     )
     body = resp.get_json()
@@ -1558,20 +1719,27 @@ def test_action_status_returns_404_for_missing(client, token):
 def test_action_status_returns_progress_for_running(client, token, monkeypatch):
     """worker 跑期间 status 端点能读到 running + items_completed。"""
     from services import organize_runner
+
     # 直接 mock organize_runner.get_organize_status 返 progress payload
     def fake_status(conn, action_id):
         if action_id == "test-action-id":
             return {
-                "action_id": action_id, "kind": "organize",
+                "action_id": action_id,
+                "kind": "organize",
                 "status": "running",
-                "items_total": 10, "items_completed": 4,
+                "items_total": 10,
+                "items_completed": 4,
                 "current_item": "/dl/m4.mkv",
                 "status_counts": {"succeeded": 4},
                 "result": {"items_completed": 4},
-                "started_at": 1000, "completed_at": None,
-                "expires_at": 2000, "error": None, "recovery_hint": None,
+                "started_at": 1000,
+                "completed_at": None,
+                "expires_at": 2000,
+                "error": None,
+                "recovery_hint": None,
             }
         return None
+
     monkeypatch.setattr(organize_runner, "get_organize_status", fake_status)
 
     resp = client.get(
@@ -1590,13 +1758,16 @@ def test_action_abort_sets_flag_for_running_action(client, token, monkeypatch):
     from services import organize_runner
 
     monkeypatch.setattr(
-        organize_runner, "get_organize_status",
+        organize_runner,
+        "get_organize_status",
         lambda conn, aid: {"status": "running"} if aid == "abc" else None,
     )
     abort_calls = []
+
     def fake_request_abort(aid):
         abort_calls.append(aid)
         return True
+
     monkeypatch.setattr(organize_runner, "request_abort", fake_request_abort)
 
     resp = client.post(
@@ -1612,8 +1783,10 @@ def test_action_abort_sets_flag_for_running_action(client, token, monkeypatch):
 def test_action_abort_rejects_non_running_action(client, token, monkeypatch):
     """已 terminal 的 action 不能 abort → 409。"""
     from services import organize_runner
+
     monkeypatch.setattr(
-        organize_runner, "get_organize_status",
+        organize_runner,
+        "get_organize_status",
         lambda conn, aid: {"status": "succeeded"},
     )
     resp = client.post(
@@ -1635,26 +1808,37 @@ def test_confirm_inline_organize_respects_selected_indices(client, token, monkey
     src_paths = [f"/dl/m{i}.mkv" for i in range(n)]
 
     def fake_stat(paths):
-        return {p: ({"exists": True, "inode": 1000 + i,
-                     "size_bytes": 1024, "mtime": 1000}
-                    if p in src_paths
-                    else {"exists": False})
-                for i, p in enumerate(paths)}
+        return {
+            p: (
+                {"exists": True, "inode": 1000 + i, "size_bytes": 1024, "mtime": 1000}
+                if p in src_paths
+                else {"exists": False}
+            )
+            for i, p in enumerate(paths)
+        }
+
     monkeypatch.setattr(app_module, "_ssh_stat_paths", fake_stat)
-    _patch_cache(monkeypatch, _CachedStub(
-        title="Movie", media_type="movie", year=2024, tmdb_id="111",
-    ))
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="Movie",
+            media_type="movie",
+            year=2024,
+            tmdb_id="111",
+        ),
+    )
 
     inline_calls = []
+
     def fake_one_item(item, expected_metadata):
         inline_calls.append(item["src_path"])
         return {"src_path": item["src_path"], "status": "succeeded"}
+
     monkeypatch.setattr(app_module, "_organize_executor_one_item", fake_one_item)
 
     resp = client.post(
         "/api/action/preview",
-        json={"kind": "organize",
-              "items": [{"src_path": p} for p in src_paths]},
+        json={"kind": "organize", "items": [{"src_path": p} for p in src_paths]},
         headers={"Authorization": f"Bearer {token}"},
     )
     body = resp.get_json()
@@ -1663,8 +1847,7 @@ def test_confirm_inline_organize_respects_selected_indices(client, token, monkey
     # 只勾 index 0 + 2
     resp2 = client.post(
         "/api/action/confirm",
-        json={"action_id": action_id, "signed_token": signed,
-              "selected_indices": [0, 2]},
+        json={"action_id": action_id, "signed_token": signed, "selected_indices": [0, 2]},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp2.status_code == 200
@@ -1679,11 +1862,16 @@ def test_confirm_inline_organize_respects_selected_indices(client, token, monkey
 def test_confirm_selected_indices_out_of_range_returns_400(client, token, monkeypatch):
     """codex r1 IMP6: selected_indices 含越界 index → 400。"""
     _patch_organize_config(monkeypatch)
-    monkeypatch.setattr(app_module, "_ssh_stat_paths",
-                        lambda paths: _src_stat("/dl/x.mkv"))
-    _patch_cache(monkeypatch, _CachedStub(
-        title="Movie", media_type="movie", year=2024, tmdb_id="111",
-    ))
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", lambda paths: _src_stat("/dl/x.mkv"))
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="Movie",
+            media_type="movie",
+            year=2024,
+            tmdb_id="111",
+        ),
+    )
     resp = client.post(
         "/api/action/preview",
         json={"kind": "organize", "items": [{"src_path": "/dl/x.mkv"}]},
@@ -1694,8 +1882,11 @@ def test_confirm_selected_indices_out_of_range_returns_400(client, token, monkey
     # selected_indices=[5] 但 payload 只有 1 item → 越界
     resp2 = client.post(
         "/api/action/confirm",
-        json={"action_id": body["action_id"], "signed_token": body["signed_token"],
-              "selected_indices": [5]},
+        json={
+            "action_id": body["action_id"],
+            "signed_token": body["signed_token"],
+            "selected_indices": [5],
+        },
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp2.status_code == 400
@@ -1706,21 +1897,27 @@ def test_inline_organize_rejected_when_background_active(client, token, monkeypa
     """codex r3 BLOCKER 2: 一个 background organize 在跑时, inline organize 应被拒
     (避免并发 hardlink/NFO/qBit 副作用)."""
     from services import organize_runner
+
     _patch_organize_config(monkeypatch)
-    monkeypatch.setattr(app_module, "_ssh_stat_paths",
-                        lambda paths: _src_stat("/dl/x.mkv"))
-    _patch_cache(monkeypatch, _CachedStub(
-        title="Movie", media_type="movie", year=2024, tmdb_id="111",
-    ))
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", lambda paths: _src_stat("/dl/x.mkv"))
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="Movie",
+            media_type="movie",
+            year=2024,
+            tmdb_id="111",
+        ),
+    )
 
     # 模拟已有 background organize 在跑：让 try_acquire_inline_lock 返 False
     monkeypatch.setattr(organize_runner, "try_acquire_inline_lock", lambda: False)
-    monkeypatch.setattr(organize_runner, "get_active_action_id",
-                        lambda: "background-action-xyz")
+    monkeypatch.setattr(organize_runner, "get_active_action_id", lambda: "background-action-xyz")
 
     # _organize_executor_one_item 不应被调用 (lock acquire 失败前)
     boom = lambda *a, **k: (_ for _ in ()).throw(
-        AssertionError("should NOT execute item when lock unavailable"))
+        AssertionError("should NOT execute item when lock unavailable")
+    )
     monkeypatch.setattr(app_module, "_organize_executor_one_item", boom)
 
     resp = client.post(
@@ -1744,11 +1941,16 @@ def test_inline_organize_rejected_when_background_active(client, token, monkeypa
 def test_confirm_selected_indices_rejects_bool(client, token, monkeypatch):
     """codex r2 NIT: JSON true/false 不应作为合法 index（即使 Python bool 是 int 子类）."""
     _patch_organize_config(monkeypatch)
-    monkeypatch.setattr(app_module, "_ssh_stat_paths",
-                        lambda paths: _src_stat("/dl/x.mkv"))
-    _patch_cache(monkeypatch, _CachedStub(
-        title="Movie", media_type="movie", year=2024, tmdb_id="111",
-    ))
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", lambda paths: _src_stat("/dl/x.mkv"))
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="Movie",
+            media_type="movie",
+            year=2024,
+            tmdb_id="111",
+        ),
+    )
     resp = client.post(
         "/api/action/preview",
         json={"kind": "organize", "items": [{"src_path": "/dl/x.mkv"}]},
@@ -1758,8 +1960,11 @@ def test_confirm_selected_indices_rejects_bool(client, token, monkeypatch):
 
     resp2 = client.post(
         "/api/action/confirm",
-        json={"action_id": body["action_id"], "signed_token": body["signed_token"],
-              "selected_indices": [True]},   # bool 而非 int
+        json={
+            "action_id": body["action_id"],
+            "signed_token": body["signed_token"],
+            "selected_indices": [True],
+        },  # bool 而非 int
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp2.status_code == 400
@@ -1769,29 +1974,43 @@ def test_confirm_selected_indices_rejects_bool(client, token, monkeypatch):
 def test_confirm_concurrent_organize_rollbacks_to_pending(client, token, monkeypatch):
     """codex r1 NIT1: 并发 organize 撞上 → rollback_to_pending（不浪费 preview）."""
     from services import organize_runner
+
     _patch_organize_config(monkeypatch)
 
     n = app_module.ORGANIZE_BATCH_INLINE_THRESHOLD + 2
     src_paths = [f"/dl/m{i}.mkv" for i in range(n)]
-    monkeypatch.setattr(app_module, "_ssh_stat_paths",
-                        lambda paths: {p: ({"exists": True, "inode": 1000 + i,
-                                            "size_bytes": 1024, "mtime": 1000}
-                                           if p in src_paths
-                                           else {"exists": False})
-                                       for i, p in enumerate(paths)})
-    _patch_cache(monkeypatch, _CachedStub(
-        title="Movie", media_type="movie", year=2024, tmdb_id="111",
-    ))
+    monkeypatch.setattr(
+        app_module,
+        "_ssh_stat_paths",
+        lambda paths: {
+            p: (
+                {"exists": True, "inode": 1000 + i, "size_bytes": 1024, "mtime": 1000}
+                if p in src_paths
+                else {"exists": False}
+            )
+            for i, p in enumerate(paths)
+        },
+    )
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="Movie",
+            media_type="movie",
+            year=2024,
+            tmdb_id="111",
+        ),
+    )
+
     # 模拟 start_organize_executor 抛 ConcurrentOrganizeError
     def fake_start(**_kw):
         raise organize_runner.ConcurrentOrganizeError("another in progress")
+
     monkeypatch.setattr(organize_runner, "start_organize_executor", fake_start)
     monkeypatch.setattr(organize_runner, "get_active_action_id", lambda: "other-action")
 
     resp = client.post(
         "/api/action/preview",
-        json={"kind": "organize",
-              "items": [{"src_path": p} for p in src_paths]},
+        json={"kind": "organize", "items": [{"src_path": p} for p in src_paths]},
         headers={"Authorization": f"Bearer {token}"},
     )
     body = resp.get_json()
@@ -1831,7 +2050,7 @@ def test_threadsafe_wrapper_pushes_app_context_in_worker_thread():
     不要 mock app_context 自己，要验证 wrapper 真的 push 了一个 context。
     """
     import threading
-    from unittest.mock import patch
+
     from flask import has_app_context
 
     captured: dict = {}
@@ -1847,10 +2066,11 @@ def test_threadsafe_wrapper_pushes_app_context_in_worker_thread():
         try:
             with patch.object(app_module, "_organize_executor_one_item", fake_inner):
                 r = app_module._organize_executor_one_item_threadsafe(
-                    {"src_path": "/test/x.mkv"}, None,
+                    {"src_path": "/test/x.mkv"},
+                    None,
                 )
             captured["result"] = r
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             captured["error"] = f"{type(e).__name__}: {e}"
 
     t = threading.Thread(target=run)
@@ -1887,19 +2107,26 @@ def test_confirm_route_dispatches_background_via_threadsafe_wrapper(client, toke
         for i in range(6)
     }
     monkeypatch.setattr(
-        app_module, "_ssh_stat_paths",
+        app_module,
+        "_ssh_stat_paths",
         lambda paths: {p: stat_now.get(p, {"exists": False}) for p in paths},
     )
 
     cached_by_path = {
         f"/d/x{i}.mkv": _CachedStub(
-            title=f"Movie{i}", media_type="movie", year=2024, tmdb_id=f"tmdb{i}",
+            title=f"Movie{i}",
+            media_type="movie",
+            year=2024,
+            tmdb_id=f"tmdb{i}",
         )
         for i in range(6)
     }
     monkeypatch.setattr(
-        app_module.metadata_cache, "get_many_by_path",
-        lambda conn, paths, *, current_stats=None: {p: (cached_by_path[p], "hit") for p in paths if p in cached_by_path},
+        app_module.metadata_cache,
+        "get_many_by_path",
+        lambda conn, paths, *, current_stats=None: {
+            p: (cached_by_path[p], "hit") for p in paths if p in cached_by_path
+        },
     )
 
     # preview
