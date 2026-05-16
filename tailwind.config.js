@@ -4,6 +4,14 @@ module.exports = {
     "./templates/**/*.html",
     "./static/js/**/*.js",
   ],
+  safelist: [
+    // 动态构造的 class 名（partials 用 `class="sb-dot-{{ p.dot }}"`），
+    // JIT 字面扫描看不到 "sb-dot-ok" 等真实类名，必须 safelist 保留。
+    "sb-dot-ok",
+    "sb-dot-warn",
+    "sb-dot-err",
+    "sb-dot-gray",
+  ],
   theme: {
     extend: {
       colors: {
