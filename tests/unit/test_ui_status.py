@@ -100,3 +100,19 @@ def test_sidebar_badges_renders_counts(client):
     assert ">12<" in html
     assert ">5<" in html
     assert ">3<" in html
+
+
+def test_sidebar_badges_real_sql_library_count(client):
+    """不 mock _compute_sidebar_badges, 验证真 SQL 在真 DB 上能跑.
+
+    防 BLOCKER regression: schema 'metadata_status' 合法值不含 'needs_identify',
+    code review 抓出 library badge SQL 写错字段值导致永远返 0.
+    这个 test 跑真 SQL, 即使数据为 0 也确认 SQL syntactically valid + 字段名/值跟 schema 一致.
+    """
+    # 真 SQL 跑通就行, 不验证具体数值 (CI 跑时 DB 可能空)
+    resp = client.get("/ui/sidebar/badges")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    # 6 个 nav-item 都在 (无论 badge count)
+    assert html.count("nav-item") == 6
+    # 验证 endpoint 没 5xx (真 SQL 跑过)

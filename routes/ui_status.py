@@ -17,9 +17,13 @@ ui_status_bp = Blueprint("ui_status", __name__, url_prefix="/ui")
 def _require_token(view):
     """Wrap a view with require_token from app module.
 
+    NOTE (Phase A Task 4 followup): currently UNUSED — 3 个 endpoint 在
+    Phase A transitional state 不强制 token. Task 4 整合 / 路由时统一加
+    @_require_token decorator. 不要在 Phase A 末删, 否则 Task 4 实施时还要重写.
+
     Import deferred to avoid circular import at module load.
     """
-    from app import require_token  # noqa: PLC0415 — deferred
+    from app import require_token  # deferred (避免 routes/ 在 app init 前 import app)
 
     return require_token(view)
 
@@ -27,7 +31,7 @@ def _require_token(view):
 @ui_status_bp.route("/status/providers", methods=["GET"])
 def status_providers():
     """Provider 4 段 (TMDB / DeepSeek / Emby / qBit) HTML fragment."""
-    from app import _compute_providers_status  # noqa: PLC0415
+    from app import _compute_providers_status  # deferred (循环 import 避免)
 
     raw = _compute_providers_status()
     providers = _to_status_segments(raw)
@@ -99,7 +103,7 @@ def _aggregate_running_workers() -> list[dict]:
 
     返回 [{"kind": "scanner", "done": 234, "total": 1797, "id": 7}].
     """
-    from app import get_db  # noqa: PLC0415
+    from app import get_db  # deferred (循环 import 避免)
 
     db = get_db()
     workers: list[dict] = []
@@ -125,20 +129,24 @@ def _compute_sidebar_badges() -> dict:
 
     返回 {"library": N, "dedup": N, "organize": N}.
     """
-    from app import get_db  # noqa: PLC0415
+    from app import get_db  # deferred (循环 import 避免)
 
     db = get_db()
     badges: dict = {}
 
-    # 媒体库未识别 — metadata_status = 'needs_identify'
+    # 媒体库未识别 / 需 review
+    # Spec Section 2.3: badge 显示"待用户处理"的库项 = 未绑 TMDB (tmdb_id IS NULL)
+    # 或识别后状态为 needs_review / failed (LLM 抓不准 / TMDB 调用失败)
+    # 注意: 'needs_identify' 不是合法 metadata_status 值 (schema CHECK: ok/needs_review/failed/stale)
     row = db.execute(
-        "SELECT count(*) AS c FROM media_files WHERE metadata_status = 'needs_identify'"
+        "SELECT count(*) AS c FROM media_files "
+        "WHERE tmdb_id IS NULL OR metadata_status IN ('needs_review', 'failed')"
     ).fetchone()
     badges["library"] = row["c"] if row else 0
 
     # dedup 待处理 (group count)
     try:
-        from services.dedup import count_unresolved_groups  # noqa: PLC0415
+        from services.dedup import count_unresolved_groups  # deferred (循环 import 避免)
 
         badges["dedup"] = count_unresolved_groups(db)
     except (ImportError, AttributeError):
