@@ -1,0 +1,28 @@
+<div class="p-4 space-y-3">
+    <h3 class="text-lg font-semibold text-slate-100">📝 NFO 写入预览</h3>
+
+    {% if preview.nfos %}
+    <p class="text-sm text-slate-300">{{ preview.nfos | length }} 个 NFO 待写入</p>
+    {% for nfo in preview.nfos[:5] %}
+    <details class="bg-slate-900 p-2 rounded">
+        <summary class="text-xs text-slate-400 cursor-pointer">{{ nfo.path | default('NFO ' + loop.index|string) }}</summary>
+        <pre class="text-xs text-slate-300 mt-2 overflow-auto max-h-40">{{ nfo.content | default(nfo) | e }}</pre>
+    </details>
+    {% endfor %}
+    {% endif %}
+
+    <div class="pt-3 border-t border-slate-700 flex gap-2">
+        <button type="button"
+                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded"
+                hx-post="/ui/drawer/nfo_write/confirm"
+                hx-vals='{"action_id":"{{ action_id }}","signed_token":"{{ signed_token }}"}'
+                hx-target="#drawer-content"
+                hx-swap="innerHTML">
+            ✓ 确认写入
+        </button>
+        <button @click="drawerOpen = false" type="button"
+                class="px-4 py-2 bg-slate-700 text-slate-200 rounded">
+            取消
+        </button>
+    </div>
+</div>
