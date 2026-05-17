@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from functools import wraps
 
-from flask import Blueprint, render_template
+from flask import Blueprint, make_response, render_template
 
 ui_status_bp = Blueprint("ui_status", __name__, url_prefix="/ui")
 
@@ -40,7 +40,17 @@ def status_providers():
 
     raw = get_cached_providers_status(force=False)
     providers = _to_status_segments(raw)
-    return render_template("partials/status/providers.html", providers=providers)
+
+    response = make_response(render_template("partials/status/providers.html", providers=providers))
+
+    # Phase E: 任一 provider auth_failed → toast warning (once per response)
+    for p in providers:
+        if p.get("dot") == "warn" and "401" in (p.get("detail") or ""):
+            from services.toast import add_toast
+            add_toast(response, "warning", f"{p['name']} 认证失败 — 去 /settings 检查 key")
+            break  # 一次只 fire 一个 toast
+
+    return response
 
 
 @ui_status_bp.route("/status/workers", methods=["GET"])
