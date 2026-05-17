@@ -45,5 +45,18 @@
     <!-- Toast host (Phase E 实现，A 期空 div) -->
     <div id="toast-host" class="fixed bottom-12 right-4 z-50"></div>
 
+    <!-- HTMX Authorization header injector.
+         Token stored in localStorage.nas_token by the legacy app.js login flow.
+         htmx:configRequest fires before every hx-* request, attaching the Bearer
+         token so /ui/* endpoints (which require @_require_token) work from the browser. -->
+    <script>
+        document.body.addEventListener('htmx:configRequest', function(evt) {
+            var token = localStorage.getItem('nas_token');
+            if (token) {
+                evt.detail.headers['Authorization'] = 'Bearer ' + token;
+            }
+        });
+    </script>
+
 </body>
 </html>

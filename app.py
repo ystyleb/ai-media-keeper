@@ -3804,6 +3804,23 @@ def _compute_providers_status() -> dict:
     }
 
 
+def get_cached_providers_status(force: bool = False) -> dict:
+    """Provider status with 60s TTL cache.
+
+    Shared by /api/providers/status (JSON) and /ui/status/providers (HTML)
+    so multi-tab × 60s poll does NOT multiply DeepSeek probe calls.
+    """
+    now = time.time()
+    cache = _PROVIDERS_STATUS_CACHE
+    age = now - cache["checked_at"]
+    if not force and cache["data"] is not None and age < _PROVIDERS_STATUS_TTL:
+        return cache["data"]
+    data = _compute_providers_status()
+    cache["data"] = data
+    cache["checked_at"] = now
+    return data
+
+
 @app.route("/api/providers/status", methods=["GET"])
 @require_token
 def providers_status():
@@ -3815,16 +3832,14 @@ def providers_status():
     qBit 走 WebUI /api/v2/auth/login + /api/v2/torrents/info）。
     """
     force = request.args.get("refresh") in ("1", "true", "yes")
-    now = time.time()
-    cache = _PROVIDERS_STATUS_CACHE
-    age = now - cache["checked_at"]
-    if not force and cache["data"] is not None and age < _PROVIDERS_STATUS_TTL:
-        resp = jsonify({"providers": cache["data"], "cached": True, "age": round(age, 1)})
-    else:
-        data = _compute_providers_status()
-        cache["data"] = data
-        cache["checked_at"] = now
-        resp = jsonify({"providers": data, "cached": False, "age": 0.0})
+    was_cached = (
+        not force
+        and _PROVIDERS_STATUS_CACHE["data"] is not None
+        and (time.time() - _PROVIDERS_STATUS_CACHE["checked_at"]) < _PROVIDERS_STATUS_TTL
+    )
+    data = get_cached_providers_status(force=force)
+    age = round(time.time() - _PROVIDERS_STATUS_CACHE["checked_at"], 1)
+    resp = jsonify({"providers": data, "cached": was_cached, "age": age})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 

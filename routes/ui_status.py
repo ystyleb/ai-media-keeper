@@ -9,36 +9,42 @@
 
 from __future__ import annotations
 
+from functools import wraps
+
 from flask import Blueprint, render_template
 
 ui_status_bp = Blueprint("ui_status", __name__, url_prefix="/ui")
 
 
 def _require_token(view):
-    """Wrap a view with require_token from app module.
+    """Wrap a view with require_token from app module (deferred to avoid circular import).
 
-    NOTE (Phase A Task 4 followup): currently UNUSED — 3 个 endpoint 在
-    Phase A transitional state 不强制 token. Task 4 整合 / 路由时统一加
-    @_require_token decorator. 不要在 Phase A 末删, 否则 Task 4 实施时还要重写.
-
-    Import deferred to avoid circular import at module load.
+    Import is deferred because routes/ui_status.py is loaded during app.py init
+    (register_blueprint), before app.py finishes executing. A top-level
+    `from app import require_token` would trigger a circular import at that point.
+    Deferring to call time is safe: by the time any HTTP request arrives,
+    app.py is fully initialized.
     """
-    from app import require_token  # deferred (避免 routes/ 在 app init 前 import app)
-
-    return require_token(view)
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        from app import require_token  # deferred (循环 import 避免)
+        return require_token(view)(*args, **kwargs)
+    return wrapped
 
 
 @ui_status_bp.route("/status/providers", methods=["GET"])
+@_require_token
 def status_providers():
     """Provider 4 段 (TMDB / DeepSeek / Emby / qBit) HTML fragment."""
-    from app import _compute_providers_status  # deferred (循环 import 避免)
+    from app import get_cached_providers_status  # deferred + cached (60s TTL)
 
-    raw = _compute_providers_status()
+    raw = get_cached_providers_status(force=False)
     providers = _to_status_segments(raw)
     return render_template("partials/status/providers.html", providers=providers)
 
 
 @ui_status_bp.route("/status/workers", methods=["GET"])
+@_require_token
 def status_workers():
     """运行中的 worker 列表 HTML fragment."""
     workers = _aggregate_running_workers()
@@ -46,6 +52,7 @@ def status_workers():
 
 
 @ui_status_bp.route("/sidebar/badges", methods=["GET"])
+@_require_token
 def sidebar_badges():
     """Sidebar nav 每项的 badge 计数."""
     badges = _compute_sidebar_badges()
@@ -57,7 +64,7 @@ def sidebar_badges():
 
 _DOT_BY_STATE = {
     "ok": "ok",
-    "auth_failed": "err",
+    "auth_failed": "warn",   # 401 是 warn 不是 fatal error
     "not_configured": "gray",
     "unreachable": "err",
     "error": "err",
@@ -84,8 +91,8 @@ def _to_status_segments(raw: dict) -> list[dict]:
         elif state == "unreachable":
             detail = "无连接"
         tooltip = f"{name_by_key[key]}: {state}"
-        if entry.get("last_check"):
-            tooltip += f" @ {entry['last_check']}"
+        if entry.get("checked_at"):
+            tooltip += f" @ {entry['checked_at']}"
         segments.append({
             "name": name_by_key[key],
             "dot": dot,
@@ -96,19 +103,38 @@ def _to_status_segments(raw: dict) -> list[dict]:
 
 
 def _aggregate_running_workers() -> list[dict]:
-    """聚合 scan_runs 中 running 的任务.
+    """聚合 auto_organize_runs + scan_runs 中 active 的任务.
 
-    注意: organize_runs 表在此 schema 版本为空骨架 (Phase 4B 完整实现时补全).
-    scan_runs 列名: id / files_total / files_done / status / started_at.
+    auto_organize_runs 列名: qbit_hash / status / torrent_name / created_at
+    scan_runs 列名: id / files_total / files_done / status / started_at
 
-    返回 [{"kind": "scanner", "done": 234, "total": 1797, "id": 7}].
+    返回 [{"kind": "auto-organize", "done": 0, "total": 0, "id": "abc123"},
+           {"kind": "scanner", "done": 234, "total": 1797, "id": 7}].
     """
     from app import get_db  # deferred (循环 import 避免)
 
     db = get_db()
     workers: list[dict] = []
 
-    # scan_runs (background scanner) — 用真实列名 files_total / files_done
+    # auto_organize_runs (Phase 4C cron worker)
+    try:
+        rows = db.execute(
+            "SELECT qbit_hash, status FROM auto_organize_runs "
+            "WHERE status IN ('pending', 'organizing') "
+            "ORDER BY created_at DESC LIMIT 5"
+        ).fetchall()
+        for r in rows:
+            qbit_hash = r["qbit_hash"] or ""
+            workers.append({
+                "kind": "auto-organize",
+                "done": 0,   # auto_organize_runs 没 progress 字段
+                "total": 0,
+                "id": qbit_hash[:8] if qbit_hash else "?",
+            })
+    except Exception:
+        pass  # table may not exist in older DBs
+
+    # scan_runs (background scanner)
     rows = db.execute(
         "SELECT id, files_total, files_done FROM scan_runs WHERE status = 'running' "
         "ORDER BY started_at DESC LIMIT 3"
@@ -153,10 +179,13 @@ def _compute_sidebar_badges() -> dict:
         badges["dedup"] = 0
 
     # organize 进行中（pending + organizing）
-    row = db.execute(
-        "SELECT count(*) AS c FROM auto_organize_runs "
-        "WHERE status IN ('pending', 'organizing')"
-    ).fetchone()
-    badges["organize"] = row["c"] if row else 0
+    try:
+        row = db.execute(
+            "SELECT count(*) AS c FROM auto_organize_runs "
+            "WHERE status IN ('pending', 'organizing')"
+        ).fetchone()
+        badges["organize"] = row["c"] if row else 0
+    except Exception:
+        badges["organize"] = 0
 
     return badges

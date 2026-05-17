@@ -1046,20 +1046,37 @@ def group_to_dict(g: DedupGroup) -> dict:
 
 
 def count_unresolved_groups(db) -> int:
-    """Count dedup groups with >= 2 physical inodes that user hasn't resolved yet.
+    """Count dedup groups (movie + TV) with >= 2 physical inodes.
+
+    Movie group key: tmdb_id (WHERE media_type='movie').
+    TV group key: tmdb_id + season_number + episode_number (WHERE media_type='tv').
+    Both use schema columns: tmdb_id / season_number / episode_number / media_type / inode.
 
     Phase A 占位实现 - Phase B/C 拆 dedup page 时按 spec 精确化.
     """
     try:
-        row = db.execute(
+        movie_row = db.execute(
             """SELECT count(*) AS c FROM (
-                SELECT tmdb_movie_id, season_number, episode_number
+                SELECT tmdb_id
                 FROM media_files
-                WHERE tmdb_movie_id IS NOT NULL
-                GROUP BY tmdb_movie_id, season_number, episode_number
+                WHERE tmdb_id IS NOT NULL AND media_type = 'movie'
+                  AND metadata_status = 'ok'
+                GROUP BY tmdb_id
                 HAVING count(DISTINCT inode) >= 2
             )"""
         ).fetchone()
-        return row["c"] if row else 0
+        tv_row = db.execute(
+            """SELECT count(*) AS c FROM (
+                SELECT tmdb_id, season_number, episode_number
+                FROM media_files
+                WHERE tmdb_id IS NOT NULL AND media_type = 'tv'
+                  AND metadata_status = 'ok'
+                GROUP BY tmdb_id, season_number, episode_number
+                HAVING count(DISTINCT inode) >= 2
+            )"""
+        ).fetchone()
+        movie_count = movie_row["c"] if movie_row else 0
+        tv_count = tv_row["c"] if tv_row else 0
+        return movie_count + tv_count
     except Exception:
         return 0

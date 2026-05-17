@@ -27,8 +27,10 @@ esac
 
 URL="https://github.com/tailwindlabs/tailwindcss/releases/download/$VERSION/tailwindcss-$TARGET"
 echo "Downloading $URL → $BIN_PATH"
-curl -sSL -o "${BIN_PATH}.tmp" "$URL"
+trap 'rm -f "${BIN_PATH}.tmp"' EXIT
+curl -fsSL -o "${BIN_PATH}.tmp" "$URL"   # -f: fail on HTTP error (404 etc.)
 chmod +x "${BIN_PATH}.tmp"
 mv "${BIN_PATH}.tmp" "$BIN_PATH"
+trap - EXIT   # clear trap after successful install
 echo "✓ tailwindcss installed at $BIN_PATH"
 "$BIN_PATH" --help >/dev/null

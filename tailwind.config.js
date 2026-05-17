@@ -2,7 +2,7 @@
 module.exports = {
   content: [
     "./templates/**/*.html",
-    "./static/js/**/*.js",
+    "./static/**/*.js",
   ],
   safelist: [
     // 动态构造的 class 名（partials 用 `class="sb-dot-{{ p.dot }}"`），
