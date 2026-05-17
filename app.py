@@ -885,6 +885,8 @@ from routes.ui_dashboard import ui_dashboard_bp  # noqa: E402
 app.register_blueprint(ui_dashboard_bp)
 from routes.ui_drawer import ui_drawer_bp  # noqa: E402
 app.register_blueprint(ui_drawer_bp)
+from routes.pages_onboarding import pages_onboarding_bp  # noqa: E402
+app.register_blueprint(pages_onboarding_bp)
 
 
 @app.route("/api/config/app")

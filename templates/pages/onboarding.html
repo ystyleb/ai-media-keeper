@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+
+{% block title %}欢迎 · NASVault{% endblock %}
+
+{% block breadcrumb %}<span>👋 欢迎</span>{% endblock %}
+
+{% block main %}
+<div class="flex-1 overflow-y-auto p-6">
+<div class="max-w-3xl mx-auto space-y-6">
+    <header class="text-center">
+        <h1 class="text-3xl font-bold text-slate-100">欢迎使用 NASVault</h1>
+        <p class="text-sm text-slate-400 mt-2">设置 4 个必填，预计 5 分钟</p>
+    </header>
+
+    <!-- Progress bar -->
+    <div class="flex items-center justify-between px-2">
+        {% for s in steps %}
+        <div class="flex items-center {% if not loop.last %}flex-1{% endif %}">
+            <div class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0
+                {% if loop.index0 < step_index %}bg-emerald-600 text-white
+                {% elif loop.index0 == step_index %}bg-blue-600 text-white
+                {% else %}bg-slate-700 text-slate-400{% endif %}">
+                {% if loop.index0 < step_index %}✓{% else %}{{ loop.index }}{% endif %}
+            </div>
+            {% if not loop.last %}
+            <div class="flex-1 h-1 mx-2
+                {% if loop.index0 < step_index %}bg-emerald-600{% else %}bg-slate-700{% endif %}"></div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- Step content -->
+    <div class="bg-slate-800 rounded border border-slate-700 p-6">
+        {% if step == 'nas' %}
+        <h2 class="text-xl font-semibold text-slate-100">Step 1: NAS SSH</h2>
+        <p class="text-sm text-slate-400 mt-2">我们用 SSH 操作 NAS 文件（不动 Samba）. 当前状态:
+            {% if status.nas_ssh == 'ok' %}<span class="text-emerald-400">✓ 已配置</span>
+            {% else %}<span class="text-amber-400">⚠ 未配置</span>
+            {% endif %}
+        </p>
+        <p class="text-sm text-slate-400 mt-3">
+            点下方按钮打开 NAS 配置弹窗，填写 SSH host / 端口 / 沙箱根路径。
+        </p>
+        <div class="mt-4 flex gap-3">
+            <button type="button"
+                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm"
+                    data-bs-toggle="modal" data-bs-target="#nasConfigModal">
+                配置 NAS
+            </button>
+            <a href="{{ url_for('pages_onboarding.onboarding', step='qbit') }}"
+               class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-sm">
+                下一步 →
+            </a>
+        </div>
+
+        {% elif step == 'qbit' %}
+        <h2 class="text-xl font-semibold text-slate-100">Step 2: qBittorrent</h2>
+        <p class="text-sm text-slate-400 mt-2">下载链路 — qBit WebUI 用于联动种子操作. 当前状态:
+            {% if status.qbit == 'ok' %}<span class="text-emerald-400">✓ 已配置</span>
+            {% else %}<span class="text-amber-400">⚠ 未配置</span>
+            {% endif %}
+        </p>
+        <p class="text-sm text-slate-400 mt-3">
+            填写 qBittorrent WebUI 地址 / 用户名 / 密码。
+        </p>
+        <div class="mt-4 flex gap-3">
+            <a href="{{ url_for('pages_onboarding.onboarding', step='nas') }}"
+               class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-sm">← 上一步</a>
+            <button type="button"
+                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm"
+                    data-bs-toggle="modal" data-bs-target="#qbitConfigModal">
+                配置 qBit
+            </button>
+            <a href="{{ url_for('pages_onboarding.onboarding', step='tmdb') }}"
+               class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-sm">
+                下一步 →
+            </a>
+        </div>
+
+        {% elif step == 'tmdb' %}
+        <h2 class="text-xl font-semibold text-slate-100">Step 3: TMDB API Key</h2>
+        <p class="text-sm text-slate-400 mt-2">媒体元数据来源. 当前状态:
+            {% if status.tmdb_key == 'ok' %}<span class="text-emerald-400">✓ 已配置</span>
+            {% else %}<span class="text-amber-400">⚠ 未配置</span>
+            {% endif %}
+        </p>
+        <p class="text-xs text-slate-500 mt-2">
+            免费申请:
+            <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener"
+               class="text-blue-400 hover:underline">themoviedb.org/settings/api</a>
+        </p>
+        <div class="mt-4 flex gap-3">
+            <a href="{{ url_for('pages_onboarding.onboarding', step='qbit') }}"
+               class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-sm">← 上一步</a>
+            <button type="button"
+                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm"
+                    data-bs-toggle="modal" data-bs-target="#aiConfigModal">
+                配置 TMDB &amp; AI
+            </button>
+            <a href="{{ url_for('pages_onboarding.onboarding', step='deepseek') }}"
+               class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-sm">
+                下一步 →
+            </a>
+        </div>
+
+        {% elif step == 'deepseek' %}
+        <h2 class="text-xl font-semibold text-slate-100">Step 4: DeepSeek API Key</h2>
+        <p class="text-sm text-slate-400 mt-2">AI 识别 (BYOK). 当前状态:
+            {% if status.deepseek_key == 'ok' %}<span class="text-emerald-400">✓ 已配置</span>
+            {% else %}<span class="text-amber-400">⚠ 未配置</span>
+            {% endif %}
+        </p>
+        <p class="text-xs text-slate-500 mt-2">
+            注册:
+            <a href="https://platform.deepseek.com" target="_blank" rel="noopener"
+               class="text-blue-400 hover:underline">platform.deepseek.com</a>
+        </p>
+        <div class="mt-4 flex gap-3">
+            <a href="{{ url_for('pages_onboarding.onboarding', step='tmdb') }}"
+               class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-sm">← 上一步</a>
+            <button type="button"
+                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm"
+                    data-bs-toggle="modal" data-bs-target="#aiConfigModal">
+                配置 TMDB &amp; AI
+            </button>
+            <a href="{{ url_for('pages_onboarding.onboarding', step='done') }}"
+               class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-sm">
+                完成 →
+            </a>
+        </div>
+
+        {% elif step == 'done' %}
+        <h2 class="text-xl font-semibold text-slate-100">
+            {% if is_onboarded %}✓ 设置完成{% else %}⚠ 仍有未配置项{% endif %}
+        </h2>
+        <p class="text-sm text-slate-400 mt-2">
+            {% if is_onboarded %}
+            4 个必填全 OK，现在可以开始使用 NASVault 了。
+            {% else %}
+            还有以下未配置:
+            <ul class="mt-2 space-y-1 list-none">
+                {% if status.nas_ssh != 'ok' %}<li class="text-amber-400">⚠ NAS SSH</li>{% endif %}
+                {% if status.qbit != 'ok' %}<li class="text-amber-400">⚠ qBittorrent</li>{% endif %}
+                {% if status.tmdb_key != 'ok' %}<li class="text-amber-400">⚠ TMDB Key</li>{% endif %}
+                {% if status.deepseek_key != 'ok' %}<li class="text-amber-400">⚠ DeepSeek Key</li>{% endif %}
+            </ul>
+            <span class="text-xs text-slate-500 mt-2 block">
+                可继续前往 /settings 配置，或回到 dashboard 体验其他功能。
+            </span>
+            {% endif %}
+        </p>
+        <div class="mt-4 flex gap-3">
+            <a href="{{ url_for('pages_onboarding.onboarding', step='deepseek') }}"
+               class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-sm">← 上一步</a>
+            <a href="/"
+               class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-sm">
+                进入 dashboard →
+            </a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+</div>
+
+{% include "_legacy_modals.html" %}
+{% endblock %}
