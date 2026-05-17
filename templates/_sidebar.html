@@ -3,11 +3,9 @@
         🗄️ NASVault
     </div>
 
-    <nav class="flex-1 px-2 py-3 space-y-1" id="sidebar-nav"
-         hx-get="/ui/sidebar/badges"
-         hx-trigger="load, every 60s"
-         hx-swap="innerHTML">
-        <!-- Initial render: server-side included; HTMX poll 覆盖 -->
+    <nav class="flex-1 px-2 py-3 space-y-1" id="sidebar-nav">
+        <!-- Server-render only (含 current_page active 高亮); 不 HTMX poll 防止抹 active class.
+             每次 page navigate 都重新渲染 sidebar; badge stale 60s 可接受 trade-off. -->
         {% include "partials/sidebar/badges.html" %}
     </nav>
 

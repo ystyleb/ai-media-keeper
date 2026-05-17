@@ -146,3 +146,24 @@ def test_sidebar_badges_401_without_token(client):
     """Unauthorized access (no Bearer token) returns 401."""
     resp = client.get("/ui/sidebar/badges")
     assert resp.status_code == 401
+
+
+def test_sidebar_badges_no_active_items_without_page(client, token):
+    """`/ui/sidebar/badges` endpoint 不接收 current_page (无 query param) → 不渲染 active class.
+
+    防 regression: 历史上 _sidebar.html HTMX poll 这个 endpoint 会抹掉 server-rendered
+    active class. Phase B 删了 sidebar HTMX poll, sidebar 改 server-render only.
+    这个 endpoint 仅供未来 (Phase D+) 可能的"仅刷 badge"场景, 不该自己决定 active.
+    """
+    fake_badges = {"library": 0, "dedup": 0, "organize": 0}
+    with patch(
+        "routes.ui_status._compute_sidebar_badges", return_value=fake_badges
+    ):
+        resp = client.get("/ui/sidebar/badges", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    # 6 nav-item 都在
+    assert html.count("nav-item") == 6
+    # 但没任何 nav-item active (endpoint 无 current_page 信息)
+    assert "nav-item active" not in html
+    assert "active{% endif %}" not in html  # Jinja2 字面不能渲染漏
