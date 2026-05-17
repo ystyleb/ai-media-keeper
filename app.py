@@ -871,6 +871,10 @@ app.register_blueprint(ui_status_bp)
 # Phase B pages blueprints
 from routes.pages_files import pages_files_bp  # noqa: E402
 app.register_blueprint(pages_files_bp)
+from routes.pages_library import pages_library_bp  # noqa: E402
+app.register_blueprint(pages_library_bp)
+from routes.pages_dedup import pages_dedup_bp  # noqa: E402
+app.register_blueprint(pages_dedup_bp)
 
 
 @app.route("/")

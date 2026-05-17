@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{% block title %}媒体库 · NASVault{% endblock %}
+
+{% block breadcrumb %}
+<span class="text-slate-400 text-sm">🎬 媒体库</span>
+{% endblock %}
+
+{% block main %}
+{% include "partials/views/library_view.html" %}
+
+{% include "_legacy_modals.html" %}
+{% endblock %}

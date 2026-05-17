@@ -1,0 +1,44 @@
+<!-- Dedup view — duplicate release detection (cut from pages/files.html dedup-panel) -->
+
+<div class="app-body" data-bs-theme="dark">
+    <div class="main-panel">
+
+        <div id="dedup-panel">
+            <div class="bc-bar" style="gap:12px;">
+                <i class="bi bi-files bc-icon"></i>
+                <div style="font-weight:600;">重复 Release 检测</div>
+                <span id="dedup-stats" class="text-secondary" style="font-size:12px;margin-left:auto;">—</span>
+            </div>
+
+            <div class="filter-bar">
+                <select class="v-select" id="dedup-type">
+                    <option value="">全部类型</option>
+                    <option value="movie">电影</option>
+                    <option value="tv">剧集</option>
+                </select>
+                <label style="display:flex;align-items:center;gap:6px;font-size:13px;">
+                    <input type="checkbox" id="dedup-watched-only"> 仅已看完
+                </label>
+                <button class="tb-btn" onclick="loadDedupGroups()" style="margin-left:auto;">
+                    <i class="bi bi-arrow-clockwise"></i> 刷新
+                </button>
+                <button class="tb-btn" onclick="loadWatchedStale()">
+                    <i class="bi bi-clock-history"></i> 已看完候选
+                </button>
+                <button class="sb-btn sb-btn-danger" id="dedup-delete-btn" disabled onclick="deleteDedupSelection()">
+                    <i class="bi bi-trash3"></i> 删除选中
+                </button>
+            </div>
+
+            <div id="dedup-scroll">
+                <div id="dedup-groups"></div>
+                <div id="dedup-empty" class="empty-state text-center" style="display:none;">
+                    <i class="bi bi-emoji-smile" style="font-size:2.4rem;display:block;margin-bottom:12px;"></i>
+                    <div>没找到重复，干净！</div>
+                    <div class="text-secondary mt-2" style="font-size:12px;">如刚扫库，先确认库视图能看到媒体</div>
+                </div>
+            </div>
+        </div>
+
+    </div><!-- /.main-panel -->
+</div><!-- /.app-body -->

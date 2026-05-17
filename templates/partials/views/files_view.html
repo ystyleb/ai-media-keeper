@@ -1,0 +1,141 @@
+<!-- File browser view — main-panel + sidebar (cut from pages/files.html) -->
+
+<!-- ── APP BODY ────────────────────────────────────────────────── -->
+<div class="app-body" data-bs-theme="dark">
+
+    <!-- LEFT: FILE PANEL ──────────────────────────────────────── -->
+    <div class="main-panel">
+
+        <!-- Breadcrumb -->
+        <div class="bc-bar">
+            <i class="bi bi-hdd-fill bc-icon"></i>
+            <nav aria-label="breadcrumb" style="flex:1;overflow:hidden;">
+                <ol class="breadcrumb" id="breadcrumb-list">
+                    <!-- JS: updateBreadcrumb() -->
+                </ol>
+            </nav>
+            <span id="current-path" style="display:none;"></span>
+        </div>
+
+        <!-- Filter bar -->
+        <div class="filter-bar">
+            <div class="search-wrap">
+                <i class="bi bi-search"></i>
+                <input type="text" id="search-input"
+                       placeholder="搜索文件名…" onkeyup="filterFiles()">
+            </div>
+
+            <select class="v-select" id="filter-type" onchange="filterFiles()">
+                <option value="all">所有文件</option>
+                <option value="dir">仅目录</option>
+                <option value="video">仅视频</option>
+                <option value="hardlink">仅硬链接</option>
+            </select>
+
+            <select class="v-select" id="sort-by" onchange="sortFiles()">
+                <option value="name">按名称</option>
+                <option value="size">按大小</option>
+                <option value="modified">按时间</option>
+                <option value="hardlinks">按链接数</option>
+            </select>
+
+            <span id="file-count"></span>
+
+            <button class="tb-btn" style="margin-left:auto;" onclick="openBatchIdentify()" title="批量识别当前目录所有视频文件">
+                <i class="bi bi-stars"></i>
+                批量识别
+            </button>
+        </div>
+
+        <!-- File table -->
+        <div id="file-container">
+            <table class="table file-table mb-0">
+                <thead>
+                    <tr>
+                        <th class="checkbox-cell">
+                            <input type="checkbox" class="form-check-input" id="select-all"
+                                   onchange="toggleSelectAll()">
+                        </th>
+                        <th>名称</th>
+                        <th style="width:92px;">大小</th>
+                        <th style="width:54px;">链接</th>
+                        <th style="width:140px;">修改时间</th>
+                        <th style="width:90px;"></th>
+                    </tr>
+                </thead>
+                <tbody id="file-list">
+                    <!-- JS: renderFiles() -->
+                </tbody>
+            </table>
+
+            <div id="loading" class="text-center py-5" style="display:none;">
+                <div class="spinner-border" role="status">
+                    <span class="visually-hidden">加载中...</span>
+                </div>
+                <div class="mt-2">正在加载文件列表…</div>
+            </div>
+
+            <div id="empty-state" class="empty-state text-center" style="display:none;">
+                <i class="bi bi-folder2" style="font-size:2.4rem;display:block;margin-bottom:12px;"></i>
+                <div>此目录为空</div>
+            </div>
+        </div>
+
+    </div><!-- /.main-panel -->
+
+
+    <!-- RIGHT: SIDEBAR ────────────────────────────────────────── -->
+    <aside class="sidebar">
+
+        <!-- 已选择 -->
+        <div class="sb-section">
+            <div class="sb-label">已选择</div>
+            <div class="sel-stat">
+                <span id="selected-count">0</span>
+                <span id="selected-size">—</span>
+            </div>
+            <div class="sel-actions">
+                <button class="sb-btn sb-btn-danger" id="btn-delete" disabled onclick="deleteSelected()">
+                    <i class="bi bi-trash3"></i> 删除
+                </button>
+                <button class="sb-btn" onclick="clearSelection()">
+                    <i class="bi bi-x"></i> 清除
+                </button>
+            </div>
+        </div>
+
+        <!-- 硬链接检测 -->
+        <div class="sb-section" id="hardlink-panel" style="display:none;">
+            <div class="sb-label">
+                <span>硬链接检测</span>
+                <button class="sb-label-close" onclick="hideHardlinks()" title="关闭">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </div>
+            <div id="hardlink-content">
+                <!-- JS: showHardlinks() populates this -->
+            </div>
+        </div>
+
+        <!-- 文件详情 -->
+        <div class="sb-section" id="file-detail" style="display:none;">
+            <div class="sb-label">文件详情</div>
+            <div id="file-detail-content">
+                <!-- JS: showDetail() populates this -->
+            </div>
+        </div>
+
+        <!-- 操作日志 -->
+        <div class="sb-section" style="flex:1;min-height:0;">
+            <div class="sb-label">操作日志</div>
+            <div class="list-group" id="action-log">
+                <div class="list-group-item text-center"
+                     style="color:var(--text-3);font-size:12px;padding:14px 0 !important;">
+                    暂无操作记录
+                </div>
+            </div>
+        </div>
+
+    </aside>
+
+</div><!-- /.app-body -->

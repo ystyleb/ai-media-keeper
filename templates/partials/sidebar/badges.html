@@ -1,13 +1,13 @@
 <a href="/" class="nav-item" hx-boost="true"><span>🏠 概览</span></a>
-<span class="nav-item opacity-50 cursor-not-allowed" title="Phase B (规划中)"><span>📁 文件</span></span>
-<span class="nav-item opacity-50 cursor-not-allowed" title="Phase B (规划中)">
+<a href="/files" class="nav-item {% if current_page == 'files' %}active{% endif %}" hx-boost="true"><span>📁 文件</span></a>
+<a href="/library" class="nav-item {% if current_page == 'library' %}active{% endif %}" hx-boost="true">
     <span>🎬 媒体库</span>
     {% if badges.library | default(0) > 0 %}<span class="nav-badge">{{ badges.library }}</span>{% endif %}
-</span>
-<span class="nav-item opacity-50 cursor-not-allowed" title="Phase B (规划中)">
+</a>
+<a href="/dedup" class="nav-item {% if current_page == 'dedup' %}active{% endif %}" hx-boost="true">
     <span>🔍 重复检测</span>
     {% if badges.dedup | default(0) > 0 %}<span class="nav-badge">{{ badges.dedup }}</span>{% endif %}
-</span>
+</a>
 <span class="nav-item opacity-50 cursor-not-allowed" title="Phase B (规划中)">
     <span>📦 整理</span>
     {% if badges.organize | default(0) > 0 %}<span class="nav-badge">{{ badges.organize }}</span>{% endif %}

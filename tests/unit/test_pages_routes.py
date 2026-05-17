@@ -40,3 +40,44 @@ def test_files_page_renders(client, token):
     assert "bootstrap@5.3.0/dist/css" in html
     assert "bootstrap@5.3.0/dist/js" in html
     assert "static/app.js" in html
+
+
+def test_library_page_renders(client, token):
+    """/library 应返 200 + 含 library-panel div + 12 legacy modal + 面包屑。"""
+    resp = client.get("/library")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert "🎬 媒体库" in html
+    assert "library-panel" in html  # library_view partial 含 id="library-panel"
+    assert html.count('class="modal fade"') == 12  # legacy modals included
+
+
+def test_dedup_page_renders(client, token):
+    """/dedup 应返 200 + 含 dedup-panel div + 12 legacy modal + 面包屑。"""
+    resp = client.get("/dedup")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert "🔍 重复检测" in html
+    assert "dedup-panel" in html  # dedup_view partial 含 id="dedup-panel"
+    assert html.count('class="modal fade"') == 12  # legacy modals included
+
+
+def test_files_page_no_other_views(client, token):
+    """/files page 不该含 library-panel / dedup-panel (它们在各自专属 page)。"""
+    resp = client.get("/files")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert "file-container" in html   # files view 仍有 file-container
+    assert "library-panel" not in html
+    assert "dedup-panel" not in html
+
+
+def test_sidebar_library_active(client, token):
+    """/library page sidebar 的 /library 导航项含 active class。"""
+    import re
+    resp = client.get("/library")
+    html = resp.data.decode()
+    # 匹配 <a href="/library" ... class="... active ..."
+    m = re.search(r'<a href="/library"[^>]*class="([^"]+)"', html)
+    assert m is not None, "sidebar /library link not found"
+    assert "active" in m.group(1), f"active not in class: {m.group(1)}"
