@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
-from flask import Flask, abort, g, jsonify, make_response, render_template, request
+from flask import Flask, abort, g, jsonify, make_response, redirect, render_template, request, url_for
 
 from services import (
     dedup,
@@ -868,15 +868,15 @@ def human_size(size_bytes: int) -> str:
 from routes.ui_status import ui_status_bp  # noqa: E402
 app.register_blueprint(ui_status_bp)
 
+# Phase B pages blueprints
+from routes.pages_files import pages_files_bp  # noqa: E402
+app.register_blueprint(pages_files_bp)
+
 
 @app.route("/")
 def index():
-    # frontend-ui.md lesson: HTML 加 no-store，否则浏览器缓存老模板 + 新 JS 不匹配
-    # （cache_bust URL 是 templates 渲染的，浏览器缓存 HTML 时 URL 也被冻结，
-    # 但 /static/app.js 仍走 304 拉新内容 → 老 HTML + 新 JS 跑炸 bootstrap 找不到元素）
-    resp = make_response(render_template("index.html", current_page="files", badges={}))
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+    # Phase B transitional: / redirect to /files. Task 7 后改为 dashboard.
+    return redirect(url_for("pages_files.files"))
 
 
 @app.route("/api/config/app")
