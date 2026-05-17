@@ -875,12 +875,14 @@ from routes.pages_library import pages_library_bp  # noqa: E402
 app.register_blueprint(pages_library_bp)
 from routes.pages_dedup import pages_dedup_bp  # noqa: E402
 app.register_blueprint(pages_dedup_bp)
-
-
-@app.route("/")
-def index():
-    # Phase B transitional: / redirect to /files. Task 7 后改为 dashboard.
-    return redirect(url_for("pages_files.files"))
+from routes.pages_organize import pages_organize_bp  # noqa: E402
+app.register_blueprint(pages_organize_bp)
+from routes.pages_settings import pages_settings_bp  # noqa: E402
+app.register_blueprint(pages_settings_bp)
+from routes.pages_dashboard import pages_dashboard_bp  # noqa: E402
+app.register_blueprint(pages_dashboard_bp)
+from routes.ui_dashboard import ui_dashboard_bp  # noqa: E402
+app.register_blueprint(ui_dashboard_bp)
 
 
 @app.route("/api/config/app")

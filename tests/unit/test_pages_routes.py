@@ -18,11 +18,45 @@ def token():
     return app_module.API_TOKEN
 
 
-def test_root_redirects_to_files(client, token):
-    """GET / 应 302 redirect 到 /files (Phase B transitional)."""
-    resp = client.get("/", follow_redirects=False)
-    assert resp.status_code in (302, 308)
-    assert resp.headers["Location"].endswith("/files")
+def test_dashboard_page_renders(client, token):
+    """GET / now renders dashboard (不再 redirect)."""
+    resp = client.get("/", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert "🏠 概览" in html
+    assert "/ui/dashboard/system" in html
+    assert "/ui/dashboard/workers" in html
+    assert "/ui/dashboard/todo" in html
+
+
+def test_organize_page_renders(client, token):
+    resp = client.get("/organize", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    assert "📦 整理" in resp.data.decode()
+    assert "autoOrganizeConfigModal" in resp.data.decode()
+
+
+def test_settings_page_renders(client, token):
+    resp = client.get("/settings", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert "⚙️ 设置" in html
+    assert "nasConfigModal" in html
+    assert "qbitConfigModal" in html
+    assert "aiConfigModal" in html
+
+
+def test_ui_dashboard_system_401_without_token(client):
+    resp = client.get("/ui/dashboard/system")
+    assert resp.status_code == 401
+
+
+def test_ui_dashboard_workers_renders(client, token):
+    from unittest.mock import patch
+    with patch("routes.ui_status._aggregate_running_workers", return_value=[]):
+        resp = client.get("/ui/dashboard/workers", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    assert "无后台任务" in resp.data.decode()
 
 
 def test_files_page_renders(client, token):

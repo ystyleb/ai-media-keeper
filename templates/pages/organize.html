@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}整理 · NASVault{% endblock %}
+
+{% block breadcrumb %}
+<span>📦 整理</span>
+{% endblock %}
+
+{% block main %}
+<div class="space-y-4">
+    <header>
+        <h2 class="text-2xl font-bold text-slate-100">整理任务</h2>
+        <p class="text-sm text-slate-400 mt-1">
+            qBittorrent 完成后自动整理到媒体库，或手动批量整理目录。
+        </p>
+    </header>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-3xl">
+        <button type="button"
+                class="text-left p-4 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+                data-bs-toggle="modal" data-bs-target="#autoOrganizeConfigModal">
+            <div class="flex items-center gap-2">
+                <span class="text-2xl">🤖</span>
+                <h3 class="text-lg font-semibold text-slate-100">自动整理</h3>
+            </div>
+            <p class="text-sm text-slate-400 mt-2">
+                配置 qBit category 白名单 + cron 周期 + confidence 门槛.<br>
+                查看历史运行记录.
+            </p>
+        </button>
+
+        <button type="button"
+                class="text-left p-4 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+                data-bs-toggle="modal" data-bs-target="#organizeConfigModal">
+            <div class="flex items-center gap-2">
+                <span class="text-2xl">📂</span>
+                <h3 class="text-lg font-semibold text-slate-100">媒体库根目录</h3>
+            </div>
+            <p class="text-sm text-slate-400 mt-2">
+                配置 MOVIES_ROOT / TV_ROOT 路径.<br>
+                hardlink 目标位置.
+            </p>
+        </button>
+    </div>
+
+    <div class="mt-8 p-4 bg-slate-800/50 rounded border border-slate-700 text-sm text-slate-400 max-w-3xl">
+        <strong class="text-slate-300">Phase B 占位:</strong> 这个 page 当前是 modal 触发器.
+        Phase C 会把 organize history 表格 + 自动整理配置表单 直接嵌入主区,
+        不再依赖 modal.
+    </div>
+
+    {% include "_legacy_modals.html" %}
+</div>
+{% endblock %}
