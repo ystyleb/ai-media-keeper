@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}NASVault{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/output.css') }}">
+    <!-- Bootstrap 5 CSS (legacy modals; Phase C drawer 替换后删) -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <!-- HTMX 1.9.x -->
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <!-- Alpine.js 3.x -->
+    <script defer src="https://unpkg.com/alpinejs@3.13.10/dist/cdn.min.js"></script>
+    {% block head_extra %}{% endblock %}
+</head>
+<body class="h-screen flex flex-col overflow-hidden" x-data="{ drawerOpen: false }">
+
+    <!-- Top region: sidebar + main -->
+    <div class="flex-1 flex overflow-hidden">
+
+        {% include "_sidebar.html" %}
+
+        <main class="flex-1 flex flex-col overflow-hidden">
+            <header class="bg-slate-800 border-b border-slate-700 px-4 py-2 flex items-center justify-between">
+                <div class="text-slate-300 text-sm">
+                    {% block breadcrumb %}
+                    <span class="text-slate-500">/</span>
+                    {% endblock %}
+                </div>
+                <div class="text-xs text-slate-400">
+                    {% block topbar_right %}{% endblock %}
+                </div>
+            </header>
+
+            <div id="main-content" class="flex-1 overflow-auto p-4">
+                {% block main %}
+                <p class="text-slate-400">main block 未定义（这是 base.html 默认占位）</p>
+                {% endblock %}
+            </div>
+        </main>
+
+        {% include "_drawer.html" %}
+    </div>
+
+    {% include "_status_bar.html" %}
+
+    <!-- Toast host (Phase E) - Alpine renders stack, auto-dismiss 3s -->
+    <div id="toast-host"
+         x-data="toastStack()"
+         @toast.window="addToast($event.detail)"
+         class="fixed bottom-12 right-4 z-[200] flex flex-col gap-2 pointer-events-none">
+        <template x-for="t in toasts" :key="t.id">
+            <div :class="toastClass(t.severity)"
+                 class="pointer-events-auto min-w-[280px] max-w-[400px] px-4 py-3 rounded shadow-lg border flex items-start gap-2 transition-all duration-200"
+                 x-transition:enter="opacity-0 translate-x-4"
+                 x-transition:enter-end="opacity-100 translate-x-0"
+                 x-transition:leave="opacity-100"
+                 x-transition:leave-end="opacity-0 translate-x-4">
+                <span x-text="iconFor(t.severity)" class="text-lg leading-none"></span>
+                <span x-text="t.message" class="flex-1 text-sm"></span>
+                <button @click="dismiss(t.id)" class="text-current opacity-60 hover:opacity-100">✕</button>
+            </div>
+        </template>
+    </div>
+
+    <script>
+    function toastStack() {
+        return {
+            toasts: [],
+            nextId: 1,
+            addToast(detail) {
+                const id = this.nextId++;
+                const severity = (detail && detail.severity) || 'info';
+                const message = (detail && detail.message) || '';
+                this.toasts.push({ id, severity, message });
+                setTimeout(() => this.dismiss(id), 3000);
+            },
+            dismiss(id) {
+                this.toasts = this.toasts.filter(t => t.id !== id);
+            },
+            toastClass(severity) {
+                return {
+                    success: 'bg-emerald-900/95 border-emerald-700 text-emerald-100',
+                    warning: 'bg-amber-900/95 border-amber-700 text-amber-100',
+                    error: 'bg-red-900/95 border-red-700 text-red-100',
+                    info: 'bg-slate-800/95 border-slate-700 text-slate-100',
+                }[severity] || 'bg-slate-800/95 border-slate-700 text-slate-100';
+            },
+            iconFor(severity) {
+                return {
+                    success: '✓',
+                    warning: '⚠',
+                    error: '❌',
+                    info: 'ℹ',
+                }[severity] || 'ℹ';
+            },
+        };
+    }
+    </script>
+
+    <!-- HTMX Authorization header injector.
+         Token stored in localStorage.nas_token by the legacy app.js login flow.
+         htmx:configRequest fires before every hx-* request, attaching the Bearer
+         token so /ui/* endpoints (which require @_require_token) work from the browser. -->
+    <script>
+        document.body.addEventListener('htmx:configRequest', function(evt) {
+            var token = localStorage.getItem('nas_token');
+            if (token) {
+                evt.detail.headers['Authorization'] = 'Bearer ' + token;
+            }
+        });
+    </script>
+
+    <!-- HTMX HX-Trigger header → window event dispatch (Phase E).
+         Server returns HX-Trigger: {"toast": {"severity":"warning","message":"..."}}
+         and frontend dispatches @toast.window event consumed by Alpine toastStack(). -->
+    <script>
+        document.body.addEventListener('htmx:afterRequest', function(evt) {
+            var trigger = evt.detail.xhr.getResponseHeader('HX-Trigger');
+            if (!trigger) return;
+            try {
+                var payload = JSON.parse(trigger);
+                if (payload.toast) {
+                    window.dispatchEvent(new CustomEvent('toast', { detail: payload.toast }));
+                }
+            } catch (e) {
+                // HX-Trigger 不是 JSON — HTMX 原生支持 event name 字符串触发
+                window.dispatchEvent(new CustomEvent(trigger));
+            }
+        });
+    </script>
+
+    <!-- Bootstrap 5 JS (legacy modals; Phase C drawer 替换后删) -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Legacy app.js (Phase F cleanup) -->
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+
+    {% block body_scripts %}{% endblock %}
+
+</body>
+</html>

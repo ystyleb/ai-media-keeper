@@ -1,0 +1,49 @@
+<div class="p-4 space-y-3">
+    <h3 class="text-lg font-semibold text-slate-100">🗑️ 删除预览</h3>
+
+    {% if preview.files %}
+    <div>
+        <p class="text-sm text-slate-300 mb-2">影响 {{ preview.files | length }} 个文件:</p>
+        <ul class="text-xs text-slate-400 space-y-1 max-h-40 overflow-auto bg-slate-900 p-2 rounded">
+            {% for f in preview.files[:20] %}
+            <li class="font-mono">{{ f.path | default(f) }}</li>
+            {% endfor %}
+            {% if preview.files | length > 20 %}
+            <li class="text-slate-500 italic">… {{ preview.files | length - 20 }} 个更多</li>
+            {% endif %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if preview.hardlinks %}
+    <div>
+        <p class="text-sm text-slate-300">关联硬链接: {{ preview.hardlinks | length }}</p>
+    </div>
+    {% endif %}
+
+    {% if preview.qbit_torrents %}
+    <div>
+        <p class="text-sm text-slate-300">关联 qBit 种子: {{ preview.qbit_torrents | length }}</p>
+    </div>
+    {% endif %}
+
+    {% if preview.total_size %}
+    <p class="text-sm text-amber-400">实际释放: {{ preview.total_size_human | default(preview.total_size) }}</p>
+    {% endif %}
+
+    <div class="pt-3 border-t border-slate-700 flex gap-2">
+        <button type="button"
+                class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded"
+                hx-post="/ui/drawer/delete/confirm"
+                hx-vals='{"action_id":"{{ action_id }}","signed_token":"{{ signed_token }}"}'
+                hx-target="#drawer-content"
+                hx-swap="innerHTML"
+                hx-confirm="确定执行删除? 此操作不可逆.">
+            🗑️ 确认删除
+        </button>
+        <button @click="drawerOpen = false" type="button"
+                class="px-4 py-2 bg-slate-700 text-slate-200 rounded">
+            取消
+        </button>
+    </div>
+</div>

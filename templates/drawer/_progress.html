@@ -1,0 +1,8 @@
+<div class="p-4 space-y-3"
+     hx-get="/ui/drawer/action/{{ action_id }}/status"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML">
+    <h3 class="text-lg font-semibold text-slate-100">⏳ 正在处理…</h3>
+    <p class="text-sm text-slate-400">Action {{ action_id }} ({{ action }}) — status: {{ result.status }}</p>
+    <div class="text-xs text-slate-500">每 2 秒自动刷新</div>
+</div>

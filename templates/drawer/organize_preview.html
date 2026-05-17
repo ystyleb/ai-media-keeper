@@ -1,0 +1,34 @@
+<div class="p-4 space-y-3">
+    <h3 class="text-lg font-semibold text-slate-100">📦 整理预览</h3>
+
+    {% if preview_items %}
+    <p class="text-sm text-slate-300">{{ preview_items | length }} 个文件待整理</p>
+    <ul class="text-xs text-slate-400 space-y-1 max-h-60 overflow-auto bg-slate-900 p-2 rounded">
+        {% for item in preview_items[:20] %}
+        <li class="font-mono">
+            <span class="text-slate-500">{{ item.src | default(item.path | default('')) }}</span>
+            <span class="text-emerald-400 mx-1">→</span>
+            <span class="text-emerald-300">{{ item.dst | default('--') }}</span>
+        </li>
+        {% endfor %}
+        {% if preview_items | length > 20 %}
+        <li class="text-slate-500 italic">… {{ preview_items | length - 20 }} 个更多</li>
+        {% endif %}
+    </ul>
+    {% endif %}
+
+    <div class="pt-3 border-t border-slate-700 flex gap-2">
+        <button type="button"
+                class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded"
+                hx-post="/ui/drawer/organize/confirm"
+                hx-vals='{"action_id":"{{ action_id }}","signed_token":"{{ signed_token }}"}'
+                hx-target="#drawer-content"
+                hx-swap="innerHTML">
+            ✓ 确认整理
+        </button>
+        <button @click="drawerOpen = false" type="button"
+                class="px-4 py-2 bg-slate-700 text-slate-200 rounded">
+            取消
+        </button>
+    </div>
+</div>

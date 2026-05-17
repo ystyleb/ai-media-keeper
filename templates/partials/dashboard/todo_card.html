@@ -1,0 +1,29 @@
+<div class="space-y-2">
+    {% if badges.library | default(0) > 0 %}
+    <div class="flex items-center justify-between">
+        <span class="text-slate-200">🎬 媒体库未识别</span>
+        <a href="/library" hx-boost="true" class="text-xs text-blue-400 hover:underline">
+            {{ badges.library }} →
+        </a>
+    </div>
+    {% endif %}
+    {% if badges.dedup | default(0) > 0 %}
+    <div class="flex items-center justify-between">
+        <span class="text-slate-200">🔍 重复检测待处理</span>
+        <a href="/dedup" hx-boost="true" class="text-xs text-blue-400 hover:underline">
+            {{ badges.dedup }} →
+        </a>
+    </div>
+    {% endif %}
+    {% if badges.organize | default(0) > 0 %}
+    <div class="flex items-center justify-between">
+        <span class="text-slate-200">📦 整理任务</span>
+        <a href="/organize" hx-boost="true" class="text-xs text-blue-400 hover:underline">
+            {{ badges.organize }} →
+        </a>
+    </div>
+    {% endif %}
+    {% if not badges.library and not badges.dedup and not badges.organize %}
+    <p class="text-sm text-slate-500 italic">无待处理事项 🎉</p>
+    {% endif %}
+</div>

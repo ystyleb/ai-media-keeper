@@ -1,0 +1,11 @@
+<div class="space-y-2">
+    {% for p in providers %}
+    <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+            <span class="sb-dot-{{ p.dot }}"></span>
+            <span class="text-slate-200">{{ p.name }}</span>
+        </div>
+        <span class="text-xs text-slate-400">{{ p.detail | default(p.tooltip) }}</span>
+    </div>
+    {% endfor %}
+</div>

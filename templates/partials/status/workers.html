@@ -1,0 +1,7 @@
+{% if workers and workers | length > 0 %}
+{% for w in workers %}
+<span class="sb-seg">⏳ {{ w.kind }} {{ w.done }}/{{ w.total }}</span>
+{% endfor %}
+{% else %}
+<span class="sb-seg text-slate-500">workers idle</span>
+{% endif %}

@@ -1,0 +1,51 @@
+<!-- Library view — TMDB-based media catalog (cut from pages/files.html library-panel) -->
+
+<div class="app-body" data-bs-theme="dark">
+    <div class="main-panel">
+
+        <div id="library-panel">
+            <div class="bc-bar" style="gap:12px;">
+                <i class="bi bi-collection-play bc-icon"></i>
+                <div style="font-weight:600;">我的库</div>
+                <span id="library-stats-mini" class="text-secondary" style="font-size:12px;margin-left:auto;">—</span>
+            </div>
+
+            <div class="filter-bar">
+                <div class="search-wrap">
+                    <i class="bi bi-search"></i>
+                    <input type="text" id="library-search" placeholder="搜索标题（中/英/原名）…">
+                </div>
+                <select class="v-select" id="library-type">
+                    <option value="">全部类型</option>
+                    <option value="movie">电影</option>
+                    <option value="tv">剧集</option>
+                </select>
+                <select class="v-select" id="library-sort">
+                    <option value="added_desc">最近加入</option>
+                    <option value="year_desc">年份新→旧</option>
+                    <option value="year_asc">年份旧→新</option>
+                    <option value="vote_desc">评分高→低</option>
+                    <option value="title_asc">按标题</option>
+                </select>
+                <input type="number" id="library-year-from" placeholder="年份起" class="v-select" style="width:90px;">
+                <input type="number" id="library-year-to" placeholder="年份止" class="v-select" style="width:90px;">
+                <span id="library-count" class="text-secondary" style="font-size:12px;"></span>
+            </div>
+
+            <div id="library-scroll">
+                <div id="library-grid"></div>
+
+                <div id="library-empty" class="empty-state text-center" style="display:none;">
+                    <i class="bi bi-collection-play" style="font-size:2.4rem;display:block;margin-bottom:12px;"></i>
+                    <div>没有匹配的媒体</div>
+                    <div class="text-secondary mt-2" style="font-size:12px;">先用顶部 <strong>扫库</strong> 扫描，让元数据进入 cache</div>
+                </div>
+
+                <div id="library-loadmore" class="text-center py-3" style="display:none;">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="loadMoreLibrary()">加载更多</button>
+                </div>
+            </div>
+        </div>
+
+    </div><!-- /.main-panel -->
+</div><!-- /.app-body -->

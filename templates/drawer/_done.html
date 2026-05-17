@@ -1,0 +1,15 @@
+<div class="p-4 space-y-3">
+    <h3 class="text-lg font-semibold text-slate-100">
+        {% if result.status == 'succeeded' %}
+        ✅ 完成
+        {% elif result.status in ['failed', 'aborted'] %}
+        ❌ {{ result.status }}
+        {% else %}
+        操作结果: {{ result.status }}
+        {% endif %}
+    </h3>
+    <p class="text-sm text-slate-400">Action ID: {{ action_id }} ({{ action }})</p>
+    {% if result.message %}<p class="text-sm text-slate-300">{{ result.message }}</p>{% endif %}
+    {% if result.space_freed %}<p class="text-sm text-emerald-400">释放空间: {{ result.space_freed }}</p>{% endif %}
+    <button @click="drawerOpen = false" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded">完成</button>
+</div>

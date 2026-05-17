@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
-from flask import Flask, abort, g, jsonify, make_response, render_template, request
+from flask import Flask, abort, g, jsonify, make_response, redirect, render_template, request, url_for
 
 from services import (
     dedup,
@@ -864,14 +864,29 @@ def human_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f} PB"
 
 
-@app.route("/")
-def index():
-    # frontend-ui.md lesson: HTML 加 no-store，否则浏览器缓存老模板 + 新 JS 不匹配
-    # （cache_bust URL 是 templates 渲染的，浏览器缓存 HTML 时 URL 也被冻结，
-    # 但 /static/app.js 仍走 304 拉新内容 → 老 HTML + 新 JS 跑炸 bootstrap 找不到元素）
-    resp = make_response(render_template("index.html"))
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+# 注册 UI blueprints (server-rendered HTML fragments for HTMX)
+from routes.ui_status import ui_status_bp  # noqa: E402
+app.register_blueprint(ui_status_bp)
+
+# Phase B pages blueprints
+from routes.pages_files import pages_files_bp  # noqa: E402
+app.register_blueprint(pages_files_bp)
+from routes.pages_library import pages_library_bp  # noqa: E402
+app.register_blueprint(pages_library_bp)
+from routes.pages_dedup import pages_dedup_bp  # noqa: E402
+app.register_blueprint(pages_dedup_bp)
+from routes.pages_organize import pages_organize_bp  # noqa: E402
+app.register_blueprint(pages_organize_bp)
+from routes.pages_settings import pages_settings_bp  # noqa: E402
+app.register_blueprint(pages_settings_bp)
+from routes.pages_dashboard import pages_dashboard_bp  # noqa: E402
+app.register_blueprint(pages_dashboard_bp)
+from routes.ui_dashboard import ui_dashboard_bp  # noqa: E402
+app.register_blueprint(ui_dashboard_bp)
+from routes.ui_drawer import ui_drawer_bp  # noqa: E402
+app.register_blueprint(ui_drawer_bp)
+from routes.pages_onboarding import pages_onboarding_bp  # noqa: E402
+app.register_blueprint(pages_onboarding_bp)
 
 
 @app.route("/api/config/app")
@@ -3799,6 +3814,23 @@ def _compute_providers_status() -> dict:
     }
 
 
+def get_cached_providers_status(force: bool = False) -> dict:
+    """Provider status with 60s TTL cache.
+
+    Shared by /api/providers/status (JSON) and /ui/status/providers (HTML)
+    so multi-tab × 60s poll does NOT multiply DeepSeek probe calls.
+    """
+    now = time.time()
+    cache = _PROVIDERS_STATUS_CACHE
+    age = now - cache["checked_at"]
+    if not force and cache["data"] is not None and age < _PROVIDERS_STATUS_TTL:
+        return cache["data"]
+    data = _compute_providers_status()
+    cache["data"] = data
+    cache["checked_at"] = now
+    return data
+
+
 @app.route("/api/providers/status", methods=["GET"])
 @require_token
 def providers_status():
@@ -3810,16 +3842,14 @@ def providers_status():
     qBit 走 WebUI /api/v2/auth/login + /api/v2/torrents/info）。
     """
     force = request.args.get("refresh") in ("1", "true", "yes")
-    now = time.time()
-    cache = _PROVIDERS_STATUS_CACHE
-    age = now - cache["checked_at"]
-    if not force and cache["data"] is not None and age < _PROVIDERS_STATUS_TTL:
-        resp = jsonify({"providers": cache["data"], "cached": True, "age": round(age, 1)})
-    else:
-        data = _compute_providers_status()
-        cache["data"] = data
-        cache["checked_at"] = now
-        resp = jsonify({"providers": data, "cached": False, "age": 0.0})
+    was_cached = (
+        not force
+        and _PROVIDERS_STATUS_CACHE["data"] is not None
+        and (time.time() - _PROVIDERS_STATUS_CACHE["checked_at"]) < _PROVIDERS_STATUS_TTL
+    )
+    data = get_cached_providers_status(force=force)
+    age = round(time.time() - _PROVIDERS_STATUS_CACHE["checked_at"], 1)
+    resp = jsonify({"providers": data, "cached": was_cached, "age": age})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 

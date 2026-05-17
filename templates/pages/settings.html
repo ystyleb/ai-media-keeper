@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}设置 · NASVault{% endblock %}
+
+{% block breadcrumb %}
+<span>⚙️ 设置</span>
+{% endblock %}
+
+{% block main %}
+<div class="space-y-4">
+    <header>
+        <h2 class="text-2xl font-bold text-slate-100">设置</h2>
+        <p class="text-sm text-slate-400 mt-1">
+            NASVault 配置中心. Phase C 会把每个配置表单直接嵌入这里,
+            不再通过 modal.
+        </p>
+    </header>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-w-5xl">
+        <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+                data-bs-toggle="modal" data-bs-target="#nasConfigModal">
+            <div class="text-lg font-semibold text-slate-100">📡 NAS</div>
+            <p class="text-xs text-slate-400 mt-1">SSH host + port + 沙箱根路径</p>
+        </button>
+
+        <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+                data-bs-toggle="modal" data-bs-target="#qbitConfigModal">
+            <div class="text-lg font-semibold text-slate-100">🌐 qBittorrent</div>
+            <p class="text-xs text-slate-400 mt-1">WebUI URL + 用户名 + 密码</p>
+        </button>
+
+        <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+                data-bs-toggle="modal" data-bs-target="#aiConfigModal">
+            <div class="text-lg font-semibold text-slate-100">🤖 AI (TMDB + DeepSeek)</div>
+            <p class="text-xs text-slate-400 mt-1">API keys (BYOK) + base URL</p>
+        </button>
+
+        <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+                data-bs-toggle="modal" data-bs-target="#embyConfigModal">
+            <div class="text-lg font-semibold text-slate-100">📺 Emby</div>
+            <p class="text-xs text-slate-400 mt-1">URL + API key (可选, 观看进度同步)</p>
+        </button>
+
+        <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+                data-bs-toggle="modal" data-bs-target="#organizeConfigModal">
+            <div class="text-lg font-semibold text-slate-100">📂 媒体库根目录</div>
+            <p class="text-xs text-slate-400 mt-1">MOVIES_ROOT / TV_ROOT 路径</p>
+        </button>
+
+        <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+                data-bs-toggle="modal" data-bs-target="#autoOrganizeConfigModal">
+            <div class="text-lg font-semibold text-slate-100">🤖 自动整理</div>
+            <p class="text-xs text-slate-400 mt-1">qBit category + cron 周期 + confidence</p>
+        </button>
+
+        <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+                data-bs-toggle="modal" data-bs-target="#scanModal">
+            <div class="text-lg font-semibold text-slate-100">🔄 数据库工具</div>
+            <p class="text-xs text-slate-400 mt-1">全库扫描 / vacuum / 批量识别</p>
+        </button>
+    </div>
+
+    <div class="mt-8 p-4 bg-slate-800/50 rounded border border-slate-700 text-sm text-slate-400 max-w-3xl">
+        <strong class="text-slate-300">Phase B 占位:</strong> 各配置项当前仍走 modal.
+        Phase C 会把每个表单 inline 嵌入到 /settings/&lt;sub&gt; 子 page.
+    </div>
+
+    {% include "_legacy_modals.html" %}
+</div>
+{% endblock %}

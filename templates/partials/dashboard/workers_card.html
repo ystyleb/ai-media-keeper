@@ -1,0 +1,14 @@
+{% if workers and workers | length > 0 %}
+<div class="space-y-2">
+    {% for w in workers %}
+    <div class="flex items-center justify-between">
+        <span class="text-slate-200">⏳ {{ w.kind }}</span>
+        <span class="text-xs text-slate-400">
+            {% if w.total > 0 %}{{ w.done }}/{{ w.total }}{% else %}进行中{% endif %}
+        </span>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<p class="text-sm text-slate-500 italic">无后台任务</p>
+{% endif %}

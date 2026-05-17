@@ -1,0 +1,9 @@
+{% for p in providers | default([]) %}
+<span class="sb-seg" title="{{ p.tooltip }}">
+    <span class="sb-dot-{{ p.dot }}"></span>
+    <span>{{ p.name }}</span>
+    {% if p.detail %}<span class="text-statusbar-fg/60">({{ p.detail }})</span>{% endif %}
+</span>
+{% else %}
+<span class="sb-seg text-slate-500">providers 加载中…</span>
+{% endfor %}

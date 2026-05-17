@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}文件 · NASVault{% endblock %}
+
+{% block head_extra %}
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+{% endblock %}
+
+{% block breadcrumb %}
+<span class="text-slate-400 text-sm">📁 文件</span>
+{% endblock %}
+
+{% block main %}
+
+<!-- Phase A transitional: 临时按钮区，Phase B 拆 settings page 时迁出 -->
+<div class="phase-a-actions" data-bs-theme="dark">
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#aiConfigModal">
+        <i class="bi bi-stars"></i> AI 配置
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#embyConfigModal">
+        <i class="bi bi-tv"></i> Emby
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#qbitConfigModal">
+        <i class="bi bi-gear"></i> qBit
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#nasConfigModal">
+        <i class="bi bi-hdd-network"></i> NAS
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#organizeConfigModal">
+        <i class="bi bi-folder-symlink"></i> 媒体库根
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#autoOrganizeConfigModal">
+        <i class="bi bi-magic"></i> 自动整理
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#scanModal">
+        <i class="bi bi-radar"></i> 全库扫描
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#batchIdentifyModal">
+        <i class="bi bi-stars"></i> 批量识别
+    </button>
+    <button class="tb-btn-icon" style="margin-left:auto;" onclick="refreshDisk()" title="刷新磁盘">
+        <i class="bi bi-arrow-clockwise"></i>
+    </button>
+</div>
+
+<!-- Provider 状态异常 banner（仅 auth_failed/unreachable 时由 JS 显示） -->
+<div id="provider-banner" class="provider-banner" style="display:none;" data-bs-theme="dark">
+    <span class="provider-banner-icon"><i class="bi bi-exclamation-triangle-fill"></i></span>
+    <span id="provider-banner-text" class="provider-banner-text"></span>
+    <button class="provider-banner-btn" onclick="loadProvidersStatus(true)" title="重新检测 provider 状态">
+        <i class="bi bi-arrow-clockwise"></i> 重试
+    </button>
+    <button class="provider-banner-btn" onclick="dismissProviderBanner()" title="本次会话不再提醒">
+        <i class="bi bi-x-lg"></i>
+    </button>
+</div>
+
+{% include "partials/views/files_view.html" %}
+
+{% include "_legacy_modals.html" %}
+{% endblock %}

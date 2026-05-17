@@ -64,6 +64,11 @@ function _mergeState(states) {
     return worst;
 }
 
+// Phase A transitional NOTE:
+// _setDotState 依赖 id="tb-ai/tb-emby/tb-qbit" 按钮 — 这些 id 跟随老 topbar 一起删除.
+// Phase B 重做 sidebar/topbar 时, provider 状态指示已通过底部 status bar (_status_bar.html
+// + /ui/status/providers) 提供, 这套 _setDotState 钩子可整体删除或迁移. null guard
+// (if !btn return) 已确保不崩, 仅 silent 失效.
 function _setDotState(btnId, state, tooltip) {
     const btn = document.getElementById(btnId);
     if (!btn) return;
@@ -214,6 +219,7 @@ async function refreshDisk() {
 
 function renderDiskCards(disks) {
     const container = document.getElementById("disk-cards");
+    if (!container) return;   // Phase A transitional: disk-cards DOM removed with old topbar, recreated in Phase B dashboard
     container.innerHTML = "";
 
     disks.forEach(disk => {
@@ -4103,7 +4109,7 @@ async function openOrganize(srcPath) {
 
 function renderOrganizeError(body) {
     const errorMessages = {
-        organize_roots_not_configured: "尚未配置 MOVIES_ROOT / TV_ROOT。请先点 topbar「媒体库」按钮配置。",
+        organize_roots_not_configured: "尚未配置 MOVIES_ROOT / TV_ROOT。请先点临时操作栏「媒体库根」按钮配置。",
         src_missing: "源文件不存在或 SSH 无法访问。",
         src_not_identified: "此文件尚未识别媒体类型。请先点详情面板「识别」按钮。",
         organize_not_applicable: `无法整理: ${body.reason || "未知原因"}`,

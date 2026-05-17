@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}概览 · NASVault{% endblock %}
+
+{% block breadcrumb %}
+<span>🏠 概览</span>
+{% endblock %}
+
+{% block main %}
+<div class="space-y-4">
+    <header>
+        <h2 class="text-2xl font-bold text-slate-100">概览</h2>
+        <p class="text-sm text-slate-400 mt-1">系统状态 + 后台运行 + 待处理一览.</p>
+    </header>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div class="p-4 bg-slate-800 rounded border border-slate-700">
+            <h3 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+                <span>📡</span> 系统状态
+            </h3>
+            <div hx-get="/ui/dashboard/system" hx-trigger="load, every 30s" hx-swap="innerHTML">
+                <p class="text-sm text-slate-500 italic">加载中…</p>
+            </div>
+        </div>
+
+        <div class="p-4 bg-slate-800 rounded border border-slate-700">
+            <h3 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+                <span>⏳</span> 后台运行
+            </h3>
+            <div hx-get="/ui/dashboard/workers" hx-trigger="load, every 5s" hx-swap="innerHTML">
+                <p class="text-sm text-slate-500 italic">加载中…</p>
+            </div>
+        </div>
+
+        <div class="p-4 bg-slate-800 rounded border border-slate-700">
+            <h3 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+                <span>✅</span> 待处理
+            </h3>
+            <div hx-get="/ui/dashboard/todo" hx-trigger="load, every 60s" hx-swap="innerHTML">
+                <p class="text-sm text-slate-500 italic">加载中…</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="mt-8 p-4 bg-slate-800/50 rounded border border-slate-700 text-sm text-slate-400 max-w-3xl">
+        <strong class="text-slate-300">Phase B 占位:</strong> dashboard 简化版 3 卡片.
+        Phase E 会加 toast 通知 + 最近活动 timeline.
+    </div>
+
+    {% include "_legacy_modals.html" %}
+</div>
+{% endblock %}

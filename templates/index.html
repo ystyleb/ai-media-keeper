@@ -1,19 +1,14 @@
-<!DOCTYPE html>
-<html lang="zh-CN" data-bs-theme="dark">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NAS Vault</title>
+{% extends "base.html" %}
 
+{% block title %}文件 · NASVault{% endblock %}
+
+{% block head_extra %}
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
-
     <style>
-        /* ─── DESIGN TOKENS ─────────────────────────────────────── */
+        /* ─── DESIGN TOKENS ─────────────────────────────────────────── */
         :root {
             /* Backgrounds */
             --bg:         #0d1117;
@@ -108,119 +103,61 @@
         /* ─── RESET ──────────────────────────────────────────────── */
         *, *::before, *::after { box-sizing: border-box; }
 
-        html, body {
-            height: 100%;
-            margin: 0;
-            background: var(--bg);
-            color: var(--text-1);
-            font-family: var(--font-ui);
-            font-size: 14px;
-            line-height: 1.6;
-            -webkit-font-smoothing: antialiased;
-            overflow: hidden;
-        }
-
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: var(--border-med); }
 
-        /* ─── TOPBAR ─────────────────────────────────────────────── */
-        .topbar {
-            position: fixed;
-            top: 0; left: 0; right: 0;
-            height: var(--topbar-h);
+        /* ─── Phase A transitional: override base.html #main-content ──
+           base.html 加了 p-4 + overflow-auto; 老布局需要 overflow:hidden
+           + 零 padding（.app-body 自管 layout）。Phase C 清理后删此块。 */
+        #main-content {
+            padding: 0 !important;
+            overflow: hidden !important;
+            display: flex !important;
+            flex-direction: column !important;
+        }
+
+        /* ─── Provider 状态点（绿=ok / 灰=未配置 / 黄=auth_failed / 红=unreachable / 浅灰=unknown） */
+        .tb-state-dot {
+            display: inline-block; width: 7px; height: 7px;
+            border-radius: 50%; margin-left: 2px;
+            background: #888; flex-shrink: 0;
+        }
+        .tb-state-dot[data-state="ok"]            { background: #34c759; }
+        .tb-state-dot[data-state="not_configured"]{ background: #888; }
+        .tb-state-dot[data-state="auth_failed"]   { background: #ff9500; box-shadow: 0 0 4px rgba(255,149,0,0.5); }
+        .tb-state-dot[data-state="unreachable"]   { background: #ff3b30; box-shadow: 0 0 4px rgba(255,59,48,0.5); }
+        .tb-state-dot[data-state="unknown"]       { background: #555; opacity: 0.5; }
+
+        /* ─── Provider 异常 banner ─── */
+        .provider-banner {
+            z-index: 999;
+            display: flex; align-items: center; gap: 10px;
+            padding: 8px 16px;
+            background: rgba(255, 149, 0, 0.95); color: #1a1a1a;
+            font-size: 13px; font-weight: 500;
+            border-bottom: 1px solid rgba(0,0,0,0.1);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            flex-shrink: 0;
+        }
+        .provider-banner.severe { background: rgba(255, 59, 48, 0.95); color: #fff; }
+        .provider-banner-icon { font-size: 16px; }
+        .provider-banner-text { flex: 1; white-space: pre-wrap; }
+        .provider-banner-btn {
+            background: rgba(0,0,0,0.12); border: none; color: inherit;
+            padding: 4px 10px; border-radius: 4px; cursor: pointer;
+            font-size: 12px; font-weight: 500;
+        }
+        .provider-banner-btn:hover { background: rgba(0,0,0,0.22); }
+
+        /* ─── 临时按钮区（Phase A — Phase B settings 页面迁走后删） ─── */
+        .phase-a-actions {
+            display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+            padding: 8px 12px;
             background: var(--surface);
             border-bottom: 1px solid var(--border);
-            display: flex;
-            align-items: center;
-            padding: 0 16px;
-            gap: 12px;
-            z-index: 1000;
-            overflow: hidden;
-        }
-
-        .brand {
-            display: flex; align-items: center; gap: 8px;
-            text-decoration: none; flex-shrink: 0;
-        }
-        .brand-icon {
-            width: 26px; height: 26px;
-            background: var(--blue);
-            border-radius: 6px;
-            display: flex; align-items: center; justify-content: center;
-            color: var(--bg); font-size: 13px;
-        }
-        .brand-name {
-            font-size: 15px; font-weight: 700;
-            color: var(--text-1); letter-spacing: -0.3px;
-        }
-        .brand-name span { color: var(--blue); }
-
-        /* Disk strip */
-        .topbar-disks {
-            flex: 1;
-            overflow-x: auto; overflow-y: hidden;
-            scrollbar-width: none; min-width: 0;
-            height: 100%;
-            display: flex; align-items: center;
-        }
-        .topbar-disks::-webkit-scrollbar { display: none; }
-
-        #disk-cards {
-            display: flex !important;
-            flex-wrap: nowrap !important;
-            gap: 8px; align-items: center;
-            width: max-content;
-        }
-        #disk-cards .col-md-6 {
-            width: auto !important; flex: 0 0 auto !important;
-            padding: 0 !important; margin: 0 !important;
-        }
-        #disk-cards .card.disk-card {
-            border-radius: var(--r) !important;
-            border-color: var(--border) !important;
-            background: var(--surface-2) !important;
-            min-width: 158px; max-width: 200px;
-            height: 38px;
-            transition: border-color 0.15s !important;
-        }
-        #disk-cards .card.disk-card:hover {
-            border-color: var(--border-med) !important;
-            transform: none !important;
-        }
-        #disk-cards .card-body {
-            padding: 5px 10px !important;
-            display: flex; flex-direction: column; justify-content: center;
-            gap: 3px;
-        }
-        #disk-cards .progress {
-            height: 3px !important;
-            border-radius: 2px !important;
-            background: var(--surface-3) !important;
-            margin: 0 !important;
-        }
-        #disk-cards small {
-            font-size: 11px !important;
-            line-height: 1.2 !important;
-            font-family: var(--font-mono) !important;
-            color: var(--text-3) !important;
-        }
-        #disk-cards .fw-bold {
-            font-size: 11px !important;
-            line-height: 1.2 !important;
-            color: var(--text-1) !important;
-            font-weight: 600 !important;
-            font-family: var(--font-ui) !important;
-            letter-spacing: 0.2px;
-        }
-        #disk-cards .text-success { color: var(--green) !important; }
-        #disk-cards .text-warning { color: var(--amber) !important; }
-        #disk-cards .text-danger  { color: var(--red) !important; }
-
-        /* Topbar actions */
-        .topbar-actions {
-            display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+            flex-shrink: 0;
         }
         .tb-btn {
             display: inline-flex; align-items: center; gap: 5px;
@@ -249,40 +186,7 @@
         }
         .tb-btn-icon:hover { color: var(--text-1); border-color: var(--border-med); }
 
-        /* Provider 状态点（绿=ok / 灰=未配置 / 黄=auth_failed / 红=unreachable / 浅灰=unknown） */
-        .tb-state-dot {
-            display: inline-block; width: 7px; height: 7px;
-            border-radius: 50%; margin-left: 2px;
-            background: #888; flex-shrink: 0;
-        }
-        .tb-state-dot[data-state="ok"]            { background: #34c759; }
-        .tb-state-dot[data-state="not_configured"]{ background: #888; }
-        .tb-state-dot[data-state="auth_failed"]   { background: #ff9500; box-shadow: 0 0 4px rgba(255,149,0,0.5); }
-        .tb-state-dot[data-state="unreachable"]   { background: #ff3b30; box-shadow: 0 0 4px rgba(255,59,48,0.5); }
-        .tb-state-dot[data-state="unknown"]       { background: #555; opacity: 0.5; }
-
-        /* Provider 异常 banner */
-        .provider-banner {
-            position: fixed; left: 0; right: 0; top: var(--topbar-h);
-            z-index: 999;
-            display: flex; align-items: center; gap: 10px;
-            padding: 8px 16px;
-            background: rgba(255, 149, 0, 0.95); color: #1a1a1a;
-            font-size: 13px; font-weight: 500;
-            border-bottom: 1px solid rgba(0,0,0,0.1);
-            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-        }
-        .provider-banner.severe { background: rgba(255, 59, 48, 0.95); color: #fff; }
-        .provider-banner-icon { font-size: 16px; }
-        .provider-banner-text { flex: 1; white-space: pre-wrap; }
-        .provider-banner-btn {
-            background: rgba(0,0,0,0.12); border: none; color: inherit;
-            padding: 4px 10px; border-radius: 4px; cursor: pointer;
-            font-size: 12px; font-weight: 500;
-        }
-        .provider-banner-btn:hover { background: rgba(0,0,0,0.22); }
-
-        /* ─── 视图切换 tab（文件/库） ──────────────────────────── */
+        /* ─── 视图切换 tab（文件/库/重复） ──────────────────────────── */
         .view-toggle {
             display: inline-flex; gap: 0;
             border: 1px solid var(--border); border-radius: var(--r);
@@ -300,8 +204,6 @@
         }
 
         /* ─── 库视图布局 ───────────────────────────────────────── */
-        /* 用 absolute fill 避免 flex-within-flex 的 sizing 边角问题。
-           .main-panel position:relative （见 .main-panel 那条规则下面） */
         #dedup-panel {
             display: none;
             position: absolute;
@@ -356,7 +258,6 @@
             display: none;
         }
         .dedup-series-body.open { display: block; }
-        /* Inside series body, nested dedup-group needs no extra border */
         .dedup-series-body .dedup-group {
             border: none;
             border-top: 1px solid var(--border);
@@ -519,8 +420,7 @@
         /* ─── APP LAYOUT ─────────────────────────────────────────── */
         .app-body {
             display: flex;
-            height: 100vh;
-            padding-top: var(--topbar-h);
+            flex: 1;
             overflow: hidden;
         }
 
@@ -745,7 +645,7 @@
         #empty-state { padding: 80px 0 !important; color: var(--text-2) !important; }
         #empty-state .bi { color: var(--text-3) !important; }
 
-        /* ─── SIDEBAR ────────────────────────────────────────────── */
+        /* ─── SIDEBAR (right panel, 老 app 内部 sidebar) ────────── */
         .sidebar {
             width: var(--sidebar-w); flex-shrink: 0;
             display: flex; flex-direction: column;
@@ -1006,83 +906,58 @@
             background: var(--teal-dim) !important;
         }
     </style>
-</head>
+{% endblock %}
 
-<body>
+{% block breadcrumb %}
+<span class="text-slate-400 text-sm">📁 文件</span>
+{% endblock %}
 
-<!-- ── TOPBAR ──────────────────────────────────────────────────── -->
-<header class="topbar">
-    <a class="brand" href="#">
-        <div class="brand-icon">
-            <i class="bi bi-hdd-network-fill"></i>
-        </div>
-        <span class="brand-name">NAS<span>Vault</span></span>
-    </a>
+{% block main %}
 
-    <div class="topbar-disks">
-        <div id="disk-cards">
-            <!-- JS: renderDiskCards() -->
-        </div>
+<!-- Phase A transitional: 临时按钮区，Phase B 拆 settings page 时迁出 -->
+<div class="phase-a-actions" data-bs-theme="dark">
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#aiConfigModal">
+        <i class="bi bi-stars"></i> AI 配置
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#embyConfigModal">
+        <i class="bi bi-tv"></i> Emby
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#qbitConfigModal">
+        <i class="bi bi-gear"></i> qBit
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#nasConfigModal">
+        <i class="bi bi-hdd-network"></i> NAS
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#organizeConfigModal">
+        <i class="bi bi-folder-symlink"></i> 媒体库根
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#autoOrganizeConfigModal">
+        <i class="bi bi-magic"></i> 自动整理
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#scanModal">
+        <i class="bi bi-radar"></i> 全库扫描
+    </button>
+    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#batchIdentifyModal">
+        <i class="bi bi-stars"></i> 批量识别
+    </button>
+    <div class="view-toggle" role="tablist" style="margin-left:auto;">
+        <button id="view-tab-files" class="tb-btn view-tab active" onclick="switchView('files')">
+            <i class="bi bi-folder2"></i> 文件
+        </button>
+        <button id="view-tab-library" class="tb-btn view-tab" onclick="switchView('library')">
+            <i class="bi bi-collection-play"></i> 库
+        </button>
+        <button id="view-tab-dedup" class="tb-btn view-tab" onclick="switchView('dedup')">
+            <i class="bi bi-files"></i> 重复
+        </button>
     </div>
-
-    <div class="topbar-actions">
-        <button class="tb-btn-icon" onclick="refreshDisk()" title="刷新磁盘">
-            <i class="bi bi-arrow-clockwise"></i>
-        </button>
-        <button class="tb-btn" onclick="showHardlinks()">
-            <i class="bi bi-link-45deg"></i>
-            硬链接
-        </button>
-        <button class="tb-btn" onclick="showNASConfig()">
-            <i class="bi bi-hdd-network"></i>
-            NAS
-        </button>
-        <button id="tb-qbit" class="tb-btn" onclick="showQBitConfig()">
-            <i class="bi bi-gear"></i>
-            qBit
-            <span class="tb-state-dot" data-state="unknown" title="加载中"></span>
-        </button>
-        <button id="tb-ai" class="tb-btn" onclick="showAIConfig()">
-            <i class="bi bi-stars"></i>
-            AI
-            <span class="tb-state-dot" data-state="unknown" title="加载中"></span>
-        </button>
-        <button id="tb-emby" class="tb-btn" onclick="showEmbyConfig()" title="配置 Emby + 同步已看记录">
-            <i class="bi bi-tv"></i>
-            Emby
-            <span class="tb-state-dot" data-state="unknown" title="加载中"></span>
-        </button>
-        <button class="tb-btn" onclick="showOrganizeConfig()" title="配置媒体库 hardlink 目标根 (MOVIES_ROOT/TV_ROOT)">
-            <i class="bi bi-folder-symlink"></i>
-            媒体库
-        </button>
-        <button class="tb-btn" onclick="showAutoOrganizeConfig()" title="qBit 下载完成后自动 organize (Phase 4C)">
-            <i class="bi bi-magic"></i>
-            自动整理
-        </button>
-        <button class="tb-btn" onclick="openScanModal()" title="后台扫描全库 + 自动识别元数据">
-            <i class="bi bi-radar"></i>
-            扫库
-        </button>
-        <div class="view-toggle" role="tablist" style="margin-left:8px;">
-            <button id="view-tab-files" class="tb-btn view-tab active" onclick="switchView('files')">
-                <i class="bi bi-folder2"></i>
-                文件
-            </button>
-            <button id="view-tab-library" class="tb-btn view-tab" onclick="switchView('library')">
-                <i class="bi bi-collection-play"></i>
-                库
-            </button>
-            <button id="view-tab-dedup" class="tb-btn view-tab" onclick="switchView('dedup')">
-                <i class="bi bi-files"></i>
-                重复
-            </button>
-        </div>
-    </div>
-</header>
+    <button class="tb-btn-icon" onclick="refreshDisk()" title="刷新磁盘">
+        <i class="bi bi-arrow-clockwise"></i>
+    </button>
+</div>
 
 <!-- Provider 状态异常 banner（仅 auth_failed/unreachable 时由 JS 显示） -->
-<div id="provider-banner" class="provider-banner" style="display:none;">
+<div id="provider-banner" class="provider-banner" style="display:none;" data-bs-theme="dark">
     <span class="provider-banner-icon"><i class="bi bi-exclamation-triangle-fill"></i></span>
     <span id="provider-banner-text" class="provider-banner-text"></span>
     <button class="provider-banner-btn" onclick="loadProvidersStatus(true)" title="重新检测 provider 状态">
@@ -1095,7 +970,7 @@
 
 
 <!-- ── APP BODY ────────────────────────────────────────────────── -->
-<div class="app-body">
+<div class="app-body" data-bs-theme="dark">
 
     <!-- LEFT: FILE PANEL ──────────────────────────────────────── -->
     <div class="main-panel">
@@ -1317,714 +1192,6 @@
 
 </div><!-- /.app-body -->
 
+{# Phase B: modals migrated to _legacy_modals.html via pages/files.html #}
 
-<!-- ── DELETE MODAL ────────────────────────────────────────────── -->
-<div class="modal fade" id="deleteModal" tabindex="-1">
-    <div class="modal-dialog modal-lg modal-dialog-scrollable">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="bi bi-exclamation-triangle text-warning me-2"></i>确认删除
-                </h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-
-                <div id="delete-loading" class="text-center py-4" style="display:none;">
-                    <div class="spinner-border text-primary"></div>
-                    <p class="mt-2" style="font-size:13px;color:var(--text-2);">正在分析关联文件和种子…</p>
-                </div>
-
-                <div id="delete-preview-content">
-                    <p>确定要删除以下文件吗？此操作不可撤销。</p>
-
-                    <h6>
-                        <i class="bi bi-file-earmark me-1"></i>选中的文件
-                        <span class="fw-normal" style="color:var(--text-3);" id="delete-total-size"></span>
-                    </h6>
-                    <div class="border rounded p-3 mb-3" id="delete-file-list"
-                         style="max-height:140px;overflow-y:auto;"></div>
-
-                    <div id="hardlink-section" style="display:none;">
-                        <h6><i class="bi bi-link-45deg me-1" style="color:var(--teal);"></i>关联硬链接（将一并删除）</h6>
-                        <div class="border rounded p-3 mb-3" id="hardlink-list"
-                             style="max-height:140px;overflow-y:auto;"></div>
-                    </div>
-
-                    <div id="torrent-section" style="display:none;">
-                        <h6><i class="bi bi-cloud-arrow-down me-1" style="color:var(--blue);"></i>关联 PT 种子（含下载文件）</h6>
-                        <div class="border rounded p-3 mb-3" id="torrent-list"
-                             style="max-height:140px;overflow-y:auto;"></div>
-                    </div>
-
-                    <div id="commands-section" style="display:none;">
-                        <h6><i class="bi bi-terminal me-1" style="color:var(--text-2);"></i>将在 NAS 上执行的命令</h6>
-                        <pre class="border rounded p-3 mb-3" id="commands-list"
-                             style="max-height:140px;overflow-y:auto;"></pre>
-                    </div>
-
-                    <div class="alert alert-danger mt-3 mb-0">
-                        <i class="bi bi-exclamation-triangle-fill me-1"></i>
-                        <strong>警告：</strong>将删除所有硬链接和关联种子（含下载文件），磁盘空间将被释放。
-                    </div>
-                </div>
-
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                <button type="button" class="btn btn-danger" id="btn-confirm-delete"
-                        onclick="confirmDelete()" disabled>
-                    <i class="bi bi-trash me-1"></i>确认删除
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-
-
-<!-- ── NAS CONFIG MODAL ────────────────────────────────────────── -->
-<div class="modal fade" id="nasConfigModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="bi bi-hdd-network me-2" style="color:var(--blue);"></i>NAS 连接设置
-                </h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <form id="nas-config-form">
-                    <div class="mb-3">
-                        <label for="nas-host" class="form-label">主机地址</label>
-                        <input type="text" class="form-control" id="nas-host"
-                               placeholder="192.168.1.50 或 nas.local">
-                        <div class="form-text">NAS 的 IP 或主机名</div>
-                    </div>
-                    <div class="row">
-                        <div class="col-7 mb-3">
-                            <label for="nas-user" class="form-label">SSH 用户名</label>
-                            <input type="text" class="form-control" id="nas-user"
-                                   placeholder="admin">
-                        </div>
-                        <div class="col-5 mb-3">
-                            <label for="nas-port" class="form-label">端口</label>
-                            <input type="number" class="form-control" id="nas-port"
-                                   placeholder="22" min="1" max="65535">
-                        </div>
-                    </div>
-                    <div class="mb-3">
-                        <label for="nas-base-path" class="form-label">文件根路径</label>
-                        <input type="text" class="form-control" id="nas-base-path"
-                               placeholder="/share/CACHEDEV1_DATA 或 /volume1">
-                        <div class="form-text">浏览的起点路径，必须以 / 开头</div>
-                    </div>
-                    <div class="mb-3">
-                        <label for="nas-disk-pattern" class="form-label">
-                            磁盘 df 模式 <span style="color:var(--text-3);font-weight:400;">(可选)</span>
-                        </label>
-                        <input type="text" class="form-control" id="nas-disk-pattern"
-                               placeholder="留空则用根路径；多池可填 /share/CACHEDEV*_DATA">
-                        <div class="form-text">用于 df 命令显示磁盘容量，支持 glob 通配符</div>
-                    </div>
-                </form>
-                <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;font-size:12px;color:var(--text-2);margin-top:10px;">
-                    <i class="bi bi-info-circle me-1" style="color:var(--teal);"></i>
-                    需要预先在 NAS 上配置 <strong>SSH 公钥免密登录</strong>，本工具不传输密码。
-                </div>
-                <div id="nas-connection-status" class="mt-2"></div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-outline-info" onclick="testNASConnection()">
-                    <i class="bi bi-lightning me-1"></i>测试连接
-                </button>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                <button type="button" class="btn btn-primary" id="btn-save-nas" onclick="saveNASConfig()">
-                    <i class="bi bi-check2 me-1"></i>保存并应用
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-
-
-<!-- ── QBITTORRENT MODAL ────────────────────────────────────────── -->
-<div class="modal fade" id="qbitConfigModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="bi bi-gear me-2" style="color:var(--teal);"></i>qBittorrent 设置
-                </h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <form id="qbit-config-form">
-                    <div class="mb-3">
-                        <label for="qbit-url" class="form-label">WebUI 地址</label>
-                        <input type="url" class="form-control" id="qbit-url"
-                               placeholder="http://192.168.1.100:8080">
-                        <div class="form-text">qBittorrent WebUI 的完整 URL</div>
-                    </div>
-                    <div class="mb-3">
-                        <label for="qbit-user" class="form-label">用户名</label>
-                        <input type="text" class="form-control" id="qbit-user"
-                               placeholder="admin">
-                    </div>
-                    <div class="mb-3">
-                        <label for="qbit-password" class="form-label">密码</label>
-                        <input type="password" class="form-control" id="qbit-password"
-                               placeholder="留空则不修改">
-                        <div class="form-text">留空表示不修改密码</div>
-                    </div>
-                </form>
-                <div id="qbit-connection-status" class="mt-2"></div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-outline-info" onclick="testQBitConnection()">
-                    <i class="bi bi-lightning me-1"></i>测试连接
-                </button>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                <button type="button" class="btn btn-primary" id="btn-save-qbit" onclick="saveQBitConfig()">
-                    <i class="bi bi-check2 me-1"></i>保存配置
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-
-
-<!-- 批量识别 modal -->
-<div class="modal fade" id="batchIdentifyModal" tabindex="-1">
-    <div class="modal-dialog modal-xl">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="bi bi-stars me-2" style="color:var(--teal);"></i>批量 AI 识别
-                </h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <div id="batch-summary" class="mb-3 small text-secondary"></div>
-
-                <!-- 进度条 + 控制 -->
-                <div class="d-flex align-items-center gap-3 mb-3">
-                    <div class="progress flex-grow-1" style="height:10px;background:var(--surface-2);">
-                        <div id="batch-progress-bar" class="progress-bar bg-info" role="progressbar" style="width:0%;"></div>
-                    </div>
-                    <span id="batch-progress-text" class="small text-secondary text-nowrap">0 / 0</span>
-                    <button id="batch-start-btn" class="btn btn-sm btn-primary" onclick="startBatchIdentify()" disabled>
-                        <i class="bi bi-play-fill"></i> 开始
-                    </button>
-                    <button id="batch-stop-btn" class="btn btn-sm btn-outline-warning" onclick="stopBatchIdentify()" style="display:none;">
-                        <i class="bi bi-stop-fill"></i> 停止
-                    </button>
-                </div>
-
-                <!-- 选项 -->
-                <div class="form-check small mb-2">
-                    <input class="form-check-input" type="checkbox" id="batch-skip-nfo" checked>
-                    <label class="form-check-label text-secondary" for="batch-skip-nfo">
-                        跳过有 .nfo 的文件（已有元数据）
-                    </label>
-                </div>
-
-                <!-- 结果表 -->
-                <div style="max-height:55vh;overflow-y:auto;">
-                    <table class="table table-sm" id="batch-result-table">
-                        <thead style="position:sticky;top:0;background:var(--surface);">
-                            <tr>
-                                <th style="width:60px;">海报</th>
-                                <th>文件 / 识别结果</th>
-                                <th style="width:90px;">置信</th>
-                                <th style="width:60px;">方式</th>
-                            </tr>
-                        </thead>
-                        <tbody id="batch-result-tbody"></tbody>
-                    </table>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button id="batch-nfo-write-btn" type="button" class="btn btn-outline-info" style="display:none;" onclick="openBatchNfoWrite()">
-                    <i class="bi bi-file-earmark-text me-1"></i>批量写入 NFO（<span id="batch-nfo-eligible-count">0</span>）
-                </button>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-
-<!-- NFO 写入 confirm modal（contract #1 preview → confirm） -->
-<div class="modal fade" id="nfoWriteModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="bi bi-file-earmark-text me-2" style="color:var(--teal);"></i>写入 NFO 元数据
-                </h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <div id="nfo-write-summary" class="mb-2 small"></div>
-                <div id="nfo-write-warning" class="alert alert-warning py-2 small mb-2" style="display:none;"></div>
-                <div style="max-height:50vh;overflow-y:auto;">
-                    <table class="table table-sm">
-                        <thead style="position:sticky;top:0;background:var(--surface);">
-                            <tr>
-                                <th>目标 .nfo</th>
-                                <th style="width:90px;">动作</th>
-                                <th style="width:80px;">大小</th>
-                            </tr>
-                        </thead>
-                        <tbody id="nfo-write-tbody"></tbody>
-                    </table>
-                </div>
-                <div id="nfo-write-result" class="mt-2 small" style="display:none;"></div>
-            </div>
-            <div class="modal-footer">
-                <button id="nfo-write-confirm-btn" type="button" class="btn btn-primary" onclick="confirmNfoWrite()">
-                    <i class="bi bi-check-lg me-1"></i>确认写入
-                </button>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-
-<!-- 全库扫描 modal -->
-<div class="modal fade" id="scanModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="bi bi-radar me-2" style="color:var(--teal);"></i>全库后台扫描
-                </h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <!-- Step 1: setup（未启动时显示） -->
-                <div id="scan-setup">
-                    <p class="small text-secondary">
-                        递归扫描 NAS 路径下所有视频文件，自动 TMDB 识别并写入 cache。
-                        已识别且 mtime 未变的文件自动跳过（增量扫描）。
-                    </p>
-                    <div class="mb-2">
-                        <label class="form-label small text-secondary">扫描根路径</label>
-                        <input type="text" id="scan-base-path" class="form-control" placeholder="/share/CACHEDEV2_DATA">
-                    </div>
-                    <div class="mb-2">
-                        <label class="form-label small text-secondary">
-                            目录递归深度: <span id="scan-depth-label">5</span>
-                        </label>
-                        <input type="range" id="scan-depth" class="form-range" min="1" max="10" value="5">
-                    </div>
-                    <div id="scan-recent" class="small text-secondary mt-3"></div>
-                </div>
-
-                <!-- Step 2: 进度（启动后显示） -->
-                <div id="scan-progress" style="display:none;">
-                    <div class="d-flex justify-content-between align-items-center mb-2">
-                        <span id="scan-status-label" class="small"></span>
-                        <span id="scan-counts" class="small text-secondary"></span>
-                    </div>
-                    <div class="progress mb-2" style="height:10px;background:var(--surface-2);">
-                        <div id="scan-progress-bar" class="progress-bar bg-info" role="progressbar" style="width:0%;"></div>
-                    </div>
-                    <div class="d-flex justify-content-between small text-secondary mb-2">
-                        <span id="scan-progress-text">0 / 0</span>
-                        <span id="scan-eta"></span>
-                    </div>
-                    <div class="small text-secondary">
-                        当前: <code id="scan-current-path" style="font-size:11px;">—</code>
-                    </div>
-                    <div id="scan-result" class="mt-3" style="display:none;"></div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button id="scan-start-btn" class="btn btn-primary" onclick="startFullScan()">
-                    <i class="bi bi-play-fill me-1"></i>开始扫描
-                </button>
-                <button id="scan-abort-btn" class="btn btn-outline-warning" onclick="abortFullScan()" style="display:none;">
-                    <i class="bi bi-stop-fill me-1"></i>中止
-                </button>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-
-<!-- AI 配置 modal（TMDB metadata + DeepSeek LLM） -->
-<div class="modal fade" id="aiConfigModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="bi bi-stars me-2" style="color:var(--teal);"></i>AI 与元数据配置
-                </h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <p class="text-secondary small mb-3">
-                    两个都是 BYOK（自己申请、自己配）。落盘到
-                    <code>config/.tmdb_key</code> / <code>config/.deepseek_key</code>（chmod 600）。
-                </p>
-
-                <!-- TMDB section -->
-                <div class="mb-4">
-                    <label class="form-label">
-                        <strong>TMDB API Key</strong>
-                        <span class="badge bg-secondary ms-1" id="tmdb-key-status">未配置</span>
-                    </label>
-                    <input type="password" class="form-control" id="tmdb-key-input"
-                           placeholder="留空则不修改；已配置时显示 ●●●">
-                    <div class="form-text">
-                        申请：<a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">themoviedb.org/settings/api</a>
-                        （免费，1 分钟）。用于：剧名 / 海报 / 评分 / 剧情 / 演员。
-                    </div>
-                    <div id="tmdb-test-status" class="mt-2 small"></div>
-                </div>
-
-                <hr style="border-color:var(--border);">
-
-                <!-- DeepSeek section -->
-                <div class="mb-2">
-                    <label class="form-label">
-                        <strong>DeepSeek API Key</strong>
-                        <span class="badge bg-secondary ms-1" id="deepseek-key-status">未配置</span>
-                    </label>
-                    <input type="password" class="form-control" id="deepseek-key-input"
-                           placeholder="sk-... 留空则不修改">
-                    <div class="form-text">
-                        申请：<a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener">platform.deepseek.com/api_keys</a>。
-                        用于：中文剧名 / 模糊命名 AI 识别（grounded select）。
-                        Anthropic / OpenAI 太贵，DeepSeek 单文件成本约 $0.0001。
-                    </div>
-                    <div id="deepseek-test-status" class="mt-2 small"></div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-outline-info btn-sm" onclick="testTMDBKey()">
-                    测试 TMDB
-                </button>
-                <button type="button" class="btn btn-outline-info btn-sm" onclick="testDeepseekKey()">
-                    测试 DeepSeek
-                </button>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
-                <button type="button" class="btn btn-primary" onclick="saveAIConfig()">
-                    <i class="bi bi-check2 me-1"></i>保存
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-
-
-<!-- Emby 配置 modal（Watch source provider） -->
-<div class="modal fade" id="embyConfigModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="bi bi-tv me-2" style="color:var(--teal);"></i>Emby 观看进度
-                </h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <p class="text-secondary small mb-3">
-                    拉取 Emby 已看完列表，用于重复检测中判断"已看过的低质版本可删"。
-                    URL / user_id 落盘到 <code>config/emby.json</code>，api_key 落盘到 <code>config/.emby_key</code>（chmod 600）。
-                </p>
-
-                <div class="mb-3">
-                    <label class="form-label">
-                        <strong>Emby 服务器 URL</strong>
-                        <span class="badge bg-secondary ms-1" id="emby-state-badge">未配置</span>
-                    </label>
-                    <input type="url" class="form-control" id="emby-url-input"
-                           placeholder="http://192.168.x.x:8096">
-                </div>
-                <div class="mb-3">
-                    <label class="form-label"><strong>User ID</strong></label>
-                    <input type="text" class="form-control" id="emby-user-input"
-                           placeholder="32-字符 Emby userId">
-                    <div class="form-text">
-                        Emby Web → 右上头像 → Profile → 浏览器地址栏 <code>?userId=xxx</code> 那串。
-                    </div>
-                </div>
-                <div class="mb-3">
-                    <label class="form-label">
-                        <strong>API Key</strong>
-                        <span class="badge bg-secondary ms-1" id="emby-key-badge">未配置</span>
-                    </label>
-                    <input type="password" class="form-control" id="emby-key-input"
-                           placeholder="留空则不修改；已配置时显示 ●●●">
-                    <div class="form-text">
-                        Emby 管理界面 → 服务器 → API 密钥 → 新建。
-                    </div>
-                </div>
-                <div id="emby-test-status" class="mt-2 small"></div>
-
-                <hr style="border-color:var(--border);">
-
-                <!-- 同步控制 -->
-                <div class="mb-2">
-                    <strong>同步已看记录</strong>
-                    <span class="badge bg-secondary ms-1" id="emby-sync-badge">未同步</span>
-                </div>
-                <button type="button" class="btn btn-outline-info btn-sm" id="btn-emby-sync"
-                        onclick="triggerEmbySync()">
-                    <i class="bi bi-arrow-repeat me-1"></i>触发同步
-                </button>
-                <div id="emby-sync-status" class="mt-2 small text-secondary"></div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-outline-info btn-sm" onclick="testEmbyConnection()">
-                    测试连接
-                </button>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
-                <button type="button" class="btn btn-primary" onclick="saveEmbyConfig()">
-                    <i class="bi bi-check2 me-1"></i>保存
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- ── ORGANIZE CONFIG MODAL (Phase 4A.5) ────────────────────── -->
-<div class="modal fade" id="organizeConfigModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="bi bi-folder-symlink me-2" style="color:var(--teal);"></i>媒体库目标根
-                </h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <p class="text-secondary small mb-3">
-                    配置 hardlink 目标根目录。整理时电影会被 hardlink 到 <code>MOVIES_ROOT/&lt;Title (Year)&gt;/&lt;basename&gt;.mkv</code>，
-                    剧集 hardlink 到 <code>TV_ROOT/&lt;Series (Year)&gt;/Season NN/&lt;basename&gt;.mkv</code> + 自动写 NFO。
-                    路径必须是 NAS 上的绝对路径，且对 NAS 用户可写。
-                </p>
-
-                <div class="mb-3">
-                    <label class="form-label">
-                        <strong>MOVIES_ROOT</strong>
-                        <span class="badge bg-secondary ms-1" id="organize-movies-badge">未配置</span>
-                    </label>
-                    <input type="text" class="form-control" id="organize-movies-input"
-                           placeholder="/share/CACHEDEV2_DATA/media/movies">
-                    <div class="form-text">电影 hardlink 根目录</div>
-                </div>
-                <div class="mb-3">
-                    <label class="form-label">
-                        <strong>TV_ROOT</strong>
-                        <span class="badge bg-secondary ms-1" id="organize-tv-badge">未配置</span>
-                    </label>
-                    <input type="text" class="form-control" id="organize-tv-input"
-                           placeholder="/share/CACHEDEV2_DATA/media/tv">
-                    <div class="form-text">剧集 hardlink 根目录（tvshow.nfo 落在 series 根，episode NFO 落在 Season NN 内）</div>
-                </div>
-                <div id="organize-test-status" class="mt-2 small"></div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-outline-info btn-sm" onclick="testOrganizeConfig()">
-                    测试目录
-                </button>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
-                <button type="button" class="btn btn-primary" onclick="saveOrganizeConfig()">
-                    <i class="bi bi-check2 me-1"></i>保存
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- ── AUTO ORGANIZE CONFIG + HISTORY MODAL (Phase 4C.5) ─────────── -->
-<div class="modal fade" id="autoOrganizeConfigModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="bi bi-magic me-2" style="color:var(--teal);"></i>qBit 自动整理
-                </h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <ul class="nav nav-tabs" role="tablist">
-                    <li class="nav-item" role="presentation">
-                        <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#autoOrgConfigTab" type="button" role="tab">
-                            <i class="bi bi-sliders me-1"></i>配置
-                        </button>
-                    </li>
-                    <li class="nav-item" role="presentation">
-                        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#autoOrgHistoryTab" type="button" role="tab" onclick="loadAutoOrganizeHistory()">
-                            <i class="bi bi-clock-history me-1"></i>历史记录
-                            <span id="autoOrg-history-count-badge" class="badge bg-secondary ms-1"></span>
-                        </button>
-                    </li>
-                </ul>
-
-                <div class="tab-content pt-3">
-                    <!-- ── 配置 tab ── -->
-                    <div class="tab-pane fade show active" id="autoOrgConfigTab" role="tabpanel">
-                        <p class="text-secondary small mb-3">
-                            qBit 下载完成后 cron 自动扫描，对**已识别 + confidence ≥ 阈值 + category 在白名单**的种子自动 organize 到媒体库（同手动整理走 hardlink + NFO + 双 inode 锚定）。
-                            未达标种子不动 (留在 file 视图等手动处理)。
-                        </p>
-
-                        <div class="form-check form-switch mb-3">
-                            <input class="form-check-input" type="checkbox" id="autoOrg-enabled">
-                            <label class="form-check-label" for="autoOrg-enabled">
-                                <strong>启用自动整理</strong>
-                                <span class="badge bg-secondary ms-1" id="autoOrg-enabled-badge">未启用</span>
-                            </label>
-                            <div class="form-text">关闭后 cron 仍跑 reconcile（同步已 organizing → terminal），但不触发新 organize</div>
-                        </div>
-
-                        <div class="mb-3">
-                            <label class="form-label"><strong>Category 白名单</strong></label>
-                            <div id="autoOrg-categories-list" class="d-flex flex-wrap gap-2 mb-2"></div>
-                            <div class="input-group input-group-sm">
-                                <input type="text" class="form-control" id="autoOrg-categories-input"
-                                       placeholder="手动添加 category 名">
-                                <button class="btn btn-outline-secondary" type="button" onclick="addAutoOrgCategory()">+ 添加</button>
-                            </div>
-                            <div class="form-text">仅触发这些 category 的种子；显示当前 qBit 现存 categories 供勾选</div>
-                            <div id="autoOrg-qbit-categories-hint" class="small text-secondary mt-1"></div>
-                        </div>
-
-                        <div class="row g-3 mb-3">
-                            <div class="col-md-6">
-                                <label class="form-label"><strong>Cron 周期</strong>（分钟）</label>
-                                <input type="number" class="form-control" id="autoOrg-poll-interval"
-                                       min="1" step="1" value="5">
-                                <div class="form-text">最小 1min；改动需重启 server 生效</div>
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label"><strong>识别 confidence 门槛</strong></label>
-                                <input type="number" class="form-control" id="autoOrg-confidence-threshold"
-                                       min="0" max="1" step="0.05" value="0.85">
-                                <div class="form-text">LLM 识别 ≥ 此值才自动 organize；否则标 skipped_low_confidence 等手动</div>
-                            </div>
-                        </div>
-
-                        <div id="autoOrg-save-status" class="mt-2 small"></div>
-                    </div>
-
-                    <!-- ── 历史 tab ── -->
-                    <div class="tab-pane fade" id="autoOrgHistoryTab" role="tabpanel">
-                        <!-- banner: 未识别种子按目录聚合提示 -->
-                        <div id="autoOrg-needs-identify-banner" class="alert alert-warning small py-2 mb-3" style="display:none;"></div>
-
-                        <div class="d-flex gap-2 mb-3 align-items-center">
-                            <select class="form-select form-select-sm" id="autoOrg-history-filter" style="max-width:240px;" onchange="loadAutoOrganizeHistory()">
-                                <option value="needs_attention" selected>需关注（默认 — 已隐藏待识别）</option>
-                                <option value="">全部状态（含待识别）</option>
-                                <option value="organizing">进行中</option>
-                                <option value="pending">等待中</option>
-                                <option value="succeeded">已成功</option>
-                                <option value="failed">已失败</option>
-                                <option value="skipped_low_confidence">置信度不足</option>
-                                <option value="skipped_unsupported">不支持</option>
-                                <option value="skipped_needs_identify">待识别</option>
-                            </select>
-                            <button class="btn btn-sm btn-outline-secondary" onclick="loadAutoOrganizeHistory()">
-                                <i class="bi bi-arrow-clockwise"></i> 刷新
-                            </button>
-                            <span class="text-secondary small" id="autoOrg-history-summary"></span>
-                        </div>
-                        <div id="autoOrg-history-list" style="max-height:50vh; overflow-y:auto;">
-                            <div class="text-secondary text-center py-4">加载中…</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
-                <button type="button" class="btn btn-primary" onclick="saveAutoOrganizeConfig()">
-                    <i class="bi bi-check2 me-1"></i>保存配置
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- ── ORGANIZE PREVIEW/CONFIRM MODAL (Phase 4A.4) ─────────── -->
-<div class="modal fade" id="organizeModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="bi bi-folder-symlink me-2" style="color:var(--teal);"></i>整理到媒体库
-                </h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <div id="organize-modal-body">
-                    <!-- JS: renderOrganizePreview() / renderOrganizeResult() 注入 -->
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                <button type="button" class="btn btn-primary" id="organize-confirm-btn"
-                        style="display:none;" onclick="confirmOrganize()">
-                    <i class="bi bi-check2 me-1"></i>确认整理
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- ── BATCH ORGANIZE MODAL (Phase 4B.4) — 3 step: dashboard / preview / progress ─── -->
-<div class="modal fade" id="organizeBatchModal" tabindex="-1" data-bs-backdrop="static">
-    <div class="modal-dialog modal-xl">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="bi bi-folder-symlink me-2" style="color:var(--teal);"></i>批量整理目录
-                    <small class="text-secondary ms-2" id="batch-modal-subtitle"></small>
-                </h5>
-                <button type="button" class="btn-close btn-close-white" id="batch-close-btn"
-                        data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <!-- Step 1: dir-preview dashboard -->
-                <div id="batch-step-dashboard" style="display:none;">
-                    <div id="batch-dashboard-body">
-                        <!-- JS 注入 counts + 分组 items -->
-                    </div>
-                </div>
-                <!-- Step 2: multi-item preview with checkbox -->
-                <div id="batch-step-preview" style="display:none;">
-                    <div id="batch-preview-body">
-                        <!-- JS 注入分组 + checkbox table -->
-                    </div>
-                </div>
-                <!-- Step 3: progress polling -->
-                <div id="batch-step-progress" style="display:none;">
-                    <div id="batch-progress-body">
-                        <!-- JS 注入进度条 + current_item + counts -->
-                    </div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" id="batch-cancel-btn"
-                        data-bs-dismiss="modal">取消</button>
-                <button type="button" class="btn btn-primary" id="batch-next-btn"
-                        style="display:none;">下一步：审 plan</button>
-                <button type="button" class="btn btn-success" id="batch-confirm-btn"
-                        style="display:none;"><i class="bi bi-check2 me-1"></i>确认整理</button>
-                <button type="button" class="btn btn-danger" id="batch-abort-btn"
-                        style="display:none;"><i class="bi bi-stop-circle me-1"></i>中止</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script src="/static/app.js?v=2026-05-15g"></script>
-</body>
-</html>
+{% endblock %}
