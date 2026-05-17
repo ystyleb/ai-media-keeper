@@ -874,7 +874,7 @@ def index():
     # frontend-ui.md lesson: HTML 加 no-store，否则浏览器缓存老模板 + 新 JS 不匹配
     # （cache_bust URL 是 templates 渲染的，浏览器缓存 HTML 时 URL 也被冻结，
     # 但 /static/app.js 仍走 304 拉新内容 → 老 HTML + 新 JS 跑炸 bootstrap 找不到元素）
-    resp = make_response(render_template("index.html", badges={}))
+    resp = make_response(render_template("index.html", current_page="files", badges={}))
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
