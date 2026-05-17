@@ -89,7 +89,34 @@ AI 原生的影视资源管理器（Phase 5 ship — MCP server + 开源就绪�
 4. SQLite WAL mode 缓存识别结果 + scan_runs/scan_items 任务队列 + destructive_actions 状态表
 5. TMDB v3 + DeepSeek V4（OpenAI-compatible SDK）通过 BYOK 配置；密钥落盘 `config/.tmdb_key` / `config/.deepseek_key`（chmod 600，不进 env）
 
+## 前端架构（2026-05）
+
+NASVault 前端在 Phase 5 后做了重设计（Phase A-F）：
+- **Phase A**：引入 Tailwind CSS Standalone CLI（零 Node build）+ HTMX + Alpine.js
+- **Phase B**：拆 6 page（/、/files、/library、/dedup、/organize、/settings）各自独立 Flask blueprint
+- **Phase C**：右侧 Drawer 替换 Bootstrap modal（Phase F 才把 page UI wire up 到 drawer）
+- **Phase D**：/onboarding wizard 第一次启动 5 分钟 setup
+- **Phase E**：Toast 通知体系 + HX-Trigger header convention
+- **Phase F**：老 modal cleanup + drawer UI wire up（in progress）
+
+设计文档：`docs/superpowers/specs/2026-05-16-frontend-redesign-design.md`
+实施 plan：`docs/superpowers/plans/2026-05-16-phase-A-layout-scaffold.md` + `2026-05-17-phase-B-pages.md`
+
+技术栈：
+- 后端：Flask + Jinja2 + sqlite3（不变）
+- 前端：HTMX 1.9 + Alpine.js 3.13 + Tailwind 3.4 Standalone CLI
+- 零 Node build chain（Tailwind binary 通过 `./scripts/install_tailwind.sh` 下到 `bin/`）
+
 ## 快速开始
+
+### 平台支持
+
+NASVault 支持以下平台：
+- ✅ macOS（Intel + Apple Silicon）
+- ✅ Linux（x86_64 + ARM64 aarch64）
+- ⚠️ Windows（推荐通过 WSL2 运行；native Windows 未官方测试）
+
+依赖：Python 3.10+，SSH client（macOS/Linux 自带，Windows 通过 OpenSSH / WSL），curl，bash。
 
 ### 1. 准备 NAS 端
 
@@ -136,7 +163,7 @@ python3 app.py
 
 ### 4. UI 里配置（不再用 env）
 
-顶部右上角设置图标：
+左侧 Sidebar → ⚙️ 设置：
 - **NAS**：host / port / user / base_path（落 `config/nas.json`）
 - **qBit**：URL / user / password（user url 落 `config/qbit.json`；password 落 `config/.qbit_pass` chmod 600）
 - **TMDB API key**：免费申请 [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api)（落 `config/.tmdb_key`）
