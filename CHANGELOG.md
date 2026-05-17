@@ -10,6 +10,7 @@
 - `routes/ui_status.py` blueprint：`/ui/status/providers` + `/workers` + `/ui/sidebar/badges` HTMX fragments
 - `get_cached_providers_status()` 60s TTL cache 共享 `/api` + `/ui`
 - Token auth：HTMX `htmx:configRequest` header 自动注入 `localStorage.nas_token` Bearer
+- **API 行为微调** `/api/providers/status`：响应 `age` 字段从固定 `0.0` 改为真实 `time.time() - checked_at`（cache 命中时让 caller 知道 cache 数据有多旧）。schema 不变，仅值语义增强。
 
 **Phase B: 6 page 拆分**（commits dfee773..dfb7a07）
 - 6 个独立 Flask blueprint + Jinja2 template `extends base.html`
