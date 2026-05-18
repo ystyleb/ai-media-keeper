@@ -2823,6 +2823,10 @@ async function saveNASConfig() {
         refreshDisk();
         loadFiles(currentPath);
         testNASConnection();
+
+        // Phase B: 关 modal + toast 反馈 (老代码忘了 hide modal 用户以为没生效)
+        if (nasConfigModal) nasConfigModal.hide();
+        window.dispatchEvent(new CustomEvent('toast', { detail: { severity: 'success', message: 'NAS 配置已保存' } }));
     } catch (err) {
         alert(`保存失败: ${err.message}`);
     } finally {
