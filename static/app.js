@@ -266,6 +266,9 @@ async function loadFiles(path) {
     const fileList = document.getElementById("file-list");
     const emptyState = document.getElementById("empty-state");
 
+    // Phase B transitional: 不在 /files page (例 /settings save 后回调) 时 file 浏览器 DOM 不存在, 跳过.
+    if (!loading || !fileList || !emptyState) return;
+
     loading.style.display = "block";
     fileList.innerHTML = "";
     emptyState.style.display = "none";
@@ -293,6 +296,9 @@ function renderFiles(files) {
     const tbody = document.getElementById("file-list");
     const emptyState = document.getElementById("empty-state");
     const fileCount = document.getElementById("file-count");
+
+    // Phase B transitional: file 浏览器 DOM 仅在 /files page 存在
+    if (!tbody) return;
 
     tbody.innerHTML = "";
 
@@ -471,6 +477,8 @@ function updateBreadcrumb(path) {
     const relativeParts = parts.slice(baseParts.length);
 
     const breadcrumb = document.getElementById("breadcrumb-list");
+    // Phase B transitional: breadcrumb-list 仅在 /files page 存在
+    if (!breadcrumb) return;
     breadcrumb.innerHTML = "";
 
     // 根目录
@@ -582,17 +590,22 @@ function clearSelection() {
 }
 
 function updateSelectionUI() {
+    // Phase B transitional: selection UI DOM 仅在 /files page 存在
+    const countEl = document.getElementById("selected-count");
+    if (!countEl) return;
     const count = selectedFiles.size;
-    document.getElementById("selected-count").textContent = count;
+    countEl.textContent = count;
 
     let totalSize = 0;
     selectedFiles.forEach(path => {
         const file = currentFiles.find(f => f.path === path);
         if (file) totalSize += file.size;
     });
-    document.getElementById("selected-size").textContent = humanSize(totalSize);
+    const sizeEl = document.getElementById("selected-size");
+    if (sizeEl) sizeEl.textContent = humanSize(totalSize);
 
-    document.getElementById("btn-delete").disabled = count === 0;
+    const deleteBtn = document.getElementById("btn-delete");
+    if (deleteBtn) deleteBtn.disabled = count === 0;
 }
 
 function humanSize(bytes) {
@@ -1652,6 +1665,8 @@ async function confirmDelete() {
 
 function addLog(message, type = "info") {
     const log = document.getElementById("action-log");
+    // Phase B transitional: action-log DOM 仅在 /files page 存在
+    if (!log) return;
     const time = new Date().toLocaleTimeString();
 
     // 移除"暂无操作记录"

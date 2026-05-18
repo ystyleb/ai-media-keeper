@@ -864,6 +864,16 @@ def human_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f} PB"
 
 
+# Phase B: app.js cache-bust by file mtime — browsers refresh after JS changes.
+@app.context_processor
+def _inject_static_versions():
+    try:
+        mtime = int(Path(__file__).parent.joinpath("static/app.js").stat().st_mtime)
+    except OSError:
+        mtime = "dev"
+    return {"app_js_mtime": mtime}
+
+
 # 注册 UI blueprints (server-rendered HTML fragments for HTMX)
 from routes.ui_status import ui_status_bp  # noqa: E402
 app.register_blueprint(ui_status_bp)
