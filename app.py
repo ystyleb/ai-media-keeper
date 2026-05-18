@@ -30,6 +30,7 @@ from flask import (
 from services import (
     dedup,
     destructive_action,
+    http_client,
     llm,
     metadata_cache,
     nfo_writer,
@@ -596,6 +597,9 @@ class QBitClient:
 
         self._logged_in = False
         self.session.cookies.clear()
+        # LAN host (NAS / 同网段 qBit) bypass shell http_proxy 直连;
+        # 否则 user 装 Clash/V2Ray 时 LAN 请求被代理路由 → 502.
+        http_client.apply_proxy_policy(self.session, self._config.get("url") or "")
 
         if legacy_plaintext_found:
             logger.warning(
@@ -702,7 +706,7 @@ class QBitClient:
         if not password:
             return {"status": "error", "message": "Password is required"}
 
-        session = requests.Session()
+        session = http_client.session_for(url)
         try:
             r = session.post(
                 f"{url}/api/v2/auth/login",

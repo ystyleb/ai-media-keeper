@@ -21,6 +21,8 @@ from urllib.parse import urljoin
 
 import requests
 
+from services import http_client
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,7 +67,9 @@ class EmbyClient:
         self.user_id = user_id
         self.api_key = api_key
         self.timeout = timeout
-        self._session = requests.Session()
+        # LAN host (Emby 一般在 NAS / 同网段) bypass shell http_proxy 直连 —
+        # 否则装 Clash/V2Ray 的 user 撞 502 (proxy 不路由内网 IP).
+        self._session = http_client.session_for(self.base_url)
         # X-Emby-Token is the documented auth header (Jellyfin also accepts it as
         # an alias for X-MediaBrowser-Token); see Emby Swagger.
         self._session.headers["X-Emby-Token"] = api_key
