@@ -37,3 +37,4 @@ nas.db
 # Tailwind 编译产物 + 工具
 static/css/output.css
 bin/tailwindcss
+.gstack/

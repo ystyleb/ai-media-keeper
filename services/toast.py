@@ -10,8 +10,7 @@ from __future__ import annotations
 import json
 from typing import Literal
 
-
-SEVERITY_LITERAL = Literal['success', 'warning', 'error', 'info']
+SEVERITY_LITERAL = Literal["success", "warning", "error", "info"]
 
 
 def add_toast(response, severity: str, message: str):

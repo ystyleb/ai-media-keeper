@@ -184,7 +184,9 @@ def action_confirm_drawer(action):
         return render_template("drawer/_error.html", error="confirm response 解析失败"), 500
 
     if status not in (200, 202):
-        return render_template("drawer/_error.html", error=result.get("error", "confirm failed")), status
+        return render_template(
+            "drawer/_error.html", error=result.get("error", "confirm failed")
+        ), status
 
     action_id = result.get("action_id") or (request.json or {}).get("action_id")
     drawer_status = result.get("status", "unknown")

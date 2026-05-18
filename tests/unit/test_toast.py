@@ -9,8 +9,9 @@ import pytest
 
 
 def test_add_toast_sets_hx_trigger_header():
-    import app as app_module
     from flask import make_response
+
+    import app as app_module
     from services.toast import add_toast
 
     with app_module.app.app_context():
@@ -25,8 +26,9 @@ def test_add_toast_sets_hx_trigger_header():
 
 
 def test_add_toast_returns_response_for_chaining():
-    import app as app_module
     from flask import make_response
+
+    import app as app_module
     from services.toast import add_toast
 
     with app_module.app.app_context():
@@ -72,6 +74,7 @@ def test_status_providers_no_toast_when_all_ok(client, token):
 @pytest.fixture
 def client():
     import app as app_module
+
     app_module.app.config["TESTING"] = True
     return app_module.app.test_client()
 
@@ -79,4 +82,5 @@ def client():
 @pytest.fixture
 def token():
     import app as app_module
+
     return app_module.API_TOKEN

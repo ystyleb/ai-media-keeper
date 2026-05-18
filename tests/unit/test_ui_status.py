@@ -28,10 +28,10 @@ def token():
 
 def test_status_providers_renders_4_segments(client, token):
     fake_raw = {
-        "tmdb":     {"state": "ok", "checked_at": 1716000000.0},
+        "tmdb": {"state": "ok", "checked_at": 1716000000.0},
         "deepseek": {"state": "ok", "checked_at": 1716000000.0},
-        "emby":     {"state": "auth_failed", "checked_at": 1716000000.0},
-        "qbit":     {"state": "not_configured", "checked_at": None},
+        "emby": {"state": "auth_failed", "checked_at": 1716000000.0},
+        "qbit": {"state": "not_configured", "checked_at": None},
     }
     with patch("app.get_cached_providers_status", return_value=fake_raw):
         resp = client.get(
@@ -45,18 +45,16 @@ def test_status_providers_renders_4_segments(client, token):
     assert "DeepSeek" in html
     assert "Emby" in html
     assert "qBit" in html
-    assert "sb-dot-ok" in html       # tmdb / deepseek
-    assert "sb-dot-warn" in html     # emby auth_failed (warn not err per NIT #1)
-    assert "sb-dot-gray" in html     # qbit not_configured
-    assert "401" in html             # emby detail
-    assert "未配" in html             # qbit detail
+    assert "sb-dot-ok" in html  # tmdb / deepseek
+    assert "sb-dot-warn" in html  # emby auth_failed (warn not err per NIT #1)
+    assert "sb-dot-gray" in html  # qbit not_configured
+    assert "401" in html  # emby detail
+    assert "未配" in html  # qbit detail
 
 
 def test_status_workers_idle_when_no_running(client, token):
     """auto_organize_runs / organize_runs / scan_runs 全 idle 时显示 idle."""
-    with patch(
-        "routes.ui_status._aggregate_running_workers", return_value=[]
-    ):
+    with patch("routes.ui_status._aggregate_running_workers", return_value=[]):
         resp = client.get(
             "/ui/status/workers",
             headers={"Authorization": f"Bearer {token}"},
@@ -70,9 +68,7 @@ def test_status_workers_lists_running(client, token):
         {"kind": "organize", "done": 12, "total": 40, "id": "abc"},
         {"kind": "scanner", "done": 234, "total": 1797, "id": 7},
     ]
-    with patch(
-        "routes.ui_status._aggregate_running_workers", return_value=fake_workers
-    ):
+    with patch("routes.ui_status._aggregate_running_workers", return_value=fake_workers):
         resp = client.get(
             "/ui/status/workers",
             headers={"Authorization": f"Bearer {token}"},
@@ -86,9 +82,7 @@ def test_status_workers_lists_running(client, token):
 def test_sidebar_badges_zero_hidden(client, token):
     """badge=0 时 partial 不应该渲染 .nav-badge span (零计数 hidden)."""
     fake_badges = {"library": 0, "dedup": 0, "organize": 0}
-    with patch(
-        "routes.ui_status._compute_sidebar_badges", return_value=fake_badges
-    ):
+    with patch("routes.ui_status._compute_sidebar_badges", return_value=fake_badges):
         resp = client.get(
             "/ui/sidebar/badges",
             headers={"Authorization": f"Bearer {token}"},
@@ -103,9 +97,7 @@ def test_sidebar_badges_zero_hidden(client, token):
 
 def test_sidebar_badges_renders_counts(client, token):
     fake_badges = {"library": 12, "dedup": 5, "organize": 3}
-    with patch(
-        "routes.ui_status._compute_sidebar_badges", return_value=fake_badges
-    ):
+    with patch("routes.ui_status._compute_sidebar_badges", return_value=fake_badges):
         resp = client.get(
             "/ui/sidebar/badges",
             headers={"Authorization": f"Bearer {token}"},
@@ -156,9 +148,7 @@ def test_sidebar_badges_no_active_items_without_page(client, token):
     这个 endpoint 仅供未来 (Phase D+) 可能的"仅刷 badge"场景, 不该自己决定 active.
     """
     fake_badges = {"library": 0, "dedup": 0, "organize": 0}
-    with patch(
-        "routes.ui_status._compute_sidebar_badges", return_value=fake_badges
-    ):
+    with patch("routes.ui_status._compute_sidebar_badges", return_value=fake_badges):
         resp = client.get("/ui/sidebar/badges", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     html = resp.data.decode()

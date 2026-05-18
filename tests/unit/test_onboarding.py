@@ -10,6 +10,7 @@ import pytest
 @pytest.fixture
 def client():
     import app as app_module
+
     app_module.app.config["TESTING"] = True
     return app_module.app.test_client()
 
@@ -17,6 +18,7 @@ def client():
 @pytest.fixture
 def token():
     import app as app_module
+
     return app_module.API_TOKEN
 
 

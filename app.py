@@ -15,7 +15,17 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
-from flask import Flask, abort, g, jsonify, make_response, redirect, render_template, request, url_for
+from flask import (
+    Flask,
+    abort,
+    g,
+    jsonify,
+    make_response,
+    redirect,
+    render_template,
+    request,
+    url_for,
+)
 
 from services import (
     dedup,
@@ -875,27 +885,37 @@ def _inject_static_versions():
 
 
 # 注册 UI blueprints (server-rendered HTML fragments for HTMX)
-from routes.ui_status import ui_status_bp  # noqa: E402
+from routes.ui_status import ui_status_bp
+
 app.register_blueprint(ui_status_bp)
 
 # Phase B pages blueprints
-from routes.pages_files import pages_files_bp  # noqa: E402
+from routes.pages_files import pages_files_bp
+
 app.register_blueprint(pages_files_bp)
-from routes.pages_library import pages_library_bp  # noqa: E402
+from routes.pages_library import pages_library_bp
+
 app.register_blueprint(pages_library_bp)
-from routes.pages_dedup import pages_dedup_bp  # noqa: E402
+from routes.pages_dedup import pages_dedup_bp
+
 app.register_blueprint(pages_dedup_bp)
-from routes.pages_organize import pages_organize_bp  # noqa: E402
+from routes.pages_organize import pages_organize_bp
+
 app.register_blueprint(pages_organize_bp)
-from routes.pages_settings import pages_settings_bp  # noqa: E402
+from routes.pages_settings import pages_settings_bp
+
 app.register_blueprint(pages_settings_bp)
-from routes.pages_dashboard import pages_dashboard_bp  # noqa: E402
+from routes.pages_dashboard import pages_dashboard_bp
+
 app.register_blueprint(pages_dashboard_bp)
-from routes.ui_dashboard import ui_dashboard_bp  # noqa: E402
+from routes.ui_dashboard import ui_dashboard_bp
+
 app.register_blueprint(ui_dashboard_bp)
-from routes.ui_drawer import ui_drawer_bp  # noqa: E402
+from routes.ui_drawer import ui_drawer_bp
+
 app.register_blueprint(ui_drawer_bp)
-from routes.pages_onboarding import pages_onboarding_bp  # noqa: E402
+from routes.pages_onboarding import pages_onboarding_bp
+
 app.register_blueprint(pages_onboarding_bp)
 
 

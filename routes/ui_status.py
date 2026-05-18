@@ -25,10 +25,13 @@ def _require_token(view):
     Deferring to call time is safe: by the time any HTTP request arrives,
     app.py is fully initialized.
     """
+
     @wraps(view)
     def wrapped(*args, **kwargs):
         from app import require_token  # deferred (循环 import 避免)
+
         return require_token(view)(*args, **kwargs)
+
     return wrapped
 
 
@@ -47,6 +50,7 @@ def status_providers():
     for p in providers:
         if p.get("dot") == "warn" and "401" in (p.get("detail") or ""):
             from services.toast import add_toast
+
             add_toast(response, "warning", f"{p['name']} 认证失败 — 去 /settings 检查 key")
             break  # 一次只 fire 一个 toast
 
@@ -74,7 +78,7 @@ def sidebar_badges():
 
 _DOT_BY_STATE = {
     "ok": "ok",
-    "auth_failed": "warn",   # 401 是 warn 不是 fatal error
+    "auth_failed": "warn",  # 401 是 warn 不是 fatal error
     "not_configured": "gray",
     "unreachable": "err",
     "error": "err",
@@ -103,12 +107,14 @@ def _to_status_segments(raw: dict) -> list[dict]:
         tooltip = f"{name_by_key[key]}: {state}"
         if entry.get("checked_at"):
             tooltip += f" @ {entry['checked_at']}"
-        segments.append({
-            "name": name_by_key[key],
-            "dot": dot,
-            "detail": detail,
-            "tooltip": tooltip,
-        })
+        segments.append(
+            {
+                "name": name_by_key[key],
+                "dot": dot,
+                "detail": detail,
+                "tooltip": tooltip,
+            }
+        )
     return segments
 
 
@@ -135,12 +141,14 @@ def _aggregate_running_workers() -> list[dict]:
         ).fetchall()
         for r in rows:
             qbit_hash = r["qbit_hash"] or ""
-            workers.append({
-                "kind": "auto-organize",
-                "done": 0,   # auto_organize_runs 没 progress 字段
-                "total": 0,
-                "id": qbit_hash[:8] if qbit_hash else "?",
-            })
+            workers.append(
+                {
+                    "kind": "auto-organize",
+                    "done": 0,  # auto_organize_runs 没 progress 字段
+                    "total": 0,
+                    "id": qbit_hash[:8] if qbit_hash else "?",
+                }
+            )
     except Exception:
         pass  # table may not exist in older DBs
 
@@ -150,12 +158,14 @@ def _aggregate_running_workers() -> list[dict]:
         "ORDER BY started_at DESC LIMIT 3"
     ).fetchall()
     for r in rows:
-        workers.append({
-            "kind": "scanner",
-            "done": r["files_done"] or 0,
-            "total": r["files_total"] or 0,
-            "id": r["id"],
-        })
+        workers.append(
+            {
+                "kind": "scanner",
+                "done": r["files_done"] or 0,
+                "total": r["files_total"] or 0,
+                "id": r["id"],
+            }
+        )
 
     return workers
 
@@ -191,8 +201,7 @@ def _compute_sidebar_badges() -> dict:
     # organize 进行中（pending + organizing）
     try:
         row = db.execute(
-            "SELECT count(*) AS c FROM auto_organize_runs "
-            "WHERE status IN ('pending', 'organizing')"
+            "SELECT count(*) AS c FROM auto_organize_runs WHERE status IN ('pending', 'organizing')"
         ).fetchone()
         badges["organize"] = row["c"] if row else 0
     except Exception:

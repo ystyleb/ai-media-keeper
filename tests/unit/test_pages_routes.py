@@ -8,6 +8,7 @@ import pytest
 @pytest.fixture
 def client():
     import app as app_module
+
     app_module.app.config["TESTING"] = True
     return app_module.app.test_client()
 
@@ -15,6 +16,7 @@ def client():
 @pytest.fixture
 def token():
     import app as app_module
+
     return app_module.API_TOKEN
 
 
@@ -53,6 +55,7 @@ def test_ui_dashboard_system_401_without_token(client):
 
 def test_ui_dashboard_workers_renders(client, token):
     from unittest.mock import patch
+
     with patch("routes.ui_status._aggregate_running_workers", return_value=[]):
         resp = client.get("/ui/dashboard/workers", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
@@ -101,7 +104,7 @@ def test_files_page_no_other_views(client, token):
     resp = client.get("/files")
     assert resp.status_code == 200
     html = resp.data.decode()
-    assert "file-container" in html   # files view 仍有 file-container
+    assert "file-container" in html  # files view 仍有 file-container
     assert "library-panel" not in html
     assert "dedup-panel" not in html
 
@@ -109,6 +112,7 @@ def test_files_page_no_other_views(client, token):
 def test_sidebar_library_active(client, token):
     """/library page sidebar 的 /library 导航项含 active class。"""
     import re
+
     resp = client.get("/library")
     html = resp.data.decode()
     # 匹配 <a href="/library" ... class="... active ..."

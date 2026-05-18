@@ -26,15 +26,17 @@ def onboarding(step: str = "nas"):
     status = check_status()
     step_index = STEPS.index(step)
 
-    resp = make_response(render_template(
-        "pages/onboarding.html",
-        current_page="onboarding",
-        badges={},
-        step=step,
-        step_index=step_index,
-        steps=STEPS,
-        status=status,
-        is_onboarded=is_onboarded(),
-    ))
+    resp = make_response(
+        render_template(
+            "pages/onboarding.html",
+            current_page="onboarding",
+            badges={},
+            step=step,
+            step_index=step_index,
+            steps=STEPS,
+            status=status,
+            is_onboarded=is_onboarded(),
+        )
+    )
     resp.headers["Cache-Control"] = "no-store"
     return resp
