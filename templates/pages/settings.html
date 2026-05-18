@@ -15,43 +15,43 @@
 
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-w-5xl">
         <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
-                data-bs-toggle="modal" data-bs-target="#nasConfigModal">
+                onclick="showNASConfig()">
             <div class="text-lg font-semibold text-slate-100">📡 NAS</div>
             <p class="text-xs text-slate-400 mt-1">SSH host + port + 沙箱根路径</p>
         </button>
 
         <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
-                data-bs-toggle="modal" data-bs-target="#qbitConfigModal">
+                onclick="showQBitConfig()">
             <div class="text-lg font-semibold text-slate-100">🌐 qBittorrent</div>
             <p class="text-xs text-slate-400 mt-1">WebUI URL + 用户名 + 密码</p>
         </button>
 
         <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
-                data-bs-toggle="modal" data-bs-target="#aiConfigModal">
+                onclick="showAIConfig()">
             <div class="text-lg font-semibold text-slate-100">🤖 AI (TMDB + DeepSeek)</div>
             <p class="text-xs text-slate-400 mt-1">API keys (BYOK) + base URL</p>
         </button>
 
         <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
-                data-bs-toggle="modal" data-bs-target="#embyConfigModal">
+                onclick="showEmbyConfig()">
             <div class="text-lg font-semibold text-slate-100">📺 Emby</div>
             <p class="text-xs text-slate-400 mt-1">URL + API key (可选, 观看进度同步)</p>
         </button>
 
         <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
-                data-bs-toggle="modal" data-bs-target="#organizeConfigModal">
+                onclick="showOrganizeConfig()">
             <div class="text-lg font-semibold text-slate-100">📂 媒体库根目录</div>
             <p class="text-xs text-slate-400 mt-1">MOVIES_ROOT / TV_ROOT 路径</p>
         </button>
 
         <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
-                data-bs-toggle="modal" data-bs-target="#autoOrganizeConfigModal">
+                onclick="showAutoOrganizeConfig()">
             <div class="text-lg font-semibold text-slate-100">🤖 自动整理</div>
             <p class="text-xs text-slate-400 mt-1">qBit category + cron 周期 + confidence</p>
         </button>
 
         <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
-                data-bs-toggle="modal" data-bs-target="#scanModal">
+                onclick="openScanModal()">
             <div class="text-lg font-semibold text-slate-100">🔄 数据库工具</div>
             <p class="text-xs text-slate-400 mt-1">全库扫描 / vacuum / 批量识别</p>
         </button>

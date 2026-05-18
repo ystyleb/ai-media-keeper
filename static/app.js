@@ -48,8 +48,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     refreshDisk();
-    loadFiles(currentPath);
     loadProvidersStatus();   // 顶部 AI / Emby 按钮状态点 + 异常 banner
+
+    // Phase B: page-aware initial load (sidebar 拆 6 page 后, 单页 view-tab 切换被 URL 路由替代)
+    const path = window.location.pathname;
+    if (path === "/files" || path === "/") {
+        loadFiles(currentPath);
+    } else if (path === "/library") {
+        if (typeof loadLibrary === "function") loadLibrary(true);
+        if (typeof loadLibraryStats === "function") loadLibraryStats();
+        if (typeof _bindLibraryFilters === "function") _bindLibraryFilters();
+    } else if (path === "/dedup") {
+        if (typeof _bindDedupFilters === "function") _bindDedupFilters();
+        if (typeof loadDedupGroups === "function") loadDedupGroups();
+    }
+    // /organize /settings /onboarding 不需要 page-specific data load (modal-triggered)
 });
 
 // Provider 状态聚合（AI 按钮 = TMDB + DeepSeek 合并；Emby 单独）

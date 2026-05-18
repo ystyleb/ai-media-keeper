@@ -16,28 +16,28 @@
 
 <!-- Phase A transitional: 临时按钮区，Phase B 拆 settings page 时迁出 -->
 <div class="phase-a-actions" data-bs-theme="dark">
-    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#aiConfigModal">
+    <button type="button" class="tb-btn" onclick="showAIConfig()">
         <i class="bi bi-stars"></i> AI 配置
     </button>
-    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#embyConfigModal">
+    <button type="button" class="tb-btn" onclick="showEmbyConfig()">
         <i class="bi bi-tv"></i> Emby
     </button>
-    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#qbitConfigModal">
+    <button type="button" class="tb-btn" onclick="showQBitConfig()">
         <i class="bi bi-gear"></i> qBit
     </button>
-    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#nasConfigModal">
+    <button type="button" class="tb-btn" onclick="showNASConfig()">
         <i class="bi bi-hdd-network"></i> NAS
     </button>
-    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#organizeConfigModal">
+    <button type="button" class="tb-btn" onclick="showOrganizeConfig()">
         <i class="bi bi-folder-symlink"></i> 媒体库根
     </button>
-    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#autoOrganizeConfigModal">
+    <button type="button" class="tb-btn" onclick="showAutoOrganizeConfig()">
         <i class="bi bi-magic"></i> 自动整理
     </button>
-    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#scanModal">
+    <button type="button" class="tb-btn" onclick="openScanModal()">
         <i class="bi bi-radar"></i> 全库扫描
     </button>
-    <button type="button" class="tb-btn" data-bs-toggle="modal" data-bs-target="#batchIdentifyModal">
+    <button type="button" class="tb-btn" onclick="openBatchIdentify()">
         <i class="bi bi-stars"></i> 批量识别
     </button>
     <button class="tb-btn-icon" style="margin-left:auto;" onclick="refreshDisk()" title="刷新磁盘">
