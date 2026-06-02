@@ -125,7 +125,26 @@ def start_scan(
         )
         _active_scan_id = scan_run_id
         _active_thread = t
-        t.start()
+        # bug #16: t.start() 抛错（如 "can't start new thread" 线程耗尽）时清 active
+        # state 再抛，否则 _active_scan_id 永久卡住 + scan_runs row 永远 'running'
+        # （_worker_main 没真正启动 → 它的 finally 不会清锁）。对齐
+        # organize_runner.start_organize_executor 的处理。
+        try:
+            t.start()
+        except Exception:
+            _active_scan_id = None
+            _active_thread = None
+            try:
+                fc = destructive_action.open_connection(db_path)
+                try:
+                    _mark_run_failed(fc, scan_run_id, "thread_start_failed")
+                finally:
+                    fc.close()
+            except Exception:
+                logger.exception(
+                    f"[scan] failed to mark run {scan_run_id} failed after start error"
+                )
+            raise
 
     logger.info(f"[scan] started scan_run_id={scan_run_id} base={base_path}")
     return scan_run_id
@@ -143,8 +162,11 @@ def _worker_main(
     """Worker thread 主循环。"""
     global _active_scan_id, _active_thread
 
-    conn = destructive_action.open_connection(db_path)
+    # bug #15: conn=None 初始化在 try 外 + open_connection 移进 try，否则 open 抛错时
+    # finally 根本不执行 → active lock 永久卡住（对齐 organize_runner._worker_main）。
+    conn: sqlite3.Connection | None = None
     try:
+        conn = destructive_action.open_connection(db_path)
         # Phase 1: list paths + populate scan_items
         try:
             paths = list_video_paths(base_path, max_depth)
@@ -218,8 +240,25 @@ def _worker_main(
             logger.info(f"[scan] run {scan_run_id}: done (processed {processed})")
         # 已 aborted / failed 的话状态已被设过，不覆盖
 
+    except Exception as e:
+        # bug #15: 任何未预期崩溃（含 open_connection 失败）都在这里兜底 —
+        # best-effort 标 run failed（conn 可能为 None / 已坏，用 fresh conn），
+        # 不向上抛（daemon thread 抛出只会污染 stderr）。finally 仍清 active lock。
+        logger.exception(f"[scan] run {scan_run_id} worker crashed")
+        try:
+            fc = destructive_action.open_connection(db_path)
+            try:
+                _mark_run_failed(fc, scan_run_id, f"worker_crashed: {type(e).__name__}: {e}")
+            finally:
+                fc.close()
+        except Exception:
+            pass
     finally:
-        conn.close()
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
         with _active_lock:
             if _active_scan_id == scan_run_id:
                 _active_scan_id = None

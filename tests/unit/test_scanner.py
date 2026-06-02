@@ -476,3 +476,73 @@ def test_claim_next_pending_no_pending_returns_none(conn):
     )
     run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     assert scanner._claim_next_pending(conn, run_id) is None
+
+
+# ---------------- bug #16: t.start() failure must not leak the active lock ---------------- #
+
+
+def test_start_scan_thread_start_failure_releases_lock_and_marks_run_failed(db_path, monkeypatch):
+    """若 threading.Thread.start() 抛错（线程耗尽），start_scan 必须：
+    (a) 清模块级 active lock（否则后续 scan 永远 ConcurrentScanError）
+    (b) 把已 INSERT 的 scan_runs row 标 failed（否则永久 stuck running）。
+    对齐 organize_runner.start_organize_executor 的处理。"""
+
+    class _BoomThread:
+        def __init__(self, *a, **k):
+            self.name = k.get("name", "boom")
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(scanner.threading, "Thread", _BoomThread)
+
+    with pytest.raises(RuntimeError):
+        scanner.start_scan(
+            db_path=db_path,
+            base_path="/share",
+            max_depth=5,
+            list_video_paths=lambda *a: [],
+            ssh_stat=lambda ps: {},
+            identify=lambda p: None,
+        )
+
+    # (a) lock 释放
+    assert scanner._is_active() is None, "active lock leaked after t.start() failure"
+
+    # (b) row 标 failed
+    c = destructive_action.open_connection(db_path)
+    try:
+        row = c.execute("SELECT status FROM scan_runs ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        c.close()
+    assert row is not None
+    assert row["status"] == "failed", f"scan_runs row stuck at {row['status']!r}"
+
+
+# ---------------- bug #15: worker open_connection failure must not leak the lock ---------------- #
+
+
+def test_worker_main_open_connection_failure_releases_lock(db_path, monkeypatch):
+    """_worker_main 内 open_connection 抛错时，必须经 finally 清 active lock，
+    不能让锁永久卡住（对齐 organize_runner._worker_main 的 conn=None + try 模式）。"""
+    import sqlite3 as _sqlite3
+
+    # 模拟 start_scan 已设好 active state
+    with scanner._active_lock:
+        scanner._active_scan_id = 999
+        scanner._active_thread = threading.current_thread()
+
+    def boom(*a, **k):
+        raise _sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(scanner.destructive_action, "open_connection", boom)
+
+    # 直接调 worker（不起线程）；修复后不应向上抛、且 finally 清锁
+    try:
+        scanner._worker_main(
+            999, db_path, "/share", 5, lambda *a: [], lambda ps: {}, lambda p: None
+        )
+    except Exception:
+        pass  # 当前 buggy 代码会向上抛；修复后不抛
+
+    assert scanner._is_active() is None, "active lock leaked after worker open_connection failure"

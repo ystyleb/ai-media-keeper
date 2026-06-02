@@ -40,9 +40,17 @@ TTL_BY_KIND: dict[str, int] = {
 # crash recovery 阈值：running 持续超过此值视为 crash
 # Phase 4B：organize 从 60s → 1800s，批量 confirm 跑 N=500 文件约 5-8 min，
 # 加 safety buffer 设 30 min。reaper 是 ground-truth 兜底，不能跑得比 executor 还快。
+#
+# bug #1 修复：delete 从 60s → 1800s。inline delete 在 confirm 内同步执行，
+#   每个 item 跑 `find <base> -xdev -inum N -delete`（多 TB NAS 上可达分钟级，
+#   SSH timeout=300s）+ 目录 `rm -rf`（timeout=300s），批量多个 item 总时长
+#   远超 60s。60s 阈值会让正常长删除被 reaper 误标 needs_manual_recovery，
+#   然后 confirm 的终态写又把它覆盖回 succeeded（见 confirm() 的 guarded 写）。
+#   阈值必须 >= MAX_ITEMS × per-SSH-timeout(300s) + buffer。nfo_write 同理 120→600。
+#   ⚠️ 改这两个值时同步审视 confirm() 是否仍用 mark_terminal_if_running（guarded）。
 RUNNING_TIMEOUT_BY_KIND: dict[str, int] = {
-    "delete": 60,
-    "nfo_write": 120,
+    "delete": 1800,
+    "nfo_write": 600,
     "archive": 1800,
     "purge_provider": 120,
     "organize": 1800,
@@ -375,6 +383,13 @@ def mark_terminal_if_running(
     return cur.rowcount == 1
 
 
+def _current_status(conn: sqlite3.Connection, action_id: str) -> str:
+    row = conn.execute(
+        "SELECT status FROM destructive_actions WHERE action_id = ?", (action_id,)
+    ).fetchone()
+    return row["status"] if row else "unknown"
+
+
 def confirm(
     conn: sqlite3.Connection,
     *,
@@ -423,26 +438,56 @@ def confirm(
         result = executor(payload)
     except Exception as exc:
         logger.exception("[destructive_action] executor raised for %s", action_id)
-        _mark_terminal(
-            conn,
-            action_id,
-            status="failed",
-            result=None,
-            error=f"{type(exc).__name__}: {exc}",
-        )
+        # bug #1: 用 guarded 终态写，避免覆盖 reaper 在长操作期间已抢标的
+        # needs_manual_recovery。flipped=False 时返回 row 的真实状态。
+        err = f"{type(exc).__name__}: {exc}"
+        mark_terminal_if_running(conn, action_id, status="failed", result=None, error=err)
         return ConfirmResult(
             action_id=action_id,
-            status="failed",
+            status=_current_status(conn, action_id),
             result=None,
-            error=f"{type(exc).__name__}: {exc}",
+            error=err,
         )
 
-    _mark_terminal(conn, action_id, status="succeeded", result=result, error=None)
+    # bug #1: guarded 终态写 — reaper 可能在长 delete/nfo_write 期间（>timeout）
+    # 已把 row 抢标 needs_manual_recovery。裸 _mark_terminal 会无视状态把它覆盖回
+    # succeeded，造成"实际已执行 vs DB 状态"的信号丢失。
+    flipped = mark_terminal_if_running(
+        conn, action_id, status="succeeded", result=result, error=None
+    )
+    if flipped:
+        return ConfirmResult(action_id=action_id, status="succeeded", result=result, error=None)
+
+    # reaper（或别处）已抢标终态：executor 实际已完成，但 row 不是 running。
+    # 不能静默 succeeded。把 executor 结果记进 result_json（不改 status），加
+    # recovery_hint，返回真实状态让前端提示用户核验实际删除结果。
+    actual = _current_status(conn, action_id)
+    conn.execute(
+        """
+        UPDATE destructive_actions
+           SET result_json   = ?,
+               recovery_hint = COALESCE(recovery_hint, ?)
+         WHERE action_id     = ?
+           AND status        != 'running'
+        """,
+        (
+            _canonical_json(result),
+            "executor_completed_after_terminal_flag: 操作可能已执行，请核验实际结果",
+            action_id,
+        ),
+    )
+    conn.commit()
+    logger.warning(
+        "[destructive_action] %s executor completed but row already terminal (%s); "
+        "recorded result, surfacing for manual verification",
+        action_id,
+        actual,
+    )
     return ConfirmResult(
         action_id=action_id,
-        status="succeeded",
+        status=actual,
         result=result,
-        error=None,
+        error="executor_completed_after_terminal_flag",
     )
 
 

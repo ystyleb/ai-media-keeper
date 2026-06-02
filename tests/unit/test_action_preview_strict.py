@@ -151,6 +151,32 @@ def test_strict_mode_missing_expected_inode_returns_400(client, token):
     assert body["missing"] == "expected_inode"
 
 
+def test_strict_mode_bool_expected_field_rejected(client, token):
+    """bug #22: isinstance(True, int) 为真 → expected_inode=true 会绕过类型校验，
+    后续跟 server 端 int 做 != 比较时 True==1 让 drift guard 失效。必须显式拒 bool。"""
+    resp = client.post(
+        "/api/action/preview",
+        json={
+            "kind": "delete",
+            "source": "dedup",
+            "snapshot_mode": "strict",
+            "candidates": [
+                {
+                    "path": "/x.mkv",
+                    "expected_inode": True,  # bool — 必须被拒
+                    "expected_size": 1024,
+                    "expected_mtime": 1000,
+                }
+            ],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["error"] == "strict_mode_requires_integer_fields"
+    assert body["field"] == "expected_inode"
+
+
 def test_strict_mode_missing_expected_size_returns_400(client, token):
     resp = client.post(
         "/api/action/preview",

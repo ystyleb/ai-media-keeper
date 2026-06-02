@@ -124,6 +124,80 @@ def test_confirm_happy_path_marks_succeeded(conn, secret, payload):
     assert "freed_bytes" in row["result_json"]
 
 
+# ---------------- bug #1: reaper race — confirm must not clobber needs_manual_recovery ---------------- #
+
+
+def test_confirm_success_does_not_clobber_reaper_flag(conn, secret, payload):
+    """长删除期间 reaper 把 row 标 needs_manual_recovery，executor 仍成功完成。
+    confirm 必须：(a) 不把 status 覆盖回 succeeded；(b) 返回非 succeeded 状态供前端提示核验；
+    (c) executor 结果记进 result_json 不丢失。"""
+    res = da.create_preview(conn, kind="delete", payload=payload, server_secret=secret)
+
+    def executor(p):
+        # 模拟 reaper 在长删除期间抢标 needs_manual_recovery（同 conn，单线程测试）
+        conn.execute(
+            "UPDATE destructive_actions SET status='needs_manual_recovery', "
+            "recovery_hint='auto: running > 60s' WHERE action_id = ?",
+            (res.action_id,),
+        )
+        conn.commit()
+        return {"deleted": 1}
+
+    out = da.confirm(
+        conn,
+        action_id=res.action_id,
+        signed_token=res.signed_token,
+        server_secret=secret,
+        executor=executor,
+    )
+
+    # (a)(b) 不返回 succeeded
+    assert out.status == "needs_manual_recovery"
+    assert out.result == {"deleted": 1}  # executor 结果仍返回给调用方
+
+    row = conn.execute(
+        "SELECT status, result_json FROM destructive_actions WHERE action_id = ?",
+        (res.action_id,),
+    ).fetchone()
+    # row 仍是 reaper 标的状态（没被覆盖成 succeeded）
+    assert row["status"] == "needs_manual_recovery"
+    # (c) executor 结果记进 result_json，未丢失
+    assert row["result_json"] is not None and "deleted" in row["result_json"]
+
+
+def test_confirm_failure_does_not_clobber_reaper_flag(conn, secret, payload):
+    """executor 抛错 + reaper 已抢标 → confirm 不把 needs_manual_recovery 覆盖成 failed。"""
+    res = da.create_preview(conn, kind="delete", payload=payload, server_secret=secret)
+
+    def executor(p):
+        conn.execute(
+            "UPDATE destructive_actions SET status='needs_manual_recovery' WHERE action_id = ?",
+            (res.action_id,),
+        )
+        conn.commit()
+        raise RuntimeError("boom")
+
+    out = da.confirm(
+        conn,
+        action_id=res.action_id,
+        signed_token=res.signed_token,
+        server_secret=secret,
+        executor=executor,
+    )
+    assert out.status == "needs_manual_recovery"  # 不是 failed
+    row = conn.execute(
+        "SELECT status FROM destructive_actions WHERE action_id = ?", (res.action_id,)
+    ).fetchone()
+    assert row["status"] == "needs_manual_recovery"
+
+
+def test_delete_running_timeout_above_realistic_worstcase(conn, secret, payload):
+    """bug #1 part 1：delete/nfo_write 的 reaper timeout 必须 >> 60s，否则正常长删除
+    被 reaper 误标。per-item SSH timeout=300s，批量可能多个 item。"""
+    assert da.RUNNING_TIMEOUT_BY_KIND["delete"] >= 600
+    assert da.RUNNING_TIMEOUT_BY_KIND["nfo_write"] >= 300
+
+
 # ---------------- attack/error paths ---------------- #
 
 
@@ -320,7 +394,8 @@ def test_reap_stuck_running_action(conn, secret, payload):
         (res.action_id,),
     ).fetchone()
     assert row["status"] == "needs_manual_recovery"
-    assert "running > 60" in row["recovery_hint"]
+    # 不硬编码阈值数字 — 跟配置走，避免 bump timeout 时假性回归
+    assert f"running > {da.RUNNING_TIMEOUT_BY_KIND['delete']}" in row["recovery_hint"]
 
 
 def test_reap_does_not_touch_recently_started(conn, secret, payload):

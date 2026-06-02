@@ -12,6 +12,7 @@ import time
 import xml.etree.ElementTree as ET
 from functools import wraps
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
 
 import requests
@@ -772,6 +773,21 @@ class QBitClient:
                     seen_hashes.add(torrent["hash"])
                     break
         return matched
+
+    def get_torrent_files(self, torrent_hash: str) -> list[dict]:
+        """返回种子内文件清单。每个 dict 的 'name' 是相对 save_path 的路径
+        （多文件种子含种子根目录名，如 'SeasonPack/ep01.mkv'）。
+
+        bug #31：删种前用它枚举文件，只有全部文件都在用户预览删除集内才 delete_files。
+        """
+        self._ensure_login()
+        resp = self.session.get(
+            f"{self.url}/api/v2/torrents/files",
+            params={"hash": torrent_hash},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     def delete_torrents(self, hashes: list[str], delete_files: bool = True):
         self._ensure_login()
@@ -1977,6 +1993,94 @@ def _diff_snapshots(expected: dict, current: dict) -> list[dict]:
     return diffs
 
 
+def _partition_torrents_for_deletion(
+    snapshot: dict,
+    *,
+    get_files_fn: Callable[[str], list[dict]],
+    resolve_fn: Callable[[list[str]], dict[str, str]],
+) -> tuple[list[str], list[dict]]:
+    """bug #31：决定哪些种子可以连文件一起删（delete_files=True）。
+
+    只有当一个种子的**全部文件**都落在用户预览删除集（items 文件 + 它们的 hardlinks +
+    目录 item 的子树）内时，才删该种子；否则跳过——防止"选一集 → delete_files 删整季"
+    这种不可逆误删。拿不到文件清单的种子保守跳过。
+
+    返回 (to_delete_hashes, skipped)；skipped: [{hash, name, reason}]。
+    依赖注入 get_files_fn / resolve_fn 便于单测。
+    """
+    torrents = snapshot.get("torrents", [])
+    if not torrents:
+        return [], []
+
+    items = snapshot.get("items", [])
+    file_items = [it for it in items if not it.get("is_dir")]
+    dir_items = [it for it in items if it.get("is_dir")]
+
+    # 1. 收集所有要 realpath 规范化的 path（删除集 + 种子文件绝对路径）
+    raw_paths: set[str] = set()
+    for it in items:
+        raw_paths.add(it["path"])
+        for hp in it.get("hardlinks", []) or []:
+            raw_paths.add(hp)
+
+    torrent_files_abs: dict[str, list[str]] = {}
+    files_unavailable: set[str] = set()
+    for t in torrents:
+        h = t["hash"]
+        save = t.get("save_path", "") or ""
+        try:
+            files = get_files_fn(h)
+        except Exception as e:
+            logger.warning(f"[delete/#31] get_torrent_files({h}) failed: {e}")
+            files_unavailable.add(h)
+            continue
+        abs_list = []
+        for f in files:
+            name = f.get("name", "")
+            if not name:
+                continue
+            ap = os.path.join(save, name) if save else name
+            abs_list.append(ap)
+            raw_paths.add(ap)
+        torrent_files_abs[h] = abs_list
+
+    # 2. 一次性 realpath（处理 QNAP symlink，让删除集与种子文件在同一命名空间比对）
+    real = resolve_fn(sorted(raw_paths)) if raw_paths else {}
+
+    def _rp(p: str) -> str:
+        return real.get(p, p)
+
+    deleted_files_real: set[str] = set()
+    for it in file_items:
+        deleted_files_real.add(_rp(it["path"]))
+        for hp in it.get("hardlinks", []) or []:
+            deleted_files_real.add(_rp(hp))
+    deleted_dirs_real = [_rp(it["path"]).rstrip("/") for it in dir_items]
+
+    def _contained(fp_real: str) -> bool:
+        if fp_real in deleted_files_real:
+            return True
+        for d in deleted_dirs_real:
+            if fp_real == d or fp_real.startswith(d + "/"):
+                return True
+        return False
+
+    to_delete: list[str] = []
+    skipped: list[dict] = []
+    for t in torrents:
+        h = t["hash"]
+        name = t.get("name", "")
+        if h in files_unavailable:
+            skipped.append({"hash": h, "name": name, "reason": "files_list_unavailable"})
+            continue
+        files = torrent_files_abs.get(h, [])
+        if files and all(_contained(_rp(fp)) for fp in files):
+            to_delete.append(h)
+        else:
+            skipped.append({"hash": h, "name": name, "reason": "partial_torrent_not_removed"})
+    return to_delete, skipped
+
+
 def _delete_executor(payload: dict) -> dict:
     """Confirm 阶段执行删除：重读 snapshot 比对 → 删 qBit 种子 → inode-anchored 删剩余文件。
 
@@ -1996,58 +2100,93 @@ def _delete_executor(payload: dict) -> dict:
         raise SnapshotMismatch(diffs)
 
     # 3. 删除 qBit 种子（先种子，避免 deleteFiles 之后我们还要删 rm）
-    torrent_results = []
+    # bug #31: 只删「全部文件都在用户预览删除集内」的种子；含未选中文件的种子跳过
+    #          （只在磁盘删用户预览的具体文件）——防"选一集 → delete_files 删整季"。
+    # bug #5:  删种失败不再吞掉 + 继续删文件（会留下 orphan 种子 / 状态分裂）。
+    #          删种异常直接传播 → confirm 标 failed → 零文件删除（文件循环在其后）。
+    torrent_results: list[dict] = []
     qbit_deleted_paths: set[str] = set()
     if delete_torrents and expected_snapshot.get("torrents"):
-        hashes = [t["hash"] for t in expected_snapshot["torrents"]]
-        try:
-            qbit.delete_torrents(hashes, delete_files=True)
-            for t in expected_snapshot["torrents"]:
-                torrent_results.append(
-                    {
-                        "hash": t["hash"],
-                        "name": t["name"],
-                        "status": "deleted",
-                    }
-                )
+        to_delete_hashes, skipped_torrents = _partition_torrents_for_deletion(
+            expected_snapshot,
+            get_files_fn=qbit.get_torrent_files,
+            resolve_fn=_resolve_real_paths,
+        )
+        by_hash = {t["hash"]: t for t in expected_snapshot["torrents"]}
+        for st in skipped_torrents:
+            torrent_results.append(
+                {
+                    "hash": st["hash"],
+                    "name": st.get("name", ""),
+                    "status": "skipped",
+                    "reason": st["reason"],
+                }
+            )
+            logger.info(
+                f"[action/delete] torrent {st['hash'][:8]} skipped ({st['reason']}); "
+                f"only previewed files removed"
+            )
+        if to_delete_hashes:
+            # bug #5: 不 try/except 吞 — 失败直接抛，confirm 标 failed，零文件删除
+            qbit.delete_torrents(to_delete_hashes, delete_files=True)
+            for h in to_delete_hashes:
+                t = by_hash.get(h, {})
+                torrent_results.append({"hash": h, "name": t.get("name", ""), "status": "deleted"})
                 if t.get("content_path"):
                     qbit_deleted_paths.add(t["content_path"])
-            logger.info(f"[action/delete] removed {len(hashes)} torrents")
-        except Exception as e:
-            logger.error(f"[action/delete] qBit delete failed: {e}")
-            torrent_results.append({"status": "error", "message": str(e)})
+            logger.info(f"[action/delete] removed {len(to_delete_hashes)} torrents")
 
-    # 4. inode-anchored 删除剩余文件
-    # 文件：用 `find <base> -xdev -inum N -delete` 锚定 inode（处理 confirm 之间被 mv）
-    # 目录：直接 rm -rf <path>（目录没有真硬链接概念）
+    # 4. 删除剩余文件/目录（scoped 到预览的具体 path + inode 校验）
     file_results: list[dict] = []
-    base = NAS_BASE_PATH.rstrip("/")
-    safe_base = shlex.quote(base)
     for item in expected_snapshot["items"]:
         path = item["path"]
         if path in qbit_deleted_paths:
             file_results.append({"path": path, "status": "deleted_by_qbit"})
             continue
+        expected_inode = int(item.get("inode") or 0)
         if item["is_dir"]:
-            # 目录：直接 rm -rf path（验证存在）
+            # bug #30: 目录删除前 re-verify inode == 预览快照 inode，避免 drift→rm 之间
+            #          路径被 swap 成另一个目录而误删用户没预览过的目录。
+            if expected_inode == 0 or not item.get("exists", True):
+                file_results.append({"path": path, "status": "already_gone"})
+                continue
             safe_path = shlex.quote(path)
-            cmd = f"[ -e {safe_path} ] && rm -rf -- {safe_path} && echo OK || echo GONE"
+            cmd = (
+                f'if [ "$(stat -c %i -- {safe_path} 2>/dev/null || echo 0)" = '
+                f'"{expected_inode}" ]; then rm -rf -- {safe_path} && echo OK || echo RMFAIL; '
+                f"else echo INODE_MISMATCH; fi"
+            )
             _, out, _ = ssh_exec(cmd, timeout=300)
-            last = out.strip().splitlines()[-1] if out.strip() else "GONE"
+            last = out.strip().splitlines()[-1] if out.strip() else "RMFAIL"
             if last == "OK":
                 file_results.append({"path": path, "status": "deleted"})
+            elif last == "INODE_MISMATCH":
+                file_results.append({"path": path, "status": "skipped_inode_mismatch"})
+            elif last == "RMFAIL":
+                # Codex CONCERN: rm -rf 真失败（权限 / busy / IO）≠ already_gone。
+                # 单独标 delete_failed，避免误报"已删"让 ops 以为目录没了实际还在。
+                file_results.append({"path": path, "status": "delete_failed"})
             else:
                 file_results.append({"path": path, "status": "already_gone"})
         else:
-            # 文件：find -inum 删所有 hardlink；inode=0（不存在）跳过
-            if not item["exists"] or item["inode"] == 0:
+            # bug #4: 不用全局 `find <base> -xdev -inum N -delete`（会删走 preview 后
+            #          新建的同 inode hardlink，如 organize cron 刚 ln 进库的库内副本）。
+            #          只删预览快照捕获的精确 path 集（item path + 该 item 的 hardlinks），
+            #          每条用 scoped `find <path> -maxdepth 0 -inum N` 校验 inode 后删。
+            #          (残留 TOCTOU：find 自身 stat→unlink 之间窗口，已是 shell 能做到的最小。)
+            if not item["exists"] or expected_inode == 0:
                 file_results.append({"path": path, "status": "already_gone"})
                 continue
-            inum = int(item["inode"])
-            # -xdev 限制不跨文件系统；-print 让我们看删了哪些
-            cmd = f"find {safe_base} -xdev -inum {inum} -print -delete 2>/dev/null"
-            _, out, _ = ssh_exec(cmd, timeout=300)
-            removed_paths = [ln for ln in out.strip().splitlines() if ln]
+            target_paths = [path] + [hp for hp in (item.get("hardlinks") or []) if hp]
+            removed_paths: list[str] = []
+            for tp in target_paths:
+                safe_tp = shlex.quote(tp)
+                cmd = (
+                    f"find {safe_tp} -maxdepth 0 -inum {expected_inode} -print -delete 2>/dev/null"
+                )
+                _, out, _ = ssh_exec(cmd, timeout=300)
+                if [ln for ln in out.strip().splitlines() if ln]:
+                    removed_paths.append(tp)
             if removed_paths:
                 file_results.append(
                     {
@@ -3004,12 +3143,25 @@ def _do_action_preview(kind: str, raw_data: dict):
                         }
                     ), 400
                 for f in ("expected_inode", "expected_size", "expected_mtime"):
-                    if c.get(f) is None:
+                    val = c.get(f)
+                    if val is None:
                         return jsonify(
                             {
                                 "error": "strict_mode_requires_expected_fields",
                                 "candidate_index": i,
                                 "missing": f,
+                            }
+                        ), 400
+                    # bug #22: bool 是 int 子类，expected_inode=true 会绕过类型校验，
+                    # 后续跟 server 端 int 做 != 比较时 True==1 让 drift guard 失效。
+                    # 必须先显式拒 bool 再判 int。
+                    if isinstance(val, bool) or not isinstance(val, int):
+                        return jsonify(
+                            {
+                                "error": "strict_mode_requires_integer_fields",
+                                "candidate_index": i,
+                                "field": f,
+                                "detail": f"{f} must be a non-negative integer",
                             }
                         ), 400
 
