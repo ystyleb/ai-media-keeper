@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 import xml.etree.ElementTree as ET
 from functools import wraps
@@ -42,6 +43,7 @@ from services import (
 )
 from services import identify as identify_svc
 from services import organize as organize_svc
+from services.metadata.base import ProviderUnavailable
 from services.metadata.tmdb import TMDBProvider
 
 # 配置日志
@@ -551,6 +553,10 @@ class QBitClient:
     def __init__(self):
         self.session = requests.Session()
         self._logged_in = False
+        # bug #7: cron 线程 + Flask 请求线程并发用同一 session（requests.Session 非线程
+        # 安全）→ cookie jar / 连接池交错。RLock 串行化所有 HTTP 方法；RLock 允许
+        # find_torrents_by_paths→get_torrents 这种重入。
+        self._lock = threading.RLock()
         self._config: dict = {}
         self.load_config()
 
@@ -664,8 +670,10 @@ class QBitClient:
         if password:
             self._config["password"] = password
         self.save_config()
-        self._logged_in = False
-        self.session.cookies.clear()
+        # bug #7: 与并发的 _authed_request 串行化，避免改配置时清 cookie 撞正在跑的请求
+        with self._lock:
+            self._logged_in = False
+            self.session.cookies.clear()
 
     def _ensure_login(self):
         if self._logged_in:
@@ -682,10 +690,25 @@ class QBitClient:
             raise RuntimeError(f"qBit login failed: {resp.status_code}")
         self._logged_in = True
 
+    def _authed_request(self, method: str, path: str, *, timeout: int, **kwargs):
+        """bug #7+#8: 持锁串行化共享 session + 401/403（cookie 过期/qBit 重启）时
+        重置登录态 + 重登 + 重试一次。避免过期 cookie 永久 403（cron 静默停摆）。
+        """
+        with self._lock:
+            self._ensure_login()
+            url = f"{self.url}{path}"
+            resp = self.session.request(method, url, timeout=timeout, **kwargs)
+            if resp.status_code in (401, 403):
+                self._logged_in = False
+                self.session.cookies.clear()
+                self._ensure_login()
+                resp = self.session.request(method, url, timeout=timeout, **kwargs)
+            resp.raise_for_status()
+            return resp
+
     def test_connection(self) -> dict:
         """用已保存的配置测试连接"""
         try:
-            self._ensure_login()
             torrents = self.get_torrents()
             return {"status": "ok", "torrent_count": len(torrents)}
         except Exception as e:
@@ -728,10 +751,7 @@ class QBitClient:
             session.close()
 
     def get_torrents(self) -> list[dict]:
-        self._ensure_login()
-        resp = self.session.get(f"{self.url}/api/v2/torrents/info", timeout=30)
-        resp.raise_for_status()
-        return resp.json()
+        return self._authed_request("GET", "/api/v2/torrents/info", timeout=30).json()
 
     def find_torrents_by_paths(self, paths: list[str]) -> list[dict]:
         """根据文件路径列表匹配种子（先 realpath 规范化，处理 QNAP symlink）"""
@@ -780,27 +800,21 @@ class QBitClient:
 
         bug #31：删种前用它枚举文件，只有全部文件都在用户预览删除集内才 delete_files。
         """
-        self._ensure_login()
-        resp = self.session.get(
-            f"{self.url}/api/v2/torrents/files",
-            params={"hash": torrent_hash},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        return self._authed_request(
+            "GET", "/api/v2/torrents/files", timeout=30, params={"hash": torrent_hash}
+        ).json()
 
     def delete_torrents(self, hashes: list[str], delete_files: bool = True):
-        self._ensure_login()
         # qBit WebAPI 标准是 POST（旧版接受 GET，但开源版本走标准）
-        resp = self.session.post(
-            f"{self.url}/api/v2/torrents/delete",
+        self._authed_request(
+            "POST",
+            "/api/v2/torrents/delete",
+            timeout=60,
             data={
                 "hashes": "|".join(hashes),
                 "deleteFiles": "true" if delete_files else "false",
             },
-            timeout=60,
         )
-        resp.raise_for_status()
 
 
 qbit = QBitClient()
@@ -4355,7 +4369,13 @@ def metadata_identify():
             }
         )
 
-    result = identify_svc.identify(path, provider, llm_api_key=load_deepseek_key() or None)
+    try:
+        result = identify_svc.identify(path, provider, llm_api_key=load_deepseek_key() or None)
+    except ProviderUnavailable as e:
+        # bug #12: TMDB 瞬时不可用（429/网络/5xx）≠ 没结果。返 503 retryable，
+        # 不让前端/调用方把它当 "no candidates" 缓存成 needs_review。
+        return jsonify({"error": "provider_unavailable", "detail": str(e), "retryable": True}), 503
+
     response = {
         "parse": {
             "raw_name": result.parse.raw_name,
@@ -5738,9 +5758,14 @@ def _cron_reap_stuck():
         try:
             reaped = destructive_action.reap_stuck_actions(conn)
             cleaned = destructive_action.cleanup_expired_pending(conn)
-            if reaped or cleaned:
+            # bug #14: 必须同时 reap 卡死的 watch_sync_runs，否则崩溃的同步永久占住
+            # uniq_watch_sync_running 单飞槽 → 所有后续同步被拒。timeout 取 1800s
+            # （远大于最长合法 Emby sync），ground-truth 兜底不误杀正常长同步。
+            sync_reaped = watch_sync.reap_stuck_sync_runs(conn, timeout_secs=1800)
+            if reaped or cleaned or sync_reaped:
                 logger.info(
-                    f"[cron] reaped {reaped} stuck running, cleaned {cleaned} expired pending"
+                    f"[cron] reaped {reaped} stuck running, cleaned {cleaned} expired pending, "
+                    f"reaped {sync_reaped} stuck sync runs"
                 )
         finally:
             conn.close()

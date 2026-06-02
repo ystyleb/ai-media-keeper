@@ -13,7 +13,7 @@ from typing import Any
 
 import requests
 
-from .base import MediaCandidate, MediaDetails, MetadataProvider
+from .base import MediaCandidate, MediaDetails, MetadataProvider, ProviderUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,7 @@ class TMDBProvider(MetadataProvider):
         if not title.strip():
             return []
         candidates: list[MediaCandidate] = []
+        errored = False  # bug #12: 记录是否发生过瞬时错误（区别于 genuine no-results）
         # 当 media_type 不指定时同时搜 movie + tv，按 vote_average 排序
         search_movie = media_type in (None, "movie", "episode")
         search_tv = media_type in (None, "tv", "episode")
@@ -97,6 +98,7 @@ class TMDBProvider(MetadataProvider):
                     candidates.append(self._movie_to_candidate(m))
             except Exception as e:
                 logger.error(f"[tmdb] movie search failed: {e}")
+                errored = True
 
         if search_tv:
             # TV 搜索故意不传 first_air_date_year — multi-season 剧的 first_air_date 是
@@ -109,6 +111,14 @@ class TMDBProvider(MetadataProvider):
                     candidates.append(self._tv_to_candidate(t))
             except Exception as e:
                 logger.error(f"[tmdb] tv search failed: {e}")
+                errored = True
+
+        # bug #12: 候选为空 + 发生过瞬时错误 → 不可区分"没结果"，raise 让调用方当 retryable
+        # （不缓存 needs_review）。有候选则部分成功，正常返回。
+        if not candidates and errored:
+            raise ProviderUnavailable(
+                "TMDB search failed (transient: 429/auth/network/5xx); not 'no-results'"
+            )
 
         return candidates[:10]
 

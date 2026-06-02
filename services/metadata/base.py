@@ -13,6 +13,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+class ProviderUnavailable(RuntimeError):
+    """Provider 瞬时不可用（429 / auth / 网络 / 5xx）——区别于"确实没搜到结果"。
+
+    bug #12: search() 不能把瞬时错误和"genuine no-results"都返空列表，否则一次 429
+    会把可识别的文件永久写成 needs_review。调用方应把它当 retryable（如返 503），
+    不缓存 needs_review、不触发 LLM rescue。
+    """
+
+
 @dataclass(frozen=True)
 class MediaCandidate:
     """Provider 返回的候选项。id 唯一，下游 LLM/用户只能从已返回的 id 集合中选。"""

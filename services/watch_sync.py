@@ -67,6 +67,14 @@ class SyncSummary:
 # ─── Mapping ──────────────────────────────────────────────────────
 
 
+def _raw_hash(*parts: Any) -> str:
+    """change-detection key — 必须覆盖所有 item-defining 字段（不只 id|last_played_at），
+    否则 Emby 端修正 s/e/tmdb/imdb 但 last_played_at 不变时 re-sync 被静默跳过（bug #13a）。
+    """
+    seed = "|".join("" if p is None else str(p) for p in parts)
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
 def map_emby_item_to_watched(
     item: Any,
     series_tmdb_cache: dict[str, str | None],
@@ -80,8 +88,6 @@ def map_emby_item_to_watched(
 
     Pattern B enforcement: the output respects movie/tv mutex on id fields.
     """
-    raw_hash_seed = f"{item.id}|{item.last_played_at or 0}"
-    raw_hash = hashlib.sha256(raw_hash_seed.encode("utf-8")).hexdigest()
     watched_at = item.last_played_at or int(time.time())
 
     if item.type == "Movie":
@@ -90,6 +96,9 @@ def map_emby_item_to_watched(
             status, conf, source = "mapped", 1.0, "emby.provider_ids"
         else:
             status, conf, source = "unmapped", 0.0, "unknown"
+        raw_hash = _raw_hash(
+            item.id, item.last_played_at or 0, "movie", movie_tmdb, item.imdb_id, status
+        )
         return WatchedItem(
             provider="emby",
             provider_item_id=item.id,
@@ -125,6 +134,17 @@ def map_emby_item_to_watched(
             # caller (sync worker) must drop it. We still construct an item so
             # the worker can log it; persistence will be filtered out.
             status, conf, source = "unmapped", 0.0, "unknown"
+        raw_hash = _raw_hash(
+            item.id,
+            item.last_played_at or 0,
+            "tv",
+            episode_tmdb,
+            series_tmdb,
+            item.season_number,
+            item.episode_number,
+            item.imdb_id,
+            status,
+        )
         return WatchedItem(
             provider="emby",
             provider_item_id=item.id,
@@ -208,12 +228,16 @@ def _upsert_watched_item(conn: sqlite3.Connection, w: WatchedItem) -> str:
     # Existing row — only update if raw_hash differs (re-watched / mapping refined)
     if existing["raw_hash"] == w.raw_hash:
         return "skipped"
+    # bug #13b: 原 UPDATE 漏写 season/episode/media_type/imdb_id → Emby 端修正后
+    # 这些列永远停在首次入库的旧值。补全列，让 re-sync 能真正纠正。
     conn.execute(
         """
         UPDATE watched_items SET
           watched_at=?, fetched_at=?, raw_hash=?,
           mapping_status=?, mapping_confidence=?, mapping_source=?,
-          tmdb_movie_id=?, tmdb_series_id=?, tmdb_episode_id=?,
+          media_type=?,
+          tmdb_movie_id=?, tmdb_series_id=?, tmdb_episode_id=?, imdb_id=?,
+          season_number=?, episode_number=?,
           title=?, year=?
         WHERE id=?
         """,
@@ -224,9 +248,13 @@ def _upsert_watched_item(conn: sqlite3.Connection, w: WatchedItem) -> str:
             w.mapping_status,
             w.mapping_confidence,
             w.mapping_source,
+            w.media_type,
             w.tmdb_movie_id,
             w.tmdb_series_id,
             w.tmdb_episode_id,
+            w.imdb_id,
+            w.season_number,
+            w.episode_number,
             w.title,
             w.year,
             existing["id"],
@@ -330,8 +358,21 @@ def sync_emby(
             series_cache = emby_client.get_series_tmdb_ids(series_ids) if series_ids else {}
 
             for it in items:
-                w = map_emby_item_to_watched(it, series_cache)
-                result = _upsert_watched_item(conn, w)
+                # bug #10: 单个坏 item（map ValueError / CHECK IntegrityError / 任意异常）
+                # 只 skip 它，不 rollback 整批。map 抛错时未碰 DB；upsert 的约束违规由
+                # sqlite statement-level atomicity 自动撤销该条，事务仍可用、后续 item 继续。
+                # 外层 except 只留给 list_watched / get_series_tmdb_ids / 连接级致命错误。
+                try:
+                    w = map_emby_item_to_watched(it, series_cache)
+                    result = _upsert_watched_item(conn, w)
+                except Exception as item_err:
+                    logger.warning(
+                        "emby: skipping bad item %s: %s",
+                        getattr(it, "id", "?"),
+                        item_err,
+                    )
+                    summary.skipped += 1
+                    continue
                 if result == "inserted":
                     summary.inserted += 1
                 elif result == "updated":

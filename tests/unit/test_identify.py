@@ -638,3 +638,53 @@ def test_extracts_codec_av1_in_full_pipeline():
     """完整 parse_filename 在 AV1 release 上能拿到 codec='AV1'。"""
     p = identify_svc.parse_filename("/share/Movies/Movie.2024.2160p.WEB-DL.AV1.10bit-GROUP.mkv")
     assert p.codec == "AV1"
+
+
+# ---------------- bug #11: single_exact must respect year ---------------- #
+
+
+def test_identify_single_exact_rejects_year_mismatch():
+    """#11: 唯一候选 title exact 但 year 差 >1 → 不能走 single_exact 0.95 自动绑，
+    应 fall through 到 _pick_top（year mismatch 罚分 → 0.55 < 0.7 → needs_review）。"""
+    fake = MagicMock()
+    fake.search.return_value = [
+        MediaCandidate(
+            id="tmdb:movie:238",
+            external_ids={"tmdb_id": "238"},
+            title="The Godfather",
+            original_title="The Godfather",
+            year=1972,
+            media_type="movie",
+            poster_url=None,
+            overview=None,
+            vote_average=8.7,
+        ),
+    ]
+    result = identify_svc.identify(
+        "/x/The.Godfather.1974.BluRay.1080p.mkv", provider=fake, llm_api_key=None
+    )
+    assert result.pick_source != "single_exact"
+    assert result.pick_source == "needs_review"
+
+
+def test_identify_single_exact_still_binds_when_year_matches():
+    """回归：year 一致时 single_exact 仍正常 0.95 绑定（用干净标题，避开 guessit Part 剥离）。"""
+    fake = MagicMock()
+    fake.search.return_value = [
+        MediaCandidate(
+            id="tmdb:movie:27205",
+            external_ids={"tmdb_id": "27205"},
+            title="Inception",
+            original_title="Inception",
+            year=2010,
+            media_type="movie",
+            poster_url=None,
+            overview=None,
+            vote_average=8.4,
+        ),
+    ]
+    result = identify_svc.identify(
+        "/x/Inception.2010.BluRay.1080p.mkv", provider=fake, llm_api_key=None
+    )
+    assert result.pick_source == "single_exact"
+    assert result.confidence == 0.95

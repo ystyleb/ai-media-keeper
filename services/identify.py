@@ -526,13 +526,18 @@ def identify(
             pick_source="needs_review",
         )
 
-    # 路径 1: 唯一候选 + title exact → 直接绑（省 token，最常见 happy path）
+    # 路径 1: 唯一候选 + title exact + year 兼容 → 直接绑（省 token，最常见 happy path）
+    # bug #11: 原来只看 title 不看 year → 唯一候选 title exact 但错年时以 0.95 自动绑错
+    #   （TMDB year 是 soft hint，niche/foreign title 常返单个错年候选）。加 year-gate：
+    #   双方 year 都已知且差 >1 → 不走快路径，fall through 到 _pick_top（有 year mismatch
+    #   罚分，错年候选算 0.55 < 0.7 → 自动转 needs_review）。
     if len(candidates) == 1:
         c = candidates[0]
         norm_want = _normalize_title(parse.title)
         norm_t = _normalize_title(c.title)
         norm_o = _normalize_title(c.original_title or "")
-        if norm_want and norm_want in (norm_t, norm_o):
+        year_ok = (not parse.year) or (not c.year) or abs(c.year - parse.year) <= 1
+        if norm_want and norm_want in (norm_t, norm_o) and year_ok:
             return IdentifyResult(
                 parse=parse,
                 candidates=candidates,

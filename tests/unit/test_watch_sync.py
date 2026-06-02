@@ -499,6 +499,149 @@ def test_sync_emby_inserts_mapped_items(db_path):
     assert ep_row["tmdb_series_id"] == "1399"
 
 
+# ── bug #13: raw_hash 含 item-defining 字段 + UPDATE 写全 ──
+
+
+def test_map_raw_hash_changes_when_season_episode_corrected():
+    """#13a: 修正 s/e（last_played_at 不变）必须改变 raw_hash，否则 re-sync 静默跳过。"""
+    base = dict(
+        id="e1",
+        type="Episode",
+        name="Pilot",
+        year=2013,
+        tmdb_id="ep-1",
+        imdb_id=None,
+        series_id="s1",
+        last_played_at=1700000000,
+    )
+    w1 = watch_sync.map_emby_item_to_watched(
+        EmbyItem(**base, season_number=1, episode_number=1), {"s1": "1399"}
+    )
+    w2 = watch_sync.map_emby_item_to_watched(
+        EmbyItem(**base, season_number=2, episode_number=5), {"s1": "1399"}
+    )
+    assert w1.raw_hash != w2.raw_hash
+
+
+def test_upsert_update_persists_corrected_season_episode_and_imdb(conn):
+    """#13b: raw_hash 变触发 UPDATE 时，s/e/media_type/imdb_id 必须真写进 DB。"""
+    base = dict(
+        id="e1",
+        type="Episode",
+        name="Pilot",
+        year=2013,
+        tmdb_id="ep-1",
+        series_id="s1",
+        last_played_at=1700000000,
+    )
+    w1 = watch_sync.map_emby_item_to_watched(
+        EmbyItem(**base, imdb_id=None, season_number=1, episode_number=1), {"s1": "1399"}
+    )
+    assert watch_sync._upsert_watched_item(conn, w1) == "inserted"
+    # 修正 s/e + imdb（同 provider_item_id）
+    w2 = watch_sync.map_emby_item_to_watched(
+        EmbyItem(**base, imdb_id="tt999", season_number=2, episode_number=5), {"s1": "1399"}
+    )
+    assert watch_sync._upsert_watched_item(conn, w2) == "updated"
+    row = conn.execute(
+        "SELECT season_number, episode_number, imdb_id FROM watched_items "
+        "WHERE provider='emby' AND provider_item_id='e1'"
+    ).fetchone()
+    assert (row["season_number"], row["episode_number"], row["imdb_id"]) == (2, 5, "tt999")
+
+
+# ── bug #10: 单个坏 item 不应 rollback 整批 ──
+
+
+def test_sync_emby_one_bad_item_does_not_abort_batch(db_path):
+    """#10: 单个 item map 抛错（type 未知）不应 rollback 整批；其余 item 入库，run=done。"""
+    items = [
+        EmbyItem(
+            id="m-1",
+            type="Movie",
+            name="Good1",
+            year=1972,
+            tmdb_id="238",
+            imdb_id=None,
+            series_id=None,
+            season_number=None,
+            episode_number=None,
+            last_played_at=1700000000,
+        ),
+        EmbyItem(
+            id="bad",
+            type="Weird",
+            name="Bad",
+            year=None,
+            tmdb_id=None,
+            imdb_id=None,
+            series_id=None,
+            season_number=None,
+            episode_number=None,
+            last_played_at=1700000000,
+        ),
+        EmbyItem(
+            id="m-2",
+            type="Movie",
+            name="Good2",
+            year=1974,
+            tmdb_id="240",
+            imdb_id=None,
+            series_id=None,
+            season_number=None,
+            episode_number=None,
+            last_played_at=1700000000,
+        ),
+    ]
+    client = _FakeEmbyClient(items, {})
+
+    def open_conn():
+        return destructive_action.open_connection(db_path)
+
+    run_id = watch_sync.sync_emby(open_conn=open_conn, emby_client=client, run_in_thread=False)
+    conn = open_conn()
+    try:
+        run = watch_sync.get_sync_status(conn, run_id)
+        ids = [
+            r["provider_item_id"]
+            for r in conn.execute(
+                "SELECT provider_item_id FROM watched_items ORDER BY provider_item_id"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    assert run["status"] == "done", "one bad item aborted the whole sync"
+    assert ids == ["m-1", "m-2"], f"good items lost: {ids}"
+    assert run["items_skipped"] >= 1
+
+
+# ── bug #14: watch-sync reaper 必须接进 cron ──
+
+
+def test_cron_reap_stuck_invokes_watch_sync_reaper(monkeypatch):
+    """#14: _cron_reap_stuck 必须调 watch_sync.reap_stuck_sync_runs，否则崩溃的同步
+    永久占住 uniq_watch_sync_running 单飞槽，所有后续同步被 ConcurrentSyncError 拒。"""
+    import app as app_module
+
+    class _FakeConn:
+        def close(self):
+            pass
+
+    calls = {"sync_reaper": 0}
+    monkeypatch.setattr(app_module.destructive_action, "open_connection", lambda p: _FakeConn())
+    monkeypatch.setattr(app_module.destructive_action, "reap_stuck_actions", lambda c: 0)
+    monkeypatch.setattr(app_module.destructive_action, "cleanup_expired_pending", lambda c: 0)
+
+    def _fake_sync_reaper(conn, **kw):
+        calls["sync_reaper"] += 1
+        return 0
+
+    monkeypatch.setattr(app_module.watch_sync, "reap_stuck_sync_runs", _fake_sync_reaper)
+
+    app_module._cron_reap_stuck()
+    assert calls["sync_reaper"] == 1, "watch-sync reaper not wired into cron"
+
+
 def test_sync_emby_concurrent_call_raises(db_path):
     """Concurrent invocation while a previous run is still 'running' → ConcurrentSyncError."""
     items = []
