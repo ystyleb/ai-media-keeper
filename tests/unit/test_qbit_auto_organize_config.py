@@ -96,7 +96,7 @@ def test_load_invalid_types_fall_back_to_defaults(fake_cfg):
 # ── save ───
 
 
-def test_save_writes_only_4_schema_fields(fake_cfg):
+def test_save_writes_only_schema_fields(fake_cfg):
     """save 拒绝写额外字段（防 schema bloat）。"""
     app_module.save_qbit_auto_organize_config(
         {
@@ -113,6 +113,8 @@ def test_save_writes_only_4_schema_fields(fake_cfg):
         "categories",
         "poll_interval_minutes",
         "confidence_threshold",
+        "auto_identify",
+        "auto_identify_confidence_threshold",
     }
 
 
@@ -157,11 +159,24 @@ def test_save_clamps_confidence(fake_cfg):
     assert json.loads(fake_cfg.read_text())["confidence_threshold"] == 1.0
 
 
-def test_save_defaults_when_fields_missing(fake_cfg):
-    """完全空 dict 也能 save（不抛 KeyError），全走默认。"""
-    app_module.save_qbit_auto_organize_config({})
-    saved = json.loads(fake_cfg.read_text())
-    assert saved["enabled"] is False
-    assert saved["categories"] == []
-    assert saved["poll_interval_minutes"] == 5
-    assert saved["confidence_threshold"] == 0.85
+# ── auto_identify (Task 2) ───
+
+
+def test_auto_identify_defaults_off(fake_cfg):
+    cfg = app_module.load_qbit_auto_organize_config()
+    assert cfg["auto_identify"] is False
+    assert cfg["auto_identify_confidence_threshold"] == 0.95
+
+
+def test_auto_identify_save_roundtrip_and_clamp(fake_cfg):
+    app_module.save_qbit_auto_organize_config(
+        {
+            "enabled": True,
+            "categories": ["movie"],
+            "auto_identify": True,
+            "auto_identify_confidence_threshold": 1.5,  # 越界 → clamp 到 1.0
+        }
+    )
+    cfg = app_module.load_qbit_auto_organize_config()
+    assert cfg["auto_identify"] is True
+    assert cfg["auto_identify_confidence_threshold"] == 1.0

@@ -1,0 +1,31 @@
+<div class="space-y-3">
+    {% if error %}
+    <div class="text-sm text-red-400">⚠️ {{ error }}</div>
+    {% elif not disks %}
+    <div class="text-sm text-slate-400">无磁盘数据</div>
+    {% else %}
+    {% for d in disks %}
+    <div class="space-y-1">
+        <div class="flex items-center justify-between text-xs">
+            <span class="text-slate-200 font-mono truncate">{{ d.mount }}</span>
+            <span class="text-slate-400">{{ d.used }} / {{ d.size }}</span>
+        </div>
+        <div class="bg-slate-800 rounded h-2 overflow-hidden">
+            {% set pct = d.use_percent %}
+            {% if pct >= 90 %}
+                {% set bar_color = 'bg-red-600' %}
+            {% elif pct >= 75 %}
+                {% set bar_color = 'bg-amber-500' %}
+            {% else %}
+                {% set bar_color = 'bg-emerald-600' %}
+            {% endif %}
+            <div class="{{ bar_color }} h-full transition-all" style="width: {{ pct }}%"></div>
+        </div>
+        <div class="flex items-center justify-between text-xs text-slate-500">
+            <span>已用 {{ pct }}%</span>
+            <span>剩 {{ d.available }}</span>
+        </div>
+    </div>
+    {% endfor %}
+    {% endif %}
+</div>

@@ -89,7 +89,9 @@ _DOT_BY_STATE = {
 def _to_status_segments(raw: dict) -> list[dict]:
     """raw = {"tmdb": {"state": "ok", ...}, "deepseek": {...}, ...}.
 
-    返回 [{"name": "TMDB", "dot": "ok", "detail": None, "tooltip": "..."}].
+    返回 [{"name", "dot", "detail", "message", "tooltip"}].
+    detail = 异常态简写 (401/未配/无连接) 或 ok 态空串 (template 用 `or` 兜底)。
+    message = backend 友好描述 (e.g. "qBit OK (159 torrents)")。
     """
     name_by_key = {"tmdb": "TMDB", "deepseek": "DeepSeek", "emby": "Emby", "qbit": "qBit"}
     segments = []
@@ -97,21 +99,24 @@ def _to_status_segments(raw: dict) -> list[dict]:
         entry = raw.get(key, {}) or {}
         state = entry.get("state", "unknown")
         dot = _DOT_BY_STATE.get(state, "gray")
-        detail = None
+        detail = ""
         if state == "auth_failed":
             detail = "401"
         elif state == "not_configured":
             detail = "未配"
         elif state == "unreachable":
             detail = "无连接"
+        message = entry.get("message", "") or ""
         tooltip = f"{name_by_key[key]}: {state}"
         if entry.get("checked_at"):
             tooltip += f" @ {entry['checked_at']}"
         segments.append(
             {
                 "name": name_by_key[key],
+                "state": state,
                 "dot": dot,
                 "detail": detail,
+                "message": message,
                 "tooltip": tooltip,
             }
         )

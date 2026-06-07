@@ -40,6 +40,33 @@
                 <p class="text-sm text-slate-500 italic">加载中…</p>
             </div>
         </div>
+
+        <div class="p-4 bg-slate-800 rounded border border-slate-700">
+            <h3 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+                <span>🎬</span> 媒体库统计
+            </h3>
+            <div hx-get="/ui/dashboard/library-stats" hx-trigger="load, every 60s" hx-swap="innerHTML">
+                <p class="text-sm text-slate-500 italic">加载中…</p>
+            </div>
+        </div>
+
+        <div class="p-4 bg-slate-800 rounded border border-slate-700">
+            <h3 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+                <span>💾</span> 磁盘空间
+            </h3>
+            <div hx-get="/ui/dashboard/disk" hx-trigger="load, every 60s" hx-swap="innerHTML">
+                <p class="text-sm text-slate-500 italic">加载中…</p>
+            </div>
+        </div>
+
+        <div class="p-4 bg-slate-800 rounded border border-slate-700">
+            <h3 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+                <span>🕒</span> 最近活动
+            </h3>
+            <div hx-get="/ui/dashboard/activity" hx-trigger="load, every 30s" hx-swap="innerHTML">
+                <p class="text-sm text-slate-500 italic">加载中…</p>
+            </div>
+        </div>
     </div>
 
     {% include "_legacy_modals.html" %}

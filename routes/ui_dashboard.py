@@ -49,3 +49,139 @@ def todo_card():
 
     badges = _compute_sidebar_badges()
     return render_template("partials/dashboard/todo_card.html", badges=badges)
+
+
+@ui_dashboard_bp.route("/dashboard/library-stats", methods=["GET"])
+@_require_token
+def library_stats_card():
+    """媒体库统计卡片: total + 按类型 + 评分分布 + top genres."""
+    from app import get_db
+    from services import metadata_cache
+
+    stats = metadata_cache.get_library_stats(get_db())
+    return render_template("partials/dashboard/library_stats_card.html", stats=stats)
+
+
+@ui_dashboard_bp.route("/dashboard/disk", methods=["GET"])
+@_require_token
+def disk_card():
+    """磁盘空间卡片 (复用 SSH df 解析逻辑)."""
+    from app import NAS_BASE_PATH, NAS_DISK_PATTERN, _validate_glob_pattern, ssh_exec
+
+    pattern = NAS_DISK_PATTERN if NAS_DISK_PATTERN else NAS_BASE_PATH
+    disks: list[dict] = []
+    error: str | None = None
+    try:
+        _validate_glob_pattern(pattern)
+        cmd = f"df -hP {pattern} 2>/dev/null"
+        code, stdout, _stderr = ssh_exec(cmd)
+        if code != 0:
+            error = "SSH df 失败"
+        else:
+            for line in stdout.strip().split("\n")[1:]:
+                parts = line.split()
+                if len(parts) >= 6:
+                    pct_str = parts[4].rstrip("%")
+                    try:
+                        pct = int(pct_str)
+                    except ValueError:
+                        pct = 0
+                    disks.append(
+                        {
+                            "mount": parts[5],
+                            "size": parts[1],
+                            "used": parts[2],
+                            "available": parts[3],
+                            "use_percent": pct,
+                        }
+                    )
+    except ValueError:
+        error = "无效的 disk pattern"
+    except Exception as e:  # noqa: BLE001
+        error = f"读取失败: {e}"
+
+    return render_template(
+        "partials/dashboard/disk_card.html", disks=disks, error=error
+    )
+
+
+def _fmt_ts(ts: int | None) -> str:
+    """Unix ts → 友好相对时间 ("刚刚" / "5 分钟前" / "MM-DD HH:MM")."""
+    if not ts:
+        return ""
+    import time
+
+    now = int(time.time())
+    diff = now - int(ts)
+    if diff < 60:
+        return "刚刚"
+    if diff < 3600:
+        return f"{diff // 60} 分钟前"
+    if diff < 86400:
+        return f"{diff // 3600} 小时前"
+    if diff < 7 * 86400:
+        return f"{diff // 86400} 天前"
+    return time.strftime("%m-%d %H:%M", time.localtime(int(ts)))
+
+
+@ui_dashboard_bp.route("/dashboard/activity", methods=["GET"])
+@_require_token
+def activity_card():
+    """最近活动卡片: organize / scan recent runs 时间线."""
+    from app import get_db
+
+    conn = get_db()
+    items: list[dict] = []
+
+    # auto_organize_runs: 最近 10 条 (terminal + running)
+    for row in conn.execute(
+        """
+        SELECT torrent_name, status, created_at, completed_at,
+               files_succeeded, files_failed, last_error
+          FROM auto_organize_runs
+         ORDER BY COALESCE(completed_at, created_at) DESC
+         LIMIT 10
+        """
+    ):
+        ts = row["completed_at"] or row["created_at"]
+        items.append(
+            {
+                "ts": ts,
+                "ts_label": _fmt_ts(ts),
+                "kind": "organize",
+                "label": row["torrent_name"] or "(unknown)",
+                "status": row["status"],
+                "ok": row["files_succeeded"] or 0,
+                "fail": row["files_failed"] or 0,
+                "error": row["last_error"],
+            }
+        )
+
+    # scan_runs: 最近 5 条
+    for row in conn.execute(
+        """
+        SELECT id, base_path, status, started_at, completed_at,
+               files_total, files_done, files_failed
+          FROM scan_runs
+         ORDER BY COALESCE(completed_at, started_at) DESC
+         LIMIT 5
+        """
+    ):
+        ts = row["completed_at"] or row["started_at"]
+        items.append(
+            {
+                "ts": ts,
+                "ts_label": _fmt_ts(ts),
+                "kind": "scan",
+                "label": f"全库扫描 ({row['base_path']})",
+                "status": row["status"],
+                "ok": row["files_done"] or 0,
+                "fail": row["files_failed"] or 0,
+                "error": None,
+            }
+        )
+
+    items.sort(key=lambda x: x["ts"] or 0, reverse=True)
+    items = items[:10]
+
+    return render_template("partials/dashboard/activity_card.html", items=items)

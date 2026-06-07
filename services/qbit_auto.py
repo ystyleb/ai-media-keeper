@@ -437,6 +437,8 @@ def dispatch_one(
     list_video_paths_fn,  # callable(content_path: str) -> list[str]
     confidence_threshold: float,
     build_and_start_organize_fn,  # callable(paths, qbit_hash) -> {action_id, status, error?}
+    identify_paths_fn=None,  # callable(paths) -> {"provider_unavailable": bool}; None=不自动识别
+    auto_identify_threshold: float | None = None,  # 自动识别后 re-gate 门槛
 ) -> dict[str, Any]:
     """对一个 completed torrent 触发自动 organize flow（不阻塞，async worker）.
 
@@ -502,6 +504,23 @@ def dispatch_one(
 
     # 3. confidence gate
     gate = evaluate_confidence_gate(conn, paths, threshold=confidence_threshold)
+
+    # 3.5 自动识别（可选）：needs_identify 时调 identify_paths_fn 写 cache + re-gate 高门槛。
+    # provider 临时不可用 → locked（留 pending 重试，不落 terminal）。
+    if gate["status"] == "skipped_needs_identify" and identify_paths_fn is not None:
+        ni_paths = [b["path"] for b in gate.get("blockers", []) if b.get("path")]
+        outcome = identify_paths_fn(ni_paths)
+        if outcome.get("provider_unavailable"):
+            return {
+                "action": "locked",
+                "qbit_hash": qbit_hash,
+                "reason": "provider_unavailable_during_auto_identify",
+            }
+        regate_threshold = (
+            auto_identify_threshold if auto_identify_threshold is not None else confidence_threshold
+        )
+        gate = evaluate_confidence_gate(conn, paths, threshold=regate_threshold)
+
     if gate["status"] != "pass":
         mark_skipped_at_pending(
             conn,

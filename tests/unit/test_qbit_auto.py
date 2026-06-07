@@ -1005,3 +1005,104 @@ def test_list_history_accepts_all_valid_statuses(conn):
     for status in qbit_auto.VALID_STATUSES:
         # 不该抛 — 只验枚举校验，结果可以空
         qbit_auto.list_history(conn, status_filter=status)
+
+
+# ── dispatch_one 自动识别 (Task 3) ───
+
+
+def _dispatch_with_gates(conn, monkeypatch, gate_sequence, *, identify_fn=None,
+                         auto_threshold=0.95, build_status="started"):
+    """跑 dispatch_one，monkeypatch evaluate_confidence_gate 返回受控 gate 序列。
+    返回 (out, build_calls)。"""
+    gates = iter(gate_sequence)
+    monkeypatch.setattr(qbit_auto, "evaluate_confidence_gate", lambda *a, **k: next(gates))
+    build_calls = []
+
+    def build_fn(paths, qbit_hash):
+        build_calls.append((paths, qbit_hash))
+        return {"action_id": "act-1", "status": build_status}
+
+    out = qbit_auto.dispatch_one(
+        conn,
+        _t(hash="hX", content_path="/d/m.mkv"),
+        list_video_paths_fn=lambda cp: ["/share/CACHEDEV2_DATA/downloads/m.mkv"],
+        confidence_threshold=0.85,
+        build_and_start_organize_fn=build_fn,
+        identify_paths_fn=identify_fn,
+        auto_identify_threshold=auto_threshold,
+    )
+    return out, build_calls
+
+
+def test_dispatch_auto_identify_high_conf_organizes(conn, monkeypatch):
+    """needs_identify → 自动识别 → re-gate pass → 起 organize。"""
+    identify_calls = []
+
+    def identify_fn(paths):
+        identify_calls.append(list(paths))
+        return {"provider_unavailable": False}
+
+    out, build_calls = _dispatch_with_gates(
+        conn,
+        monkeypatch,
+        [
+            {"status": "skipped_needs_identify", "reason": "no cache",
+             "blockers": [{"path": "/share/CACHEDEV2_DATA/downloads/m.mkv"}], "checked_count": 1},
+            {"status": "pass", "reason": "ok", "blockers": [], "checked_count": 1},
+        ],
+        identify_fn=identify_fn,
+    )
+    assert out["action"] == "started"
+    assert identify_calls == [["/share/CACHEDEV2_DATA/downloads/m.mkv"]]
+    assert len(build_calls) == 1
+
+
+def test_dispatch_auto_identify_low_conf_skips(conn, monkeypatch):
+    """识别出但 re-gate(0.95) 判 low_confidence → 留人工，不整理。"""
+    out, build_calls = _dispatch_with_gates(
+        conn,
+        monkeypatch,
+        [
+            {"status": "skipped_needs_identify", "reason": "no cache",
+             "blockers": [{"path": "/share/CACHEDEV2_DATA/downloads/m.mkv"}], "checked_count": 1},
+            {"status": "skipped_low_confidence", "reason": "0.9 < 0.95",
+             "blockers": [], "checked_count": 1},
+        ],
+        identify_fn=lambda paths: {"provider_unavailable": False},
+    )
+    assert out["action"] == "skipped"
+    assert out["status"] == "skipped_low_confidence"
+    assert build_calls == []
+
+
+def test_dispatch_auto_identify_provider_unavailable_locks(conn, monkeypatch):
+    """provider 临时不可用 → action=locked（留 pending 重试，不落 terminal）。"""
+    out, build_calls = _dispatch_with_gates(
+        conn,
+        monkeypatch,
+        [
+            {"status": "skipped_needs_identify", "reason": "no cache",
+             "blockers": [{"path": "/share/CACHEDEV2_DATA/downloads/m.mkv"}], "checked_count": 1},
+        ],
+        identify_fn=lambda paths: {"provider_unavailable": True},
+    )
+    assert out["action"] == "locked"
+    assert build_calls == []
+    row = qbit_auto.get_run(conn, "hX")
+    assert row["status"] == "pending"
+
+
+def test_dispatch_no_identify_fn_unchanged(conn, monkeypatch):
+    """identify_paths_fn=None → 行为不变：needs_identify 直接落 terminal skip。"""
+    out, build_calls = _dispatch_with_gates(
+        conn,
+        monkeypatch,
+        [
+            {"status": "skipped_needs_identify", "reason": "no cache",
+             "blockers": [{"path": "/x"}], "checked_count": 1},
+        ],
+        identify_fn=None,
+    )
+    assert out["action"] == "skipped"
+    assert out["status"] == "skipped_needs_identify"
+    assert build_calls == []

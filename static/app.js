@@ -50,10 +50,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     refreshDisk();
     loadProvidersStatus();   // 顶部 AI / Emby 按钮状态点 + 异常 banner
 
-    // Phase B: page-aware initial load (sidebar 拆 6 page 后, 单页 view-tab 切换被 URL 路由替代)
+    initPageView();
+});
+
+// Phase B: page-aware loader — DOMContentLoaded 首次进入 + htmx:afterSettle 之后 hx-boost 切 page 都要调。
+// sidebar nav 全是 hx-boost=true, HTMX swap body 不触发 DOMContentLoaded, page loader 必须 re-dispatch。
+function initPageView() {
     const path = window.location.pathname;
-    if (path === "/files" || path === "/") {
-        loadFiles(currentPath);
+    if (path === "/files" || path === "/files/" || path === "/") {
+        if (typeof loadFiles === "function") loadFiles(currentPath || nasBasePath);
     } else if (path === "/library") {
         if (typeof loadLibrary === "function") loadLibrary(true);
         if (typeof loadLibraryStats === "function") loadLibraryStats();
@@ -63,6 +68,17 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (typeof loadDedupGroups === "function") loadDedupGroups();
     }
     // /organize /settings /onboarding 不需要 page-specific data load (modal-triggered)
+}
+
+// hx-boost navigate 完成后重跑 page loader。
+// URL 变化检测比 evt.detail.boosted 更可靠 — 非 boost 的局部 hx-get 不会改 URL, 自动 dedupe。
+let _lastPagePath = window.location.pathname;
+document.body.addEventListener("htmx:afterSettle", () => {
+    const now = window.location.pathname;
+    if (now !== _lastPagePath) {
+        _lastPagePath = now;
+        initPageView();
+    }
 });
 
 // Provider 状态聚合（AI 按钮 = TMDB + DeepSeek 合并；Emby 单独）

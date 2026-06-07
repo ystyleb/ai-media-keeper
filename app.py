@@ -37,6 +37,7 @@ from services import (
     metadata_cache,
     nfo_writer,
     organize_runner,
+    path_resolver,
     qbit_auto,
     scanner,
     watch_sync,
@@ -483,6 +484,8 @@ QBIT_AUTO_ORGANIZE_DEFAULTS = {
     "categories": [],  # qBit category 白名单（[] = 不触发任何种子；显式列表防误触）
     "poll_interval_minutes": 5,  # cron 周期；最小 1min（防压垮 qBit API + DB）
     "confidence_threshold": 0.85,  # identifier confidence 门槛；< 标 skipped_low_confidence
+    "auto_identify": False,  # 下载完自动识别未知种子（默认关，destructive 自动化保守）
+    "auto_identify_confidence_threshold": 0.95,  # 自动识别后整理门槛（高于手动 0.85）
 }
 
 
@@ -516,6 +519,12 @@ def load_qbit_auto_organize_config() -> dict:
         merged["confidence_threshold"] = min(1.0, max(0.0, ct))
     except (TypeError, ValueError):
         merged["confidence_threshold"] = 0.85
+    merged["auto_identify"] = bool(merged.get("auto_identify", False))
+    try:
+        ait = float(merged.get("auto_identify_confidence_threshold", 0.95))
+        merged["auto_identify_confidence_threshold"] = min(1.0, max(0.0, ait))
+    except (TypeError, ValueError):
+        merged["auto_identify_confidence_threshold"] = 0.95
     return merged
 
 
@@ -535,11 +544,18 @@ def save_qbit_auto_organize_config(cfg: dict) -> None:
         conf = min(1.0, max(0.0, float(raw_conf))) if raw_conf is not None else 0.85
     except (TypeError, ValueError):
         conf = 0.85
+    raw_ait = cfg.get("auto_identify_confidence_threshold")
+    try:
+        ait = min(1.0, max(0.0, float(raw_ait))) if raw_ait is not None else 0.95
+    except (TypeError, ValueError):
+        ait = 0.95
     payload = {
         "enabled": bool(cfg.get("enabled", False)),
         "categories": [str(c).strip() for c in cats if c is not None and str(c).strip()],
         "poll_interval_minutes": poll,
         "confidence_threshold": conf,
+        "auto_identify": bool(cfg.get("auto_identify", False)),
+        "auto_identify_confidence_threshold": ait,
     }
     QBIT_AUTO_ORGANIZE_CONFIG_FILE.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -911,11 +927,16 @@ def human_size(size_bytes: int) -> str:
 # Phase B: app.js cache-bust by file mtime — browsers refresh after JS changes.
 @app.context_processor
 def _inject_static_versions():
-    try:
-        mtime = int(Path(__file__).parent.joinpath("static/app.js").stat().st_mtime)
-    except OSError:
-        mtime = "dev"
-    return {"app_js_mtime": mtime}
+    def _mtime(rel: str) -> int | str:
+        try:
+            return int(Path(__file__).parent.joinpath(rel).stat().st_mtime)
+        except OSError:
+            return "dev"
+
+    return {
+        "app_js_mtime": _mtime("static/app.js"),
+        "legacy_css_mtime": _mtime("static/css/legacy.css"),
+    }
 
 
 # 注册 UI blueprints (server-rendered HTML fragments for HTMX)
@@ -4067,8 +4088,13 @@ def _list_video_paths(path: str, max_depth: int = 2, limit: int | None = 200) ->
     """SSH find 视频文件路径，按 max_depth 递归。limit=None → 不截断（全库扫描用）。
 
     自动排除 Blu-ray / DVD 原盘镜像内部目录（BDMV / VIDEO_TS / CERTIFICATE / AUXDATA）。
+
+    输入 path 自动通过 path_resolver 翻译 QNAP /share/<alias> symlink 到
+    canonical /share/CACHEDEV2_DATA/<alias>，保证 find 输出 (及其 caller — 比如
+    auto-organize cron 拿来查 metadata cache) 跟扫库写入 media_files 的 path 同名空间。
     """
-    safe_path = shlex.quote(path)
+    canonical_path = path_resolver.resolve(path, ssh_exec)
+    safe_path = shlex.quote(canonical_path)
     iname_clauses = " -o ".join(f"-iname '*.{ext}'" for ext in VIDEO_EXTS)
     not_path = " ".join(f"-not -path {shlex.quote(p)}" for p in _PATH_EXCLUDES)
     cap = f"| head -n {limit + 1}" if limit else ""
@@ -4338,6 +4364,9 @@ def metadata_identify():
     path = data.get("path", "").strip()
     if not path:
         return jsonify({"error": "path required"}), 400
+    # QNAP 别名路径 (/share/downloads/...) 先翻 canonical，否则被沙箱字面前缀拒。
+    # 复用 _list_video_paths 已有写法（path_resolver.resolve，safe fallback 永不抛）。
+    path = path_resolver.resolve(path, ssh_exec)
     try:
         path = validate_path(path)
     except Exception:
@@ -5773,6 +5802,40 @@ def _cron_reap_stuck():
         logger.error(f"[cron] reap failed: {e}")
 
 
+def _identify_and_cache(conn, path: str) -> dict:
+    """cron 自动识别单个 canonical path：TMDB+LLM 识别 → 写 media_files。
+
+    线程安全：用传入的 conn（cron 独立连接），**不调 get_db()** —— cron 是
+    BackgroundScheduler 后台线程，get_db() 会撞 'Working outside of application
+    context'（identify_svc 走 HTTP / _ssh_stat_paths 走 SSH，均不需 Flask 上下文）。
+
+    返回 {"identified": bool, "provider_unavailable": bool}。
+    """
+    provider = get_tmdb_provider()
+    if provider is None:
+        return {"identified": False, "provider_unavailable": False}
+    try:
+        result = identify_svc.identify(path, provider, llm_api_key=load_deepseek_key() or None)
+    except ProviderUnavailable:
+        return {"identified": False, "provider_unavailable": True}
+    stat_map = _ssh_stat_paths([path])
+    stat = stat_map.get(path, {})
+    if not stat.get("exists"):
+        return {"identified": False, "provider_unavailable": False}
+    metadata_cache.upsert_identification(conn, path=path, stat=stat, identify_result=result)
+    return {"identified": True, "provider_unavailable": False}
+
+
+def _auto_identify_paths(conn, paths: list[str]) -> dict:
+    """对 needs_identify 的 paths 逐个自动识别。任一 provider_unavailable → 短路返回
+    （临时错误，dispatch 会标 locked 留下周期重试）。"""
+    for p in paths:
+        outcome = _identify_and_cache(conn, p)
+        if outcome["provider_unavailable"]:
+            return {"provider_unavailable": True}
+    return {"provider_unavailable": False}
+
+
 def _cron_qbit_auto_organize():
     """Phase 4C.4: 定时扫 qBit completed torrents + 触发自动 organize.
 
@@ -5833,6 +5896,11 @@ def _cron_qbit_auto_organize():
             # 4. dispatch each
             stats: dict[str, int] = {}
             threshold = cfg.get("confidence_threshold", 0.85)
+            auto_identify = cfg.get("auto_identify", False)
+            auto_id_threshold = cfg.get("auto_identify_confidence_threshold", 0.95)
+            identify_fn = (
+                (lambda ni_paths: _auto_identify_paths(conn, ni_paths)) if auto_identify else None
+            )
             for t in todo:
                 try:
                     out = qbit_auto.dispatch_one(
@@ -5847,6 +5915,8 @@ def _cron_qbit_auto_organize():
                         ),
                         confidence_threshold=threshold,
                         build_and_start_organize_fn=_build_and_start_auto_organize,
+                        identify_paths_fn=identify_fn,
+                        auto_identify_threshold=auto_id_threshold if auto_identify else None,
                     )
                     action = out.get("action", "unknown")
                     stats[action] = stats.get(action, 0) + 1

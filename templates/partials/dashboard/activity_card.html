@@ -1,0 +1,41 @@
+<div class="space-y-2 text-sm">
+    {% if not items %}
+    <div class="text-slate-400 text-xs italic">暂无活动</div>
+    {% else %}
+    {% for it in items %}
+    {% set ok_states = ['succeeded', 'done'] %}
+    {% set warn_states = ['skipped_low_confidence', 'skipped_needs_identify', 'skipped_unsupported'] %}
+    {% if it.status in ok_states %}
+        {% set icon = '✓' %}
+        {% set color = 'text-emerald-400' %}
+    {% elif it.status in warn_states %}
+        {% set icon = '⚠' %}
+        {% set color = 'text-amber-400' %}
+    {% elif it.status in ['failed', 'aborted'] %}
+        {% set icon = '✗' %}
+        {% set color = 'text-red-400' %}
+    {% elif it.status in ['running', 'organizing', 'pending'] %}
+        {% set icon = '…' %}
+        {% set color = 'text-blue-400' %}
+    {% else %}
+        {% set icon = '·' %}
+        {% set color = 'text-slate-400' %}
+    {% endif %}
+    <div class="flex items-start gap-2 py-1 border-b border-slate-800 last:border-b-0">
+        <span class="{{ color }} font-mono">{{ icon }}</span>
+        <div class="flex-1 min-w-0">
+            <div class="text-slate-200 truncate text-xs" title="{{ it.label }}">
+                {% if it.kind == 'organize' %}📦{% else %}🔍{% endif %}
+                {{ it.label }}
+            </div>
+            <div class="text-xs text-slate-500 flex items-center gap-2">
+                {% if it.ts_label %}<span>{{ it.ts_label }}</span>{% endif %}
+                {% if it.ok or it.fail %}
+                    <span>· {{ it.ok }} 成功{% if it.fail %} / {{ it.fail }} 失败{% endif %}</span>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+    {% endif %}
+</div>
