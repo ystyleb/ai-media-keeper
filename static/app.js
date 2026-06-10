@@ -440,7 +440,7 @@ function renderFiles(files) {
 
         if (file.is_dir) {
             const openBtn = createElement("button", {
-                className: "btn btn-outline-warning",
+                className: "nv-ghost-btn",
                 title: "进入目录"
             });
             openBtn.innerHTML = '<i class="bi bi-folder2-open"></i>';
@@ -449,7 +449,7 @@ function renderFiles(files) {
 
             // Phase 4B.4: 目录可批量整理
             const batchBtn = createElement("button", {
-                className: "btn btn-outline-success",
+                className: "nv-ghost-btn",
                 title: "批量整理目录到媒体库"
             });
             batchBtn.innerHTML = '<i class="bi bi-folder-symlink"></i>';
@@ -460,7 +460,7 @@ function renderFiles(files) {
             btnGroup.appendChild(batchBtn);
         } else {
             const infoBtn = createElement("button", {
-                className: "btn btn-outline-info",
+                className: "nv-ghost-btn",
                 title: "详情"
             });
             infoBtn.innerHTML = '<i class="bi bi-info-circle"></i>';
@@ -469,10 +469,10 @@ function renderFiles(files) {
         }
 
         const deleteBtn = createElement("button", {
-            className: "btn btn-outline-danger",
+            className: "nv-ghost-btn hover:text-statusbar-err",
             title: "删除"
         });
-        deleteBtn.innerHTML = '<i class="bi bi-trash"></i>';
+        deleteBtn.innerHTML = '<i class="bi bi-trash3"></i>';
         deleteBtn.addEventListener("click", () => deleteSingle(file.path));
         btnGroup.appendChild(deleteBtn);
 
