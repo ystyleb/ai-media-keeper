@@ -66,6 +66,19 @@ def test_client_strips_trailing_slash(fake_token):
     assert c.base_url == "http://host:5001"
 
 
+def test_client_session_bypasses_env_proxy_for_loopback(fake_token):
+    """Regression: 默认 base_url 是 127.0.0.1 — Session 必须 trust_env=False，
+    否则用户 shell 的 http_proxy（Clash 等）会把 loopback 请求送进代理 → 502。"""
+    c = NASClient()
+    assert c.session.trust_env is False
+
+
+def test_client_session_keeps_env_proxy_for_public_host(fake_token):
+    """公网 base_url 仍走 env proxy（用 IP 字面量避免单测触发真实 DNS）。"""
+    c = NASClient(base_url="http://93.184.216.34:8080")
+    assert c.session.trust_env is True
+
+
 # ─── Read tools ─────────────────────────────────────────────
 
 

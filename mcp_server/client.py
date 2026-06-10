@@ -15,6 +15,8 @@ from urllib.parse import urlencode
 
 import requests
 
+from services import http_client
+
 
 class NASClientError(RuntimeError):
     """HTTP / 协议错误的统一异常。"""
@@ -48,7 +50,10 @@ class NASClient:
                 "NAS_API_TOKEN not set (export NAS_API_TOKEN=<token from config/.api_token>)"
             )
         self.timeout = timeout
-        self.session = requests.Session()
+        # LAN-aware Session：默认 base_url 是 127.0.0.1，用户 shell 设了
+        # http_proxy（Clash 等）时裸 Session 会把 loopback 请求也送进代理 → 502。
+        # session_for 对 LAN/loopback host 自动 trust_env=False，公网 host 保持走代理。
+        self.session = http_client.session_for(self.base_url)
         self.session.headers.update(
             {
                 "Authorization": f"Bearer {self.api_token}",
