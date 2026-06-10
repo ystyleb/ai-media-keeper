@@ -1,29 +1,16 @@
+{% macro action_row(href, label, count) %}
+<a href="{{ href }}" hx-boost="true"
+   class="flex items-center justify-between px-3 py-2.5 rounded-[11px] border transition-colors hover:border-accent/50"
+   style="background: rgba(124,58,237,.1); border-color: rgba(124,58,237,.22)">
+    <span class="text-[12.5px] text-ink">{{ label }}</span>
+    <span class="font-extrabold text-accent text-[15px]">{{ count }} →</span>
+</a>
+{% endmacro %}
 <div class="space-y-2">
-    {% if badges.library | default(0) > 0 %}
-    <div class="flex items-center justify-between">
-        <span class="text-slate-200">🎬 媒体库未识别</span>
-        <a href="/library" hx-boost="true" class="text-xs text-blue-400 hover:underline">
-            {{ badges.library }} →
-        </a>
-    </div>
+    {% if (badges.library | default(0)) == 0 and (badges.dedup | default(0)) == 0 and (badges.organize | default(0)) == 0 %}
+    <div class="text-ink-mute text-xs italic">没有待处理事项，全部处理完了</div>
     {% endif %}
-    {% if badges.dedup | default(0) > 0 %}
-    <div class="flex items-center justify-between">
-        <span class="text-slate-200">🔍 重复检测待处理</span>
-        <a href="/dedup" hx-boost="true" class="text-xs text-blue-400 hover:underline">
-            {{ badges.dedup }} →
-        </a>
-    </div>
-    {% endif %}
-    {% if badges.organize | default(0) > 0 %}
-    <div class="flex items-center justify-between">
-        <span class="text-slate-200">📦 整理任务</span>
-        <a href="/organize" hx-boost="true" class="text-xs text-blue-400 hover:underline">
-            {{ badges.organize }} →
-        </a>
-    </div>
-    {% endif %}
-    {% if not badges.library and not badges.dedup and not badges.organize %}
-    <p class="text-sm text-slate-500 italic">无待处理事项 🎉</p>
-    {% endif %}
+    {% if badges.library | default(0) > 0 %}{{ action_row('/library', '媒体库未识别', badges.library) }}{% endif %}
+    {% if badges.dedup | default(0) > 0 %}{{ action_row('/dedup', '重复检测待处理', badges.dedup) }}{% endif %}
+    {% if badges.organize | default(0) > 0 %}{{ action_row('/organize', '整理进行中', badges.organize) }}{% endif %}
 </div>

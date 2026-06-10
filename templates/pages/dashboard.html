@@ -7,64 +7,42 @@
 {% endblock %}
 
 {% block main %}
-<div class="space-y-4">
+<div class="space-y-5">
     <header>
-        <h2 class="text-2xl font-bold text-slate-100">概览</h2>
-        <p class="text-sm text-slate-400 mt-1">系统状态 + 后台运行 + 待处理一览.</p>
+        <h2 class="text-2xl font-extrabold text-ink-strong">概览</h2>
+        <p class="text-xs text-ink-mute mt-1">媒体库 · 磁盘 · 待处理一览</p>
     </header>
 
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        <div class="p-4 bg-slate-800 rounded border border-slate-700">
-            <h3 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-                <span>📡</span> 系统状态
-            </h3>
-            <div hx-get="/ui/dashboard/system" hx-trigger="load, every 30s" hx-swap="innerHTML">
-                <p class="text-sm text-slate-500 italic">加载中…</p>
-            </div>
-        </div>
-
-        <div class="p-4 bg-slate-800 rounded border border-slate-700">
-            <h3 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-                <span>⏳</span> 后台运行
-            </h3>
-            <div hx-get="/ui/dashboard/workers" hx-trigger="load, every 5s" hx-swap="innerHTML">
-                <p class="text-sm text-slate-500 italic">加载中…</p>
-            </div>
-        </div>
-
-        <div class="p-4 bg-slate-800 rounded border border-slate-700">
-            <h3 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-                <span>✅</span> 待处理
-            </h3>
-            <div hx-get="/ui/dashboard/todo" hx-trigger="load, every 60s" hx-swap="innerHTML">
-                <p class="text-sm text-slate-500 italic">加载中…</p>
-            </div>
-        </div>
-
-        <div class="p-4 bg-slate-800 rounded border border-slate-700">
-            <h3 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-                <span>🎬</span> 媒体库统计
-            </h3>
+    <div class="grid grid-cols-1 lg:grid-cols-[1.25fr_1fr_1fr] gap-4">
+        <!-- 媒体库统计：左列跨 2 行 -->
+        <div class="nv-card lg:row-span-2">
+            <h3 class="nv-card-title"><i class="bi bi-collection-play text-accent"></i>媒体库</h3>
             <div hx-get="/ui/dashboard/library-stats" hx-trigger="load, every 60s" hx-swap="innerHTML">
-                <p class="text-sm text-slate-500 italic">加载中…</p>
+                <p class="text-sm text-ink-mute italic">加载中…</p>
             </div>
         </div>
 
-        <div class="p-4 bg-slate-800 rounded border border-slate-700">
-            <h3 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-                <span>💾</span> 磁盘空间
-            </h3>
+        <!-- 磁盘：圆环 -->
+        <div class="nv-card text-center">
+            <h3 class="nv-card-title justify-center"><i class="bi bi-device-hdd text-statusbar-warn"></i>磁盘空间</h3>
             <div hx-get="/ui/dashboard/disk" hx-trigger="load, every 60s" hx-swap="innerHTML">
-                <p class="text-sm text-slate-500 italic">加载中…</p>
+                <p class="text-sm text-ink-mute italic">加载中…</p>
             </div>
         </div>
 
-        <div class="p-4 bg-slate-800 rounded border border-slate-700">
-            <h3 class="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-                <span>🕒</span> 最近活动
-            </h3>
+        <!-- 待处理：行动卡（前两者信息在底部 status bar） -->
+        <div class="nv-card">
+            <h3 class="nv-card-title"><i class="bi bi-check2-circle text-statusbar-ok"></i>待处理</h3>
+            <div hx-get="/ui/dashboard/todo" hx-trigger="load, every 60s" hx-swap="innerHTML">
+                <p class="text-sm text-ink-mute italic">加载中…</p>
+            </div>
+        </div>
+
+        <!-- 最近活动：跨 2 列 -->
+        <div class="nv-card lg:col-span-2">
+            <h3 class="nv-card-title"><i class="bi bi-clock-history text-accent"></i>最近活动</h3>
             <div hx-get="/ui/dashboard/activity" hx-trigger="load, every 30s" hx-swap="innerHTML">
-                <p class="text-sm text-slate-500 italic">加载中…</p>
+                <p class="text-sm text-ink-mute italic">加载中…</p>
             </div>
         </div>
     </div>

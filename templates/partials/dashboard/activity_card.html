@@ -1,40 +1,34 @@
-<div class="space-y-2 text-sm">
+<div>
     {% if not items %}
-    <div class="text-slate-400 text-xs italic">暂无活动</div>
+    <div class="text-ink-mute text-xs italic">暂无活动</div>
     {% else %}
     {% for it in items %}
     {% set ok_states = ['succeeded', 'done'] %}
     {% set warn_states = ['skipped_low_confidence', 'skipped_needs_identify', 'skipped_unsupported'] %}
-    {% if it.status in ok_states %}
-        {% set icon = '✓' %}
-        {% set color = 'text-emerald-400' %}
-    {% elif it.status in warn_states %}
-        {% set icon = '⚠' %}
-        {% set color = 'text-amber-400' %}
-    {% elif it.status in ['failed', 'aborted'] %}
-        {% set icon = '✗' %}
-        {% set color = 'text-red-400' %}
-    {% elif it.status in ['running', 'organizing', 'pending'] %}
-        {% set icon = '…' %}
-        {% set color = 'text-blue-400' %}
-    {% else %}
-        {% set icon = '·' %}
-        {% set color = 'text-slate-400' %}
-    {% endif %}
-    <div class="flex items-start gap-2 py-1 border-b border-slate-800 last:border-b-0">
-        <span class="{{ color }} font-mono">{{ icon }}</span>
+    <div class="flex items-center gap-[11px] py-2 border-b last:border-b-0" style="border-color: rgba(42,33,80,.5)">
+        {% if it.poster_url %}
+        <img src="{{ it.poster_url }}" alt="" loading="lazy"
+             class="w-[34px] h-12 rounded-md object-cover shrink-0"
+             style="box-shadow: 0 3px 10px rgba(0,0,0,.5)">
+        {% else %}
+        <div class="w-[34px] h-12 rounded-md shrink-0 flex items-center justify-center text-ink-mute"
+             style="background: linear-gradient(160deg, #2a2150, #161128)">
+            <i class="bi {% if it.kind == 'organize' %}bi-box-seam{% else %}bi-search{% endif %} text-xs"></i>
+        </div>
+        {% endif %}
         <div class="flex-1 min-w-0">
-            <div class="text-slate-200 truncate text-xs" title="{{ it.label }}">
-                {% if it.kind == 'organize' %}📦{% else %}🔍{% endif %}
-                {{ it.label }}
-            </div>
-            <div class="text-xs text-slate-500 flex items-center gap-2">
-                {% if it.ts_label %}<span>{{ it.ts_label }}</span>{% endif %}
-                {% if it.ok or it.fail %}
-                    <span>· {{ it.ok }} 成功{% if it.fail %} / {{ it.fail }} 失败{% endif %}</span>
-                {% endif %}
+            <div class="text-[12.5px] text-ink truncate" title="{{ it.label }}">{{ it.label }}</div>
+            <div class="text-[10.5px] text-ink-mute mt-0.5">
+                {% if it.ts_label %}{{ it.ts_label }}{% endif %}
+                {% if it.ok or it.fail %} · {{ it.ok }} 成功{% if it.fail %} / {{ it.fail }} 失败{% endif %}{% endif %}
             </div>
         </div>
+        {% if it.status in ok_states %}<span class="nv-pill-ok">✓ 已入库</span>
+        {% elif it.status in warn_states %}<span class="nv-pill-warn">待确认</span>
+        {% elif it.status in ['failed', 'aborted'] %}<span class="nv-pill-err">失败</span>
+        {% elif it.status in ['running', 'organizing', 'pending'] %}<span class="nv-pill-gray">进行中…</span>
+        {% else %}<span class="nv-pill-gray">{{ it.status }}</span>
+        {% endif %}
     </div>
     {% endfor %}
     {% endif %}

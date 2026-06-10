@@ -26,9 +26,12 @@ def test_dashboard_page_renders(client, token):
     assert resp.status_code == 200
     html = resp.data.decode()
     assert "概览" in html
-    assert "/ui/dashboard/system" in html
-    assert "/ui/dashboard/workers" in html
+    # bento 网格四个 HTMX 块
     assert "/ui/dashboard/todo" in html
+    assert "/ui/dashboard/library-stats" in html
+    assert "/ui/dashboard/disk" in html
+    assert "/ui/dashboard/activity" in html
+    # system/workers 端点保留但 dashboard 不再引用（由 status bar 替代）
 
 
 def test_organize_page_renders(client, token):

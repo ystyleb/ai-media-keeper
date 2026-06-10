@@ -97,12 +97,31 @@ def disk_card():
                     )
     except ValueError:
         error = "无效的 disk pattern"
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         error = f"读取失败: {e}"
 
-    return render_template(
-        "partials/dashboard/disk_card.html", disks=disks, error=error
-    )
+    return render_template("partials/dashboard/disk_card.html", disks=disks, error=error)
+
+
+def _poster_for_content_path(conn, content_path: str | None) -> str | None:
+    """content_path（目录或单文件）→ media_files.poster_url（已有缓存列，无新 API）。"""
+    if not content_path:
+        return None
+    row = conn.execute(
+        "SELECT poster_url FROM media_files WHERE path = ? AND poster_url IS NOT NULL LIMIT 1",
+        (content_path,),
+    ).fetchone()
+    if row is None:
+        # 前缀匹配用范围扫描而非 LIKE：content_path 含 % / _ 时（torrent 目录名常见）
+        # LIKE 会把它们当通配符 → 误匹配 + 全表扫描；范围扫描走 path UNIQUE 索引零转义。
+        # '0' 是 '/' (0x2F) 的下一个码点 (0x30)，[prefix+'/', prefix+'0') 区间精确覆盖
+        # "以 prefix/ 开头"的所有路径。不要用 '/~' 当上界——中文文件名 UTF-8 字节 > 0x7E 会漏。
+        row = conn.execute(
+            "SELECT poster_url FROM media_files "
+            "WHERE path >= ? || '/' AND path < ? || '0' AND poster_url IS NOT NULL LIMIT 1",
+            (content_path, content_path),
+        ).fetchone()
+    return row["poster_url"] if row else None
 
 
 def _fmt_ts(ts: int | None) -> str:
@@ -137,7 +156,7 @@ def activity_card():
     for row in conn.execute(
         """
         SELECT torrent_name, status, created_at, completed_at,
-               files_succeeded, files_failed, last_error
+               files_succeeded, files_failed, last_error, content_path
           FROM auto_organize_runs
          ORDER BY COALESCE(completed_at, created_at) DESC
          LIMIT 10
@@ -154,6 +173,8 @@ def activity_card():
                 "ok": row["files_succeeded"] or 0,
                 "fail": row["files_failed"] or 0,
                 "error": row["last_error"],
+                # 最多 10 条 × 2 查询，SQLite 本地 <20ms，30s 轮询可接受；量大时改批量 IN
+                "poster_url": _poster_for_content_path(conn, row["content_path"]),
             }
         )
 
@@ -178,6 +199,7 @@ def activity_card():
                 "ok": row["files_done"] or 0,
                 "fail": row["files_failed"] or 0,
                 "error": None,
+                "poster_url": None,
             }
         )
 
