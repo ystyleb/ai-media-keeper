@@ -1,4 +1,4 @@
-<footer class="bg-statusbar-bg text-statusbar-fg text-xs flex items-center border-t border-slate-700">
+<footer class="bg-statusbar-bg text-statusbar-fg text-xs flex items-center border-t border-line-faint">
     <div id="status-providers"
          hx-get="/ui/status/providers"
          hx-trigger="load, every 60s"
@@ -7,7 +7,7 @@
         {% include "partials/status/providers.html" %}
     </div>
 
-    <div class="border-l border-slate-700 h-4 mx-2"></div>
+    <div class="border-l border-line-faint h-4 mx-2"></div>
 
     <div id="status-workers"
          hx-get="/ui/status/workers"

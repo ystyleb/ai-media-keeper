@@ -1,15 +1,15 @@
-<a href="/" class="nav-item {% if current_page == 'dashboard' %}active{% endif %}" hx-boost="true"><span>🏠 概览</span></a>
-<a href="/files" class="nav-item {% if current_page == 'files' %}active{% endif %}" hx-boost="true"><span>📁 文件</span></a>
+<a href="/" class="nav-item {% if current_page == 'dashboard' %}active{% endif %}" hx-boost="true"><span><i class="bi bi-house-door nav-icon"></i>概览</span></a>
+<a href="/files" class="nav-item {% if current_page == 'files' %}active{% endif %}" hx-boost="true"><span><i class="bi bi-folder2 nav-icon"></i>文件</span></a>
 <a href="/library" class="nav-item {% if current_page == 'library' %}active{% endif %}" hx-boost="true">
-    <span>🎬 媒体库</span>
+    <span><i class="bi bi-collection-play nav-icon"></i>媒体库</span>
     {% if badges.library | default(0) > 0 %}<span class="nav-badge">{{ badges.library }}</span>{% endif %}
 </a>
 <a href="/dedup" class="nav-item {% if current_page == 'dedup' %}active{% endif %}" hx-boost="true">
-    <span>🔍 重复检测</span>
+    <span><i class="bi bi-search nav-icon"></i>重复检测</span>
     {% if badges.dedup | default(0) > 0 %}<span class="nav-badge">{{ badges.dedup }}</span>{% endif %}
 </a>
 <a href="/organize" class="nav-item {% if current_page == 'organize' %}active{% endif %}" hx-boost="true">
-    <span>📦 整理</span>
+    <span><i class="bi bi-box-seam nav-icon"></i>整理</span>
     {% if badges.organize | default(0) > 0 %}<span class="nav-badge">{{ badges.organize }}</span>{% endif %}
 </a>
-<a href="/settings" class="nav-item {% if current_page == 'settings' %}active{% endif %}" hx-boost="true"><span>⚙️ 设置</span></a>
+<a href="/settings" class="nav-item {% if current_page == 'settings' %}active{% endif %}" hx-boost="true"><span><i class="bi bi-gear nav-icon"></i>设置</span></a>

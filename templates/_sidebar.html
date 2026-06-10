@@ -1,15 +1,20 @@
-<aside class="w-56 bg-sidebar-bg text-sidebar-fg flex flex-col">
-    <div class="px-4 py-3 text-lg font-bold text-sidebar-fg-active border-b border-slate-700">
-        🗄️ NASVault
+<aside class="w-56 flex flex-col border-r border-line-faint"
+       style="background: linear-gradient(180deg, #15102a 0%, #0d0b16 60%)">
+    <div class="flex items-center gap-2.5 px-4 py-4">
+        <div class="w-[30px] h-[30px] rounded-[9px] flex items-center justify-center shrink-0"
+             style="background: linear-gradient(135deg, #7c3aed, #d946ef); box-shadow: 0 4px 14px rgba(124,58,237,.4)">
+            <i class="bi bi-hdd-stack text-white text-sm"></i>
+        </div>
+        <div class="text-base font-extrabold tracking-[.3px] text-ink-strong">NASVault</div>
     </div>
 
-    <nav class="flex-1 px-2 py-3 space-y-1" id="sidebar-nav">
+    <nav class="flex-1 px-2 py-2 space-y-[3px]" id="sidebar-nav">
         <!-- Server-render only (含 current_page active 高亮); 不 HTMX poll 防止抹 active class.
              每次 page navigate 都重新渲染 sidebar; badge stale 60s 可接受 trade-off. -->
         {% include "partials/sidebar/badges.html" %}
     </nav>
 
-    <div class="px-4 py-2 text-xs text-slate-500 border-t border-slate-700">
+    <div class="px-4 py-2 text-xs text-ink-mute border-t border-line-faint">
         v{{ app_version | default('dev') }}
     </div>
 </aside>

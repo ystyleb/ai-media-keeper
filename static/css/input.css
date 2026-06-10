@@ -2,34 +2,76 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Custom global styles — keep minimal, prefer utility classes inline */
 @layer base {
-  html {
-    @apply text-sm;
-  }
-  body {
-    @apply bg-slate-900 text-slate-100;
-  }
+  html { @apply text-sm; }
+  body { @apply bg-canvas text-ink; }
 }
 
 @layer components {
-  /* Status bar segment */
-  .sb-seg {
-    @apply px-3 py-1 inline-flex items-center gap-1 cursor-pointer hover:bg-slate-700;
+  /* ===== 卡片语言（方向 A）===== */
+  .nv-card {
+    @apply rounded-card border border-line p-[18px];
+    background: linear-gradient(145deg, theme(colors.surface.from), theme(colors.surface.to));
   }
+  .nv-card-title {
+    @apply text-[11px] font-bold uppercase tracking-[1.2px] text-ink-soft flex items-center gap-[7px] mb-3;
+  }
+  .nv-bignum {
+    @apply text-[34px] font-extrabold leading-none;
+    background: linear-gradient(90deg, #c4b5fd, #f0abfc);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .nv-chip {
+    @apply inline-flex items-center gap-[5px] rounded-full px-[10px] py-[3px] text-[11px] text-accent mr-[6px];
+    background: rgba(124, 58, 237, .16);
+    border: 1px solid rgba(124, 58, 237, .3);
+  }
+  /* rgba() 无法引用 theme token，背景色是对应 palette 色的透明化（注释对照） */
+  .nv-pill-ok    { @apply rounded-full px-[9px] py-[2px] text-[10px] font-semibold shrink-0 text-statusbar-ok;   background: rgba(52, 211, 153, .15); }  /* statusbar.ok #34d399 */
+  .nv-pill-warn  { @apply rounded-full px-[9px] py-[2px] text-[10px] font-semibold shrink-0 text-statusbar-warn; background: rgba(251, 191, 36, .14); }  /* statusbar.warn #fbbf24 */
+  .nv-pill-err   { @apply rounded-full px-[9px] py-[2px] text-[10px] font-semibold shrink-0 text-statusbar-err;  background: rgba(248, 113, 113, .14); }  /* statusbar.err #f87171 */
+  .nv-pill-gray  { @apply rounded-full px-[9px] py-[2px] text-[10px] font-semibold shrink-0 text-ink-mute;       background: rgba(111, 101, 144, .15); }  /* ink.mute #6f6590 */
+  .nv-gradbar {
+    @apply block h-full rounded-[3px];
+    background: linear-gradient(90deg, #7c3aed, #d946ef);
+  }
+  .nv-glow {
+    @apply pointer-events-none absolute -top-32 left-1/3 w-[600px] h-[300px];
+    background: radial-gradient(ellipse, rgba(124, 58, 237, .18), transparent 70%);
+  }
+  .nv-ghost-btn {
+    @apply inline-flex items-center justify-center w-7 h-7 rounded-lg text-ink-mute
+           hover:text-ink-strong hover:bg-white/5 transition-colors;
+  }
+  .nv-toolbar-btn {
+    @apply inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-xs
+           text-ink hover:border-accent/50 hover:text-ink-strong transition-colors;
+    background: linear-gradient(145deg, theme(colors.surface.from), theme(colors.surface.to));
+  }
+
+  /* ===== Status bar ===== */
+  .sb-seg { @apply px-3 py-1 inline-flex items-center gap-1 cursor-pointer hover:bg-white/5; }
   .sb-dot-ok    { @apply w-2 h-2 rounded-full bg-statusbar-ok; }
   .sb-dot-warn  { @apply w-2 h-2 rounded-full bg-statusbar-warn; }
   .sb-dot-err   { @apply w-2 h-2 rounded-full bg-statusbar-err; }
   .sb-dot-gray  { @apply w-2 h-2 rounded-full bg-statusbar-gray; }
 
-  /* Sidebar nav item */
+  /* ===== Sidebar ===== */
   .nav-item {
-    @apply flex items-center justify-between px-4 py-2 text-sidebar-fg hover:text-sidebar-fg-active hover:bg-slate-800 rounded;
+    @apply flex items-center justify-between px-3 py-[9px] rounded-[9px] text-[13.5px]
+           text-sidebar-fg hover:text-sidebar-fg-active hover:bg-white/5;
   }
   .nav-item.active {
-    @apply text-sidebar-fg-active bg-slate-800;
+    @apply text-sidebar-fg-active;
+    background: linear-gradient(90deg, rgba(124, 58, 237, .28), rgba(124, 58, 237, .05));
+    box-shadow: inset 2px 0 0 theme(colors.accent.DEFAULT);
   }
   .nav-badge {
-    @apply text-xs bg-statusbar-warn text-slate-900 rounded-full px-2 py-0.5 font-semibold;
+    @apply text-[10.5px] font-semibold rounded-full px-2 py-0.5 text-sidebar-fg-active;
+    background: rgba(124, 58, 237, .35);
+    border: 1px solid rgba(167, 139, 250, .35);
   }
+  .nav-icon { @apply w-4 text-center mr-2.5 inline-block; }
 }

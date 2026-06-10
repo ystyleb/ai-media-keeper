@@ -25,18 +25,20 @@
         {% include "_sidebar.html" %}
 
         <main class="flex-1 flex flex-col overflow-hidden">
-            <header class="bg-slate-800 border-b border-slate-700 px-4 py-2 flex items-center justify-between">
-                <div class="text-slate-300 text-sm">
+            <header class="border-b border-line-faint px-4 py-2 flex items-center justify-between"
+                    style="background: rgba(13, 11, 22, .8)">
+                <div class="text-ink-soft text-sm">
                     {% block breadcrumb %}
-                    <span class="text-slate-500">/</span>
+                    <span class="text-ink-mute">/</span>
                     {% endblock %}
                 </div>
-                <div class="text-xs text-slate-400">
+                <div class="text-xs text-ink-mute">
                     {% block topbar_right %}{% endblock %}
                 </div>
             </header>
 
-            <div id="main-content" class="flex-1 overflow-auto p-4">
+            <div id="main-content" class="flex-1 overflow-auto p-5 relative">
+                <div class="nv-glow"></div>
                 {% block main %}{% endblock %}
             </div>
         </main>

@@ -25,7 +25,7 @@ def test_dashboard_page_renders(client, token):
     resp = client.get("/", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     html = resp.data.decode()
-    assert "🏠 概览" in html
+    assert "概览" in html
     assert "/ui/dashboard/system" in html
     assert "/ui/dashboard/workers" in html
     assert "/ui/dashboard/todo" in html
@@ -34,7 +34,7 @@ def test_dashboard_page_renders(client, token):
 def test_organize_page_renders(client, token):
     resp = client.get("/organize", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
-    assert "📦 整理" in resp.data.decode()
+    assert "整理" in resp.data.decode()
     assert "autoOrganizeConfigModal" in resp.data.decode()
 
 
@@ -42,7 +42,7 @@ def test_settings_page_renders(client, token):
     resp = client.get("/settings", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     html = resp.data.decode()
-    assert "⚙️ 设置" in html
+    assert "设置" in html
     assert "nasConfigModal" in html
     assert "qbitConfigModal" in html
     assert "aiConfigModal" in html
@@ -68,9 +68,10 @@ def test_files_page_renders(client, token):
     assert resp.status_code == 200
     html = resp.data.decode()
     # sidebar logo
-    assert "🗄️ NASVault" in html
+    assert "NASVault" in html
+    assert "bi-hdd-stack" in html
     # breadcrumb (注入到 base.html topbar)
-    assert "📁 文件" in html
+    assert "文件" in html
     # 12 modal HTML 全保留 (来自 _legacy_modals.html include)
     assert html.count('class="modal fade"') == 12
     # Bootstrap + app.js 都引 (来自 base.html)
@@ -84,7 +85,7 @@ def test_library_page_renders(client, token):
     resp = client.get("/library")
     assert resp.status_code == 200
     html = resp.data.decode()
-    assert "🎬 媒体库" in html
+    assert "媒体库" in html
     assert "library-panel" in html  # library_view partial 含 id="library-panel"
     assert html.count('class="modal fade"') == 12  # legacy modals included
 
@@ -94,7 +95,7 @@ def test_dedup_page_renders(client, token):
     resp = client.get("/dedup")
     assert resp.status_code == 200
     html = resp.data.decode()
-    assert "🔍 重复检测" in html
+    assert "重复检测" in html
     assert "dedup-panel" in html  # dedup_view partial 含 id="dedup-panel"
     assert html.count('class="modal fade"') == 12  # legacy modals included
 
