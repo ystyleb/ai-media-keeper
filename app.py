@@ -3936,6 +3936,9 @@ def test_tmdb_config():
 # Providers status：聚合 TMDB / DeepSeek / Emby 当前可用性，60s TTL cache
 # state 枚举：ok / auth_failed / not_configured / unreachable
 _PROVIDERS_STATUS_CACHE: dict = {"data": None, "checked_at": 0.0}
+# Flask 请求线程与 APScheduler cron 线程会并发读写这个 dict；无锁时可能读到
+# "新 data + 旧 checked_at" 的不一致组合（age 计算错误）。
+_PROVIDERS_STATUS_LOCK = threading.Lock()
 _PROVIDERS_STATUS_TTL = 60.0
 
 
@@ -4035,20 +4038,32 @@ def _compute_providers_status() -> dict:
     }
 
 
+def _providers_status_with_meta(force: bool = False) -> tuple[dict, bool, float]:
+    """Provider status with 60s TTL cache. 返 (data, was_cached, age_seconds).
+
+    锁覆盖整个 check-then-compute：并发 cache miss 时只有第一个线程真探活，
+    其余线程等锁释放后直接命中缓存——这正是本 cache "多 tab × 60s poll 不
+    放大 DeepSeek 探活调用" 的设计意图。代价是 force 刷新期间（探活最长
+    ~10s/provider）其他 status 请求会阻塞等待，对单用户工具可接受。
+    """
+    with _PROVIDERS_STATUS_LOCK:
+        cache = _PROVIDERS_STATUS_CACHE
+        age = time.time() - cache["checked_at"]
+        if not force and cache["data"] is not None and age < _PROVIDERS_STATUS_TTL:
+            return cache["data"], True, age
+        data = _compute_providers_status()
+        cache["data"] = data
+        cache["checked_at"] = time.time()
+        return data, False, 0.0
+
+
 def get_cached_providers_status(force: bool = False) -> dict:
     """Provider status with 60s TTL cache.
 
     Shared by /api/providers/status (JSON) and /ui/status/providers (HTML)
     so multi-tab × 60s poll does NOT multiply DeepSeek probe calls.
     """
-    now = time.time()
-    cache = _PROVIDERS_STATUS_CACHE
-    age = now - cache["checked_at"]
-    if not force and cache["data"] is not None and age < _PROVIDERS_STATUS_TTL:
-        return cache["data"]
-    data = _compute_providers_status()
-    cache["data"] = data
-    cache["checked_at"] = now
+    data, _, _ = _providers_status_with_meta(force=force)
     return data
 
 
@@ -4063,14 +4078,8 @@ def providers_status():
     qBit 走 WebUI /api/v2/auth/login + /api/v2/torrents/info）。
     """
     force = request.args.get("refresh") in ("1", "true", "yes")
-    was_cached = (
-        not force
-        and _PROVIDERS_STATUS_CACHE["data"] is not None
-        and (time.time() - _PROVIDERS_STATUS_CACHE["checked_at"]) < _PROVIDERS_STATUS_TTL
-    )
-    data = get_cached_providers_status(force=force)
-    age = round(time.time() - _PROVIDERS_STATUS_CACHE["checked_at"], 1)
-    resp = jsonify({"providers": data, "cached": was_cached, "age": age})
+    data, was_cached, age = _providers_status_with_meta(force=force)
+    resp = jsonify({"providers": data, "cached": was_cached, "age": round(age, 1)})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 

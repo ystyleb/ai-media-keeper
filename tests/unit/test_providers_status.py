@@ -366,3 +366,51 @@ def test_qbit_appears_in_response_alongside_other_providers(client, token, monke
         assert "state" in p[key]
         assert "message" in p[key]
         assert "checked_at" in p[key]
+
+
+def test_concurrent_cache_miss_probes_only_once(monkeypatch):
+    """Regression: cache 无锁时代码并发 miss 会各自探活一遍（放大 DeepSeek 调用）
+    且可能读到 "新 data + 旧 checked_at" 的不一致组合。加锁后并发 miss 只有
+    第一个线程真探活，其余等锁后直接命中缓存。"""
+    import threading
+    import time as _time
+
+    calls = {"n": 0}
+
+    def fake_compute():
+        calls["n"] += 1
+        _time.sleep(0.05)  # 拉开 race window：无锁实现下 5 线程会全部进 compute
+        return {"tmdb": {"state": "ok", "message": "x", "checked_at": _time.time()}}
+
+    monkeypatch.setattr(app_module, "_compute_providers_status", fake_compute)
+
+    results: list[dict] = []
+    threads = [
+        threading.Thread(target=lambda: results.append(app_module.get_cached_providers_status()))
+        for _ in range(5)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert calls["n"] == 1, f"expected single probe under lock, got {calls['n']}"
+    assert len(results) == 5
+    assert all(r is results[0] for r in results)  # 全部拿到同一份缓存对象
+
+
+def test_providers_status_age_consistent_with_cached_flag(client, token, monkeypatch):
+    """Regression: was_cached / age 必须和 data 来自同一次锁内快照。
+    miss → cached=False + age=0；紧接着的第二次请求 → cached=True。"""
+    monkeypatch.setattr(app_module, "load_tmdb_key", lambda: "")
+    monkeypatch.setattr(app_module, "load_deepseek_key", lambda: "")
+    monkeypatch.setattr(app_module, "_emby_client", lambda: None)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    first = client.get("/api/providers/status", headers=headers).get_json()
+    assert first["cached"] is False
+    assert first["age"] == 0.0
+
+    second = client.get("/api/providers/status", headers=headers).get_json()
+    assert second["cached"] is True
+    assert second["age"] >= 0.0
