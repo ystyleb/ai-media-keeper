@@ -3056,31 +3056,52 @@ function renderLibraryGrid(items, append = false) {
     });
 }
 
+// 海报卡共享 class（library 单片卡 + series 聚合卡两处用；hover 阴影是
+// Tailwind arbitrary value，JIT 对本文件做纯文本扫描所以字面量必须保留在此）
+const POSTER_CARD_CLS =
+    "group relative rounded-xl overflow-hidden cursor-pointer transition-all duration-200 shadow-[0_2px_8px_rgba(0,0,0,.4)] hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,.6)]";
+
 function _appendToSeriesCard(grid, item) {
     const sid = item.tmdb_series_id;
     let entry = libraryGridState.seriesCards[sid];
     if (!entry) {
-        const card = createElement("div", { className: "lib-card lib-series-card" });
-        const poster = createElement("div", { className: "lib-poster" });
-        if (item.poster_url) {
-            poster.style.backgroundImage = `url('${item.poster_url}')`;
-        } else {
-            poster.classList.add("no-poster");
-            poster.innerHTML = '<i class="bi bi-collection-play"></i>';
-        }
-        poster.appendChild(createElement("div", { className: "lib-type-badge", textContent: "TV" }));
-        if (item.vote_average) {
-            poster.appendChild(createElement("div", { className: "lib-rating", textContent: "⭐ " + item.vote_average.toFixed(1) }));
-        }
-        const epCountBadge = createElement("div", { className: "lib-series-count", textContent: "1 集" });
-        poster.appendChild(epCountBadge);
-        card.appendChild(poster);
+        // 新视觉：group relative overflow-hidden 圆角卡片 + hover 上浮
+        const card = createElement("div", {
+            className: POSTER_CARD_CLS,
+        });
 
-        const meta = createElement("div", { className: "lib-meta" });
-        meta.appendChild(createElement("div", { className: "lib-title", textContent: item.title || "未命名" }));
-        const sizeEl = createElement("div", { className: "lib-sub", textContent: "" });
-        meta.appendChild(sizeEl);
-        card.appendChild(meta);
+        // 海报图 / 占位渐变
+        let posterEl;
+        if (item.poster_url) {
+            posterEl = createElement("img", {
+                className: "w-full object-cover",
+                loading: "lazy",
+            });
+            posterEl.style.aspectRatio = "2/3";
+            posterEl.src = item.poster_url;
+        } else {
+            posterEl = createElement("div", {
+                className: "w-full flex items-center justify-content-center",
+            });
+            // #2a2150=line / #161128=圆环内底同款（比 surface.to 深一档）/ #6f6590=ink.mute
+            posterEl.style.cssText = "aspect-ratio:2/3;background:linear-gradient(160deg,#2a2150,#161128);display:flex;align-items:center;justify-content:center;font-size:36px;color:#6f6590;";
+            posterEl.innerHTML = '<i class="bi bi-collection-play"></i>';
+        }
+        card.appendChild(posterEl);
+
+        // 集数角标（右上角 nv-chip 风格）
+        const epCountBadge = createElement("div", { className: "nv-chip absolute top-2 right-2", textContent: "1 集" });
+        epCountBadge.style.cssText = "font-size:10px;padding:2px 8px;position:absolute;top:8px;right:8px;";
+        card.appendChild(epCountBadge);
+
+        // 渐变遮罩 + 标题文字
+        const overlay = createElement("div", {});
+        overlay.style.cssText = "position:absolute;left:0;right:0;bottom:0;padding:32px 8px 8px;background:linear-gradient(180deg,transparent,rgba(13,11,22,.92));";
+        const titleEl = createElement("div", { className: "text-xs font-semibold text-ink-strong truncate", textContent: item.title || "未命名" });
+        const sizeEl = createElement("div", { className: "text-ink-soft", style: "font-size:10px;" });
+        overlay.appendChild(titleEl);
+        overlay.appendChild(sizeEl);
+        card.appendChild(overlay);
 
         entry = { card, items: [], totalSize: 0, epCountBadge, sizeEl, repItem: item };
         libraryGridState.seriesCards[sid] = entry;
@@ -3095,38 +3116,55 @@ function _appendToSeriesCard(grid, item) {
 }
 
 function _createLibraryItemCard(it) {
-    const card = createElement("div", { className: "lib-card" });
-    const poster = createElement("div", { className: "lib-poster" });
-    if (it.poster_url) {
-        poster.style.backgroundImage = `url('${it.poster_url}')`;
-    } else {
-        poster.classList.add("no-poster");
-        poster.innerHTML = '<i class="bi bi-film"></i>';
-    }
-    if (it.media_type) {
-        poster.appendChild(createElement("div", {
-            className: "lib-type-badge",
-            textContent: it.media_type === "tv" ? "TV" : "电影",
-        }));
-    }
-    if (it.vote_average) {
-        poster.appendChild(createElement("div", {
-            className: "lib-rating",
-            textContent: "⭐ " + it.vote_average.toFixed(1),
-        }));
-    }
-    card.appendChild(poster);
+    // 新视觉：group relative overflow-hidden 圆角卡片 + hover 上浮
+    const card = createElement("div", {
+        className: POSTER_CARD_CLS,
+    });
 
-    const meta = createElement("div", { className: "lib-meta" });
+    // 海报图 / 占位渐变
+    let posterEl;
+    if (it.poster_url) {
+        posterEl = createElement("img", {
+            className: "w-full object-cover",
+            loading: "lazy",
+        });
+        posterEl.style.aspectRatio = "2/3";
+        posterEl.src = it.poster_url;
+    } else {
+        posterEl = createElement("div", {});
+        // #2a2150=line / #161128=圆环内底同款 / #6f6590=ink.mute
+        posterEl.style.cssText = "width:100%;aspect-ratio:2/3;background:linear-gradient(160deg,#2a2150,#161128);display:flex;align-items:center;justify-content:center;font-size:36px;color:#6f6590;";
+        posterEl.innerHTML = '<i class="bi bi-film"></i>';
+    }
+    card.appendChild(posterEl);
+
+    // 类型角标（左上角 nv-chip 风格）
+    if (it.media_type) {
+        const badge = createElement("div", { className: "nv-chip" });
+        badge.style.cssText = "font-size:10px;padding:2px 8px;position:absolute;top:8px;left:8px;";
+        badge.textContent = it.media_type === "tv" ? "TV" : "电影";
+        card.appendChild(badge);
+    }
+
+    // 渐变遮罩 + 标题 + 副文字
+    const overlay = createElement("div", {});
+    overlay.style.cssText = "position:absolute;left:0;right:0;bottom:0;padding:32px 8px 8px;background:linear-gradient(180deg,transparent,rgba(13,11,22,.92));";
+
     const titleText = it.title || "未命名";
     const epSuffix = (it.season && it.episode)
         ? ` S${String(it.season).padStart(2, "0")}E${String(it.episode).padStart(2, "0")}` : "";
-    meta.appendChild(createElement("div", { className: "lib-title", textContent: titleText + epSuffix }));
+    overlay.appendChild(createElement("div", {
+        className: "text-xs font-semibold text-ink-strong truncate",
+        textContent: titleText + epSuffix,
+    }));
+
     const subParts = [];
     if (it.year) subParts.push(it.year);
-    if (it.resolution) subParts.push(it.resolution);
-    meta.appendChild(createElement("div", { className: "lib-sub", textContent: subParts.join(" · ") }));
-    card.appendChild(meta);
+    if (it.vote_average) subParts.push("⭐" + it.vote_average.toFixed(1));
+    const subEl = createElement("div", { textContent: subParts.join(" · ") });
+    subEl.style.cssText = "font-size:10px;color:#9b91b8;margin-top:1px;";
+    overlay.appendChild(subEl);
+    card.appendChild(overlay);
 
     card.addEventListener("click", () => showLibraryItemDetail(it));
     return card;
@@ -3427,16 +3465,26 @@ function _renderSeriesCard(series) {
 
 function _renderDedupGroup(group, opts = {}) {
     const autoSelect = opts.autoSelect !== false;   // default true
-    const wrap = createElement("div", { className: "dedup-group" });
+    // 新视觉：nv-card 容器 + mb-3
+    const wrap = createElement("div", { className: "nv-card" });
+    wrap.style.marginBottom = "12px";
+
     const title = group.title || group.tmdb_movie_id || group.tmdb_series_id || "(未识别)";
     const heading = (group.media_type === "tv")
         ? `${title} (S${group.season_number}E${group.episode_number})`
         : `${title}${group.year ? " (" + group.year + ")" : ""}`;
-    wrap.appendChild(createElement("h4", { textContent: heading }));
-    wrap.appendChild(createElement("div", {
-        className: "group-stats",
-        textContent: `${group.candidates.length} 份 · 总占用 ${humanSize(group.total_size_bytes)} · 可删 ${humanSize(group.deletable_size_bytes)}`,
-    }));
+
+    // 组标题
+    const headEl = createElement("div", {});
+    headEl.style.cssText = "font-size:14px;font-weight:700;color:#f5f2fd;margin-bottom:4px;";
+    headEl.textContent = heading;
+    wrap.appendChild(headEl);
+
+    // 统计行
+    const statsEl = createElement("div", { className: "text-ink-mute" });
+    statsEl.style.cssText = "font-size:11px;margin-bottom:10px;";
+    statsEl.textContent = `${group.candidates.length} 份 · 总占用 ${humanSize(group.total_size_bytes)} · 可删 ${humanSize(group.deletable_size_bytes)}`;
+    wrap.appendChild(statsEl);
 
     group.candidates.forEach(c => {
         const row = createElement("div", {
@@ -3461,16 +3509,17 @@ function _renderDedupGroup(group, opts = {}) {
         });
         row.appendChild(chk);
 
+        // 徽章药丸（新视觉）
         if (c.keep_recommended) {
-            row.appendChild(createElement("span", { className: "keep-badge", textContent: "推荐保留" }));
+            row.appendChild(createElement("span", { className: "nv-pill-ok", textContent: "最佳" }));
         }
         if (c.is_watched) {
-            row.appendChild(createElement("span", { className: "watched-badge", textContent: "已看" }));
+            row.appendChild(createElement("span", { className: "nv-pill-gray", textContent: "已看" }));
         }
         if (c.is_hardlinked) {
             row.appendChild(createElement("span", {
-                className: "hardlink-badge",
-                textContent: `🔗 硬链接 ${c.linked_paths.length} 路`,
+                className: "nv-pill-warn",
+                textContent: `硬链 ${c.linked_paths.length} 路`,
                 title: "这些路径共享同一个 inode（实际只占一份盘）。\n删除会同时解除所有 path 的链接。",
             }));
         }
@@ -3483,11 +3532,26 @@ function _renderDedupGroup(group, opts = {}) {
             className: "path",
             innerHTML: `<strong>${humanSize(c.size_bytes || 0)}</strong> · ${tags || "?"}${pathsHtml}`,
         }));
-        row.appendChild(createElement("span", {
-            className: "score-badge",
+
+        // 质量评分渐变条 + 数字
+        const scoreWrap = createElement("div", {});
+        scoreWrap.style.cssText = "display:flex;flex-direction:column;align-items:flex-end;gap:3px;margin-left:auto;flex-shrink:0;";
+        const scoreNum = createElement("span", {
+            className: "text-ink-soft",
             textContent: c.quality_score.toFixed(0),
             title: JSON.stringify(c.score_breakdown, null, 2),
-        }));
+        });
+        scoreNum.style.cssText = "font-size:10px;font-weight:600;";
+        const barOuter = createElement("div", {});
+        barOuter.style.cssText = "width:60px;height:6px;border-radius:3px;overflow:hidden;background:#221a3e;";
+        const pct = Math.min(100, Math.max(0, c.quality_score));
+        const barInner = createElement("span", { className: "nv-gradbar" });
+        barInner.style.width = pct + "%";
+        barOuter.appendChild(barInner);
+        scoreWrap.appendChild(scoreNum);
+        scoreWrap.appendChild(barOuter);
+        row.appendChild(scoreWrap);
+
         wrap.appendChild(row);
     });
     _updateDedupDeleteBtn();
