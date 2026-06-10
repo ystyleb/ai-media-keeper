@@ -60,9 +60,9 @@
                  x-transition:enter-end="opacity-100 translate-x-0"
                  x-transition:leave="opacity-100"
                  x-transition:leave-end="opacity-0 translate-x-4">
-                <span x-text="iconFor(t.severity)" class="text-lg leading-none"></span>
+                <i :class="iconFor(t.severity)" class="text-lg leading-none"></i>
                 <span x-text="t.message" class="flex-1 text-sm"></span>
-                <button @click="dismiss(t.id)" class="text-current opacity-60 hover:opacity-100">✕</button>
+                <button @click="dismiss(t.id)" class="text-current opacity-60 hover:opacity-100"><i class="bi bi-x-lg"></i></button>
             </div>
         </template>
     </div>
@@ -87,16 +87,16 @@
                     success: 'bg-emerald-900/95 border-emerald-700 text-emerald-100',
                     warning: 'bg-amber-900/95 border-amber-700 text-amber-100',
                     error: 'bg-red-900/95 border-red-700 text-red-100',
-                    info: 'bg-slate-800/95 border-slate-700 text-slate-100',
-                }[severity] || 'bg-slate-800/95 border-slate-700 text-slate-100';
+                    info: 'bg-[#1a142f]/95 border-line text-ink',
+                }[severity] || 'bg-[#1a142f]/95 border-line text-ink';
             },
             iconFor(severity) {
                 return {
-                    success: '✓',
-                    warning: '⚠',
-                    error: '❌',
-                    info: 'ℹ',
-                }[severity] || 'ℹ';
+                    success: 'bi bi-check-circle',
+                    warning: 'bi bi-exclamation-triangle',
+                    error: 'bi bi-x-circle',
+                    info: 'bi bi-info-circle',
+                }[severity] || 'bi bi-info-circle';
             },
         };
     }

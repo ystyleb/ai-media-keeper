@@ -993,3 +993,30 @@
         .modal-footer .btn-outline-info:hover {
             background: var(--teal-dim) !important;
         }
+
+        /* ===== 视觉重设计（方向 A）: legacy Bootstrap modal 轻换肤 =====
+           只覆盖配色对齐新色板；modal → drawer 迁移是 Phase F 的事，此处不动结构。 */
+        .modal-content {
+          background: linear-gradient(145deg, #1a142f, #130f22) !important;  /* surface.from/to */
+          border: 1px solid #2a2150 !important;   /* line */
+          border-radius: 16px !important;
+          color: #e6e1f2 !important;              /* ink */
+        }
+        .modal-header { border-bottom-color: #221a3e !important; }  /* line.faint */
+        .modal-footer { border-top-color: #221a3e !important; }
+        .modal-content .form-control,
+        .modal-content .form-select {
+          background: #0d0b16 !important;         /* canvas */
+          border-color: #2a2150 !important;
+          color: #e6e1f2 !important;
+        }
+        .modal-content .form-control:focus,
+        .modal-content .form-select:focus {
+          border-color: #a78bfa !important;       /* accent */
+          box-shadow: 0 0 0 3px rgba(167, 139, 250, .15) !important;
+        }
+        .modal-content .btn-primary {
+          background: linear-gradient(90deg, #7c3aed, #d946ef) !important;  /* accent.deep → accent.alt */
+          border: none !important;
+        }
+        .modal-backdrop.show { opacity: .7 !important; }

@@ -1,5 +1,5 @@
 <div class="p-4 space-y-3">
-    <h3 class="text-lg font-semibold text-slate-100">🗑️ 删除预览</h3>
+    <h3 class="text-lg font-semibold text-slate-100"><i class="bi bi-trash me-1"></i>删除预览</h3>
 
     {% if preview.files %}
     <div>
@@ -39,7 +39,7 @@
                 hx-target="#drawer-content"
                 hx-swap="innerHTML"
                 hx-confirm="确定执行删除? 此操作不可逆.">
-            🗑️ 确认删除
+            <i class="bi bi-trash me-1"></i>确认删除
         </button>
         <button @click="drawerOpen = false" type="button"
                 class="px-4 py-2 bg-slate-700 text-slate-200 rounded">

@@ -658,7 +658,7 @@ function renderNfoCard(p, nfoPath) {
     if (nfoPath) {
         const sideBadge = createElement("div", {
             className: "small text-secondary mb-1",
-            textContent: `📋 ${nfoPath.split("/").pop()}`,
+            innerHTML: `<i class="bi bi-clipboard me-1"></i>${nfoPath.split("/").pop()}`,
         });
         body.appendChild(sideBadge);
     }
@@ -865,8 +865,8 @@ function renderMetadataCard(container, data) {
         // hint：始终展示配置入口（指向顶部 AI 按钮），即使候选 0 也给用户出路
         if (!data.llm_configured) {
             const text = (data.candidates && data.candidates.length > 0)
-                ? '🤖 候选有，但 confidence 太低自动跳过。配 DeepSeek 让 AI 帮选 → 顶部 <strong>AI</strong> 按钮'
-                : '⚠️ TMDB 没找到候选。可能文件名无法解析。手动到 <a href="https://www.themoviedb.org/" target="_blank">themoviedb.org</a> 搜索确认，或配 DeepSeek 让 AI 试更模糊的搜索 → 顶部 <strong>AI</strong> 按钮';
+                ? '<i class="bi bi-robot me-1"></i>候选有，但 confidence 太低自动跳过。配 DeepSeek 让 AI 帮选 → 顶部 <strong>AI</strong> 按钮'
+                : '<i class="bi bi-exclamation-triangle me-1"></i>TMDB 没找到候选。可能文件名无法解析。手动到 <a href="https://www.themoviedb.org/" target="_blank">themoviedb.org</a> 搜索确认，或配 DeepSeek 让 AI 试更模糊的搜索 → 顶部 <strong>AI</strong> 按钮';
             container.appendChild(createElement("div", {
                 className: "alert alert-info py-2 small mb-2",
                 innerHTML: text,
@@ -884,7 +884,7 @@ function renderMetadataCard(container, data) {
         if (canBind) {
             container.appendChild(createElement("small", {
                 className: "text-info d-block mb-1",
-                textContent: "👇 点击其中一个候选手动绑定（覆盖待复核状态）",
+                innerHTML: '<i class="bi bi-cursor me-1"></i>点击其中一个候选手动绑定（覆盖待复核状态）',
             }));
         }
         const list = createElement("div", { className: "list-group small" });
@@ -973,8 +973,8 @@ function renderMetadataCard(container, data) {
     const pickLabel = {
         single_exact: "单候选",
         heuristic: "启发式",
-        llm: "🤖 AI",
-        manual: "👤 手动",
+        llm: "AI",
+        manual: "手动",
         needs_review: "待复核"
     }[data.pick_source] || data.pick_source || "?";
     const metaLine = [
@@ -1805,7 +1805,7 @@ async function openBatchIdentify() {
         const totalSize = videos.reduce((s, v) => s + v.size_bytes, 0);
         let summary = `找到 ${videos.length} 个视频文件 · 总计 ${humanSize(totalSize)}`;
         if (skipNfoCount > 0) summary += ` · ${skipNfoCount} 个已有 .nfo`;
-        if (truncated) summary += ` · ⚠️ 超过 200 上限被截断（按子目录分批识别）`;
+        if (truncated) summary += ` · ⚠ 超过 200 上限被截断（按子目录分批识别）`;
         document.getElementById("batch-summary").innerHTML = summary;
 
         // 渲染初始表（每行 status='pending'）
@@ -2096,8 +2096,8 @@ function renderBatchRow(idx, row, data) {
     const pickLabel = {
         single_exact: "单候选",
         heuristic: "启发式",
-        llm: "🤖 AI",
-        manual: "👤 手动",
+        llm: "AI",
+        manual: "手动",
         needs_review: "待复核"
     }[data.pick_source] || data.pick_source || "?";
 

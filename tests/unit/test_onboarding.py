@@ -28,7 +28,7 @@ def test_onboarding_root_renders_nas_step(client, token):
     assert resp.status_code == 200
     html = resp.data.decode()
     assert "Step 1: NAS SSH" in html
-    assert "👋 欢迎" in html
+    assert "欢迎" in html
 
 
 def test_onboarding_nas_step_renders(client, token):
@@ -37,7 +37,7 @@ def test_onboarding_nas_step_renders(client, token):
     assert resp.status_code == 200
     html = resp.data.decode()
     assert "Step 1: NAS SSH" in html
-    assert "👋 欢迎" in html
+    assert "欢迎" in html
 
 
 def test_onboarding_redirects_unknown_step_to_nas(client, token):
