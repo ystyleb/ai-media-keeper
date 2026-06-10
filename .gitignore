@@ -38,3 +38,6 @@ nas.db
 static/css/output.css
 bin/tailwindcss
 .gstack/
+
+# superpowers brainstorm 临时 mockup
+.superpowers/
