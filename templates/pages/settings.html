@@ -6,54 +6,134 @@
 <span>设置</span>
 {% endblock %}
 
+{% macro cfg_badge(ok) %}
+{% if ok %}<span class="nv-pill-ok">&#10003; 已配置</span>{% else %}<span class="nv-pill-gray">未配置</span>{% endif %}
+{% endmacro %}
+
 {% block main %}
 <div class="space-y-4">
     <header>
-        <h2 class="text-2xl font-bold text-slate-100">设置</h2>
-        <p class="text-sm text-slate-400 mt-1">NASVault 配置中心.</p>
+        <h2 class="text-2xl font-bold text-ink-strong">设置</h2>
+        <p class="text-sm text-ink-soft mt-1">NASVault 配置中心</p>
     </header>
 
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-w-5xl">
-        <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl">
+        <!-- NAS -->
+        <button type="button"
+                class="nv-card text-left hover:border-accent/50 transition-colors flex items-start gap-4"
                 onclick="showNASConfig()">
-            <div class="text-lg font-semibold text-slate-100">📡 NAS</div>
-            <p class="text-xs text-slate-400 mt-1">SSH host + port + 沙箱根路径</p>
+            <span class="w-11 h-11 rounded-xl flex items-center justify-center shrink-0"
+                  style="background: rgba(167,139,250,.15)">
+                <i class="bi bi-hdd-network text-accent text-xl"></i>
+            </span>
+            <span class="flex-1 min-w-0">
+                <span class="flex items-center justify-between gap-2">
+                    <span class="text-base font-bold text-ink-strong">NAS</span>
+                    {{ cfg_badge(cfg_status.nas) }}
+                </span>
+                <span class="block text-xs text-ink-soft mt-1">SSH host + port + 沙箱根路径</span>
+            </span>
         </button>
 
-        <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+        <!-- qBittorrent -->
+        <button type="button"
+                class="nv-card text-left hover:border-accent/50 transition-colors flex items-start gap-4"
                 onclick="showQBitConfig()">
-            <div class="text-lg font-semibold text-slate-100">🌐 qBittorrent</div>
-            <p class="text-xs text-slate-400 mt-1">WebUI URL + 用户名 + 密码</p>
+            <span class="w-11 h-11 rounded-xl flex items-center justify-center shrink-0"
+                  style="background: rgba(52,211,153,.12)">
+                <i class="bi bi-globe2 text-statusbar-ok text-xl"></i>
+            </span>
+            <span class="flex-1 min-w-0">
+                <span class="flex items-center justify-between gap-2">
+                    <span class="text-base font-bold text-ink-strong">qBittorrent</span>
+                    {{ cfg_badge(cfg_status.qbit) }}
+                </span>
+                <span class="block text-xs text-ink-soft mt-1">WebUI URL + 用户名 + 密码</span>
+            </span>
         </button>
 
-        <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+        <!-- AI -->
+        <button type="button"
+                class="nv-card text-left hover:border-accent/50 transition-colors flex items-start gap-4"
                 onclick="showAIConfig()">
-            <div class="text-lg font-semibold text-slate-100">🤖 AI (TMDB + DeepSeek)</div>
-            <p class="text-xs text-slate-400 mt-1">API keys (BYOK) + base URL</p>
+            <span class="w-11 h-11 rounded-xl flex items-center justify-center shrink-0"
+                  style="background: rgba(217,70,239,.12)">
+                <i class="bi bi-robot text-accent-alt-soft text-xl"></i>
+            </span>
+            <span class="flex-1 min-w-0">
+                <span class="flex items-center justify-between gap-2">
+                    <span class="text-base font-bold text-ink-strong">AI (TMDB + DeepSeek)</span>
+                    {{ cfg_badge(cfg_status.ai) }}
+                </span>
+                <span class="block text-xs text-ink-soft mt-1">API keys (BYOK) + base URL</span>
+            </span>
         </button>
 
-        <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+        <!-- Emby -->
+        <button type="button"
+                class="nv-card text-left hover:border-accent/50 transition-colors flex items-start gap-4"
                 onclick="showEmbyConfig()">
-            <div class="text-lg font-semibold text-slate-100">📺 Emby</div>
-            <p class="text-xs text-slate-400 mt-1">URL + API key (可选, 观看进度同步)</p>
+            <span class="w-11 h-11 rounded-xl flex items-center justify-center shrink-0"
+                  style="background: rgba(251,191,36,.12)">
+                <i class="bi bi-display text-statusbar-warn text-xl"></i>
+            </span>
+            <span class="flex-1 min-w-0">
+                <span class="flex items-center justify-between gap-2">
+                    <span class="text-base font-bold text-ink-strong">Emby</span>
+                    {{ cfg_badge(cfg_status.emby) }}
+                </span>
+                <span class="block text-xs text-ink-soft mt-1">URL + API key (可选, 观看进度同步)</span>
+            </span>
         </button>
 
-        <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+        <!-- 媒体库根目录 -->
+        <button type="button"
+                class="nv-card text-left hover:border-accent/50 transition-colors flex items-start gap-4"
                 onclick="showOrganizeConfig()">
-            <div class="text-lg font-semibold text-slate-100">📂 媒体库根目录</div>
-            <p class="text-xs text-slate-400 mt-1">MOVIES_ROOT / TV_ROOT 路径</p>
+            <span class="w-11 h-11 rounded-xl flex items-center justify-center shrink-0"
+                  style="background: rgba(167,139,250,.15)">
+                <i class="bi bi-folder-symlink text-accent text-xl"></i>
+            </span>
+            <span class="flex-1 min-w-0">
+                <span class="flex items-center justify-between gap-2">
+                    <span class="text-base font-bold text-ink-strong">媒体库根目录</span>
+                    {{ cfg_badge(cfg_status.roots) }}
+                </span>
+                <span class="block text-xs text-ink-soft mt-1">MOVIES_ROOT / TV_ROOT 路径</span>
+            </span>
         </button>
 
-        <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+        <!-- 自动整理 -->
+        <button type="button"
+                class="nv-card text-left hover:border-accent/50 transition-colors flex items-start gap-4"
                 onclick="showAutoOrganizeConfig()">
-            <div class="text-lg font-semibold text-slate-100">🤖 自动整理</div>
-            <p class="text-xs text-slate-400 mt-1">qBit category + cron 周期 + confidence</p>
+            <span class="w-11 h-11 rounded-xl flex items-center justify-center shrink-0"
+                  style="background: rgba(217,70,239,.12)">
+                <i class="bi bi-magic text-accent-alt-soft text-xl"></i>
+            </span>
+            <span class="flex-1 min-w-0">
+                <span class="flex items-center justify-between gap-2">
+                    <span class="text-base font-bold text-ink-strong">自动整理</span>
+                    {{ cfg_badge(cfg_status.auto_organize) }}
+                </span>
+                <span class="block text-xs text-ink-soft mt-1">qBit category + cron 周期 + confidence</span>
+            </span>
         </button>
 
-        <button type="button" class="text-left p-3 bg-slate-800 rounded border border-slate-700 hover:bg-slate-700"
+        <!-- 数据库工具（无配置状态徽章） -->
+        <button type="button"
+                class="nv-card text-left hover:border-accent/50 transition-colors flex items-start gap-4"
                 onclick="openScanModal()">
-            <div class="text-lg font-semibold text-slate-100">🔄 数据库工具</div>
-            <p class="text-xs text-slate-400 mt-1">全库扫描 / vacuum / 批量识别</p>
+            <span class="w-11 h-11 rounded-xl flex items-center justify-center shrink-0"
+                  style="background: rgba(111,101,144,.15)">
+                <i class="bi bi-database-gear text-ink-soft text-xl"></i>
+            </span>
+            <span class="flex-1 min-w-0">
+                <span class="flex items-center justify-between gap-2">
+                    <span class="text-base font-bold text-ink-strong">数据库工具</span>
+                </span>
+                <span class="block text-xs text-ink-soft mt-1">全库扫描 / vacuum / 批量识别</span>
+            </span>
         </button>
     </div>
 
