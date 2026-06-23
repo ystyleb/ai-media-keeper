@@ -264,6 +264,81 @@ def test_pick_top_penalizes_year_mismatch():
     assert "year mismatch" in reason or "year exact" in reason
 
 
+def test_pick_top_tv_later_season_year_not_penalized():
+    """多季剧：文件名 year 是当季播出年，TMDB first_air_date 是 S01 首播年。
+    后续季的 year > first_air_date 是 EXPECTED，不能当 year mismatch 罚分。
+
+    真实 bug（House of the Dragon 2026 S03E01，2026-06-23）：
+    - 抽出 title='House of the Dragon', year=2026, S03E01, media_type='episode'
+    - TMDB TV 候选 #1 = original 'House of the Dragon', first_air_date year=2022
+    - 修复前: original exact 0.7 + year mismatch (-0.2) + vote 0.05 = 0.55 → top=None
+              → needs_review → media_type=None → auto-organize 卡 needs_identify
+    - 修复后: original exact 0.7 + tv year consistent (+0.2) + vote 0.05 = 0.95 → 自动绑
+    """
+    parse = _parse(
+        "House of the Dragon", year=2026, season=3, episode=1, media_type="episode"
+    )
+    cands = [
+        MediaCandidate(
+            id="tmdb:tv:94997",
+            external_ids={"tmdb_id": "94997"},
+            title="权力的游戏前传：龙族",
+            original_title="House of the Dragon",
+            year=2022,
+            media_type="tv",
+            poster_url=None,
+            overview=None,
+            vote_average=8.3,
+            raw={},
+        ),
+        _cand(
+            "tmdb:tv:236847",
+            "Enter the House of the Dragon",
+            year=2022,
+            media_type="tv",
+            vote=0.0,
+        ),
+        _cand("tmdb:tv:137555", "决胜21天", year=2021, media_type="tv", vote=4.0),
+    ]
+    top, score, reason = identify_svc._pick_top(parse, cands)
+    assert top is not None, f"应绑到 HotD，实际 None (score={score}, reason={reason})"
+    assert top.id == "tmdb:tv:94997", f"选错候选: {top.id}"
+    assert score >= 0.9, f"TV 后续季 year-consistent 应高分自动绑, got {score:.2f}"
+
+
+def test_pick_top_same_title_different_year_defers_to_llm():
+    """同名多候选（reboot / 美英版）：两个 title-exact TV 候选只有 first_air 年不同，
+    heuristic 仅靠 year 不能可靠区分 → 压低置信 (<0.9) 让 path 2 不盲绑，转 LLM 消歧。
+
+    防回归：tv_consistent 修复若无歧义守门，"年份更晚" 的错版本会反而高分自动绑
+    （The.Office US 2005 vs UK 2001，文件名 2006 → UK 0.95 误绑）。
+    """
+    parse = _parse(
+        "The Office", year=2006, season=3, episode=1, media_type="episode"
+    )
+    cands = [
+        _cand("tmdb:tv:2316", "The Office", year=2005, media_type="tv", vote=8.6),  # US
+        _cand("tmdb:tv:2996", "The Office", year=2001, media_type="tv", vote=7.8),  # UK
+    ]
+    top, score, reason = identify_svc._pick_top(parse, cands)
+    assert score < 0.9, f"同名歧义应压低置信交 LLM, got {score:.2f}"
+    assert "ambiguous" in reason
+    # B1: 返回 top=None（不是 sort-winner）→ LLM 不可用时下游走 needs_review，
+    # 不会用可能错的同名候选给自信猜测
+    assert top is None
+
+
+def test_pick_top_tv_year_before_first_air_still_penalized():
+    """反向守门：文件名 year < TMDB first_air_date（剧首播前就有该季 = 不可能）
+    仍按 year mismatch 罚分，避免 TV 放宽变成"年份完全不看"。"""
+    parse = _parse("Some Show", year=2015, season=1, episode=1, media_type="episode")
+    cands = [_cand("tmdb:tv:1", "Some Show", year=2020, media_type="tv")]
+    top, score, reason = identify_svc._pick_top(parse, cands)
+    # title exact 0.7 + year mismatch (-0.2) + vote 0.05 = 0.55 → top None
+    assert "year mismatch" in reason
+    assert score < 0.7
+
+
 # ---------------- _pick_top ---------------- #
 
 
@@ -688,3 +763,53 @@ def test_identify_single_exact_still_binds_when_year_matches():
     )
     assert result.pick_source == "single_exact"
     assert result.confidence == 0.95
+
+
+def test_identify_single_exact_tv_later_season_binds():
+    """full identify() 快路径：唯一 TV 候选 + title exact + 文件年份晚于首播（多季剧）
+    → single_exact 0.95 绑定（不因 year 差被 fall through）。覆盖 codex review 指出的
+    "single_exact TV 语义只在 _pick_top 层测了" 缺口。"""
+    fake = MagicMock()
+    fake.search.return_value = [
+        MediaCandidate(
+            id="tmdb:tv:94997",
+            external_ids={"tmdb_id": "94997"},
+            title="House of the Dragon",
+            original_title="House of the Dragon",
+            year=2022,
+            media_type="tv",
+            poster_url=None,
+            overview=None,
+            vote_average=8.3,
+        ),
+    ]
+    result = identify_svc.identify(
+        "/x/House.of.the.Dragon.2026.S03E01.1080p.mkv", provider=fake, llm_api_key=None
+    )
+    assert result.pick_source == "single_exact"
+    assert result.confidence == 0.95
+    assert result.top_pick.id == "tmdb:tv:94997"
+
+
+def test_identify_single_exact_tv_year_before_first_air_rejected():
+    """唯一 TV 候选但文件年份早于首播 >1 年（剧首播前不可能有该季）→ 不走 single_exact，
+    fall through 到 _pick_top（mismatch 罚分 → needs_review）。守门 TV year-gate 放宽
+    没有把"早于首播"也放进来。"""
+    fake = MagicMock()
+    fake.search.return_value = [
+        MediaCandidate(
+            id="tmdb:tv:999",
+            external_ids={"tmdb_id": "999"},
+            title="Some Show",
+            original_title="Some Show",
+            year=2020,
+            media_type="tv",
+            poster_url=None,
+            overview=None,
+            vote_average=7.5,
+        ),
+    ]
+    result = identify_svc.identify(
+        "/x/Some.Show.2015.S01E01.1080p.mkv", provider=fake, llm_api_key=None
+    )
+    assert result.pick_source != "single_exact"

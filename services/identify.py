@@ -320,6 +320,36 @@ def _normalize_title(s: str) -> str:
     return re.sub(r"[^\w\s]+", "", s.lower()).strip()
 
 
+def _year_relation(want_year: int | None, cand_year: int | None, *, is_tv: bool) -> str:
+    """判断文件名 year 与候选 year 的关系（TV 多季感知）。
+
+    返回 'exact' | 'close' | 'tv_consistent' | 'mismatch' | 'unknown'。
+
+    **TV 关键语义**：候选 year 是 TMDB `first_air_date`（S01 首播年），而文件名 year
+    是"当季播出年"。后续季 year >= first_air 都是 EXPECTED（S2/S3/... 都晚于首播），
+    一律算 tv_consistent，不是 mismatch（House of the Dragon: 文件名 2026 S03 vs
+    first_air 2022）。只有 year < first_air（剧首播前就有该季 = 不可能，仅容差 1 年
+    边界）才算 mismatch。Movie 仍按 release year 精确匹配（year 是强消歧信号）。
+
+    注意：本函数只判断"单候选与文件名年份是否兼容"，不负责同名多候选（reboot /
+    美英版）的消歧——那由 _pick_top 的歧义守门 + LLM grounded select 处理。
+    """
+    if not want_year or not cand_year:
+        return "unknown"
+    if want_year == cand_year:
+        return "exact"
+    if is_tv:
+        if want_year > cand_year:
+            return "tv_consistent"  # 后续季播出年 > 首播年，正常
+        if cand_year - want_year == 1:
+            return "close"  # 早一年 = air/release 边界容差
+        return "mismatch"  # 早 >1 年 = 剧首播前就有该季，不可能
+    # movie：release year 应精确，±1 容差
+    if abs(want_year - cand_year) == 1:
+        return "close"
+    return "mismatch"
+
+
 def _pick_top(
     parse: FilenameParse, candidates: list[MediaCandidate]
 ) -> tuple[MediaCandidate | None, float, str]:
@@ -362,16 +392,23 @@ def _pick_top(
             score += title_score
             reasons.append(title_reason)
 
-        if want_year and c.year == want_year:
+        rel = _year_relation(want_year, c.year, is_tv=(c.media_type == "tv"))
+        if rel == "exact":
             score += 0.2
             reasons.append("year exact")
-        elif want_year and c.year and abs(c.year - want_year) == 1:
+        elif rel == "close":
             score += 0.05
             reasons.append("year ±1")
-        elif want_year and c.year:
-            # 双方都知道 year 但不匹配 → 强负信号。文件名 year 通常很准（PT 命名习惯），
-            # candidate year 在 TMDB 也是权威。"The Godfather 1972" 在 query year=1974
-            # 时是错的候选，必须低于"The Godfather Part II 1974"。
+        elif rel == "tv_consistent":
+            # TV 后续季：文件名 year 是当季播出年，> first_air 是正常的（House of the
+            # Dragon 文件名 2026 S03 vs first_air 2022）。与 exact 同等正信号——确认是
+            # 这部剧的真实季，不能当 mismatch 罚分（否则多季剧永远卡 needs_review）。
+            score += 0.2
+            reasons.append("tv year consistent")
+        elif rel == "mismatch":
+            # 双方都知道 year 但不匹配（且非 TV 后续季）→ 强负信号。文件名 year 通常很准
+            # （PT 命名习惯），candidate year 在 TMDB 也是权威。"The Godfather 1972" 在
+            # query year=1974 时是错的候选，必须低于"The Godfather Part II 1974"。
             score -= 0.2
             reasons.append("year mismatch")
 
@@ -384,6 +421,23 @@ def _pick_top(
 
     scored.sort(key=lambda x: x[0], reverse=True)
     top_score, top, reasons = scored[0]
+
+    # 歧义守门：次优候选分数接近 top 且自身也是强匹配（≥0.7，即 title 命中）→ 同名
+    # 多候选（reboot / 美英版 The Office US 2005 vs UK 2001 / Doctor Who 多代），
+    # 仅靠 year 无法可靠区分。返回 top=None（不是 sort-winner）：path 2 因 None 跳过、
+    # path 3 LLM grounded select 用完整候选列表消歧；LLM 不可用时下游 heur_top is None
+    # → 走 needs_review（而非用 sort-winner 给一个自信的错猜测，B1）。
+    # HotD 这种唯一强候选（次优是 substring 0.6 < 0.7）不受影响。
+    if len(scored) >= 2:
+        runner_up = scored[1][0]
+        if runner_up >= 0.7 and (top_score - runner_up) < 0.15:
+            return (
+                None,
+                min(top_score, 0.85),
+                f"ambiguous: 次优候选 {runner_up:.2f} 接近 top {top_score:.2f}（{reasons}）；"
+                f"heuristic 不可靠区分，交 LLM/needs_review",
+            )
+
     if top_score < 0.7:
         return None, top_score, f"low confidence (top={top_score:.2f}): {reasons}"
     return top, top_score, reasons
@@ -536,7 +590,14 @@ def identify(
         norm_want = _normalize_title(parse.title)
         norm_t = _normalize_title(c.title)
         norm_o = _normalize_title(c.original_title or "")
-        year_ok = (not parse.year) or (not c.year) or abs(c.year - parse.year) <= 1
+        # year-gate TV 多季感知：后续季 year > first_air 是兼容的（不阻塞快路径），
+        # 仅 movie 错年 / TV 早于首播年（不可能）才 fall through 到 _pick_top 罚分。
+        year_ok = _year_relation(parse.year, c.year, is_tv=(c.media_type == "tv")) in (
+            "exact",
+            "close",
+            "tv_consistent",
+            "unknown",
+        )
         if norm_want and norm_want in (norm_t, norm_o) and year_ok:
             return IdentifyResult(
                 parse=parse,

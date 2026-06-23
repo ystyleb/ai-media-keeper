@@ -64,6 +64,7 @@ SELECT_PROMPT_V1 = """You are matching a video file to its TMDB entry. Given the
 - Never invent an id. The `id` strings below are the ONLY valid options.
 - If `confidence < 0.7`, return `selected: null` — the system will treat that as needs_review.
 - The filename may be in any language (English title for Chinese show, romaji for Japanese, etc); the candidates' `title` may be localized (e.g. zh-CN). Compare against both `title` AND `original_title`.
+- **TV year semantics**: for TV shows, a candidate's `year` is the show's FIRST air date (Season 1). A filename's `year` is usually the air year of THAT specific season/episode. So for a later season (e.g. S03) it is NORMAL and EXPECTED that the filename year is GREATER than the candidate year. Do NOT reject or lower confidence for a title-exact TV match merely because the filename year is later than the candidate's first-air year — that is the right show. (Movies still match release year exactly.)
 
 Parsed filename info:
 {parse_json}
