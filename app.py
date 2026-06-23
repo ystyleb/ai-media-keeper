@@ -51,6 +51,13 @@ from services.metadata.tmdb import TMDBProvider
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# 以 `python app.py` 直接运行时模块名是 __main__；但 routes/*.py 蓝图用
+# `from app import ...` 延迟导入。不 alias 的话 `from app import X` 在 sys.modules
+# 找不到 `app` → 把整个 6000 行 app.py 当成第二个模块重新 import → import-lock 死锁
+# (并发请求全堵在 importlib 的 _ModuleLock 上) + 重复执行模块级副作用 (worker lock /
+# 调度器 / QBitClient)。注册别名让 `python app.py` 与 `gunicorn app:app` 行为一致。
+sys.modules.setdefault("app", sys.modules[__name__])
+
 app = Flask(__name__)
 # Dev 阶段禁掉 static (app.js/css) 的浏览器缓存，避免 hard reload 也拿不到新版
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
@@ -5661,6 +5668,16 @@ def reset_auto_organize_run():
             else:
                 cfg = load_qbit_auto_organize_config()
                 threshold = cfg.get("confidence_threshold", 0.85)
+                # reset 立即重试与 cron 行为一致：auto_identify 开启时也走自动识别，
+                # 否则已卡 needs_identify 的种子点 reset 仍跳过识别 → 又卡同一状态
+                # （新 skipped row 让 cron 后续也不再碰）→ 用户无法恢复。
+                auto_identify = cfg.get("auto_identify", False)
+                auto_id_threshold = cfg.get("auto_identify_confidence_threshold", 0.95)
+                identify_fn = (
+                    (lambda ni_paths: _auto_identify_paths(db, ni_paths))
+                    if auto_identify
+                    else None
+                )
                 trigger_result = qbit_auto.dispatch_one(
                     db,
                     target,
@@ -5671,6 +5688,8 @@ def reset_auto_organize_run():
                     ),
                     confidence_threshold=threshold,
                     build_and_start_organize_fn=_build_and_start_auto_organize,
+                    identify_paths_fn=identify_fn,
+                    auto_identify_threshold=auto_id_threshold if auto_identify else None,
                 )
         except Exception as e:
             logger.exception(f"[auto-organize] trigger_now failed for {qbit_hash}")
