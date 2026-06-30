@@ -2358,6 +2358,9 @@ async function showAIConfig() {
         const ds = await dsRes.json();
         _setKeyBadge("tmdb-key-status", tmdb.has_key);
         _setKeyBadge("deepseek-key-status", ds.has_key);
+        // 代理非敏感，回显当前值供编辑
+        const proxyInput = document.getElementById("tmdb-proxy-input");
+        if (proxyInput) proxyInput.value = tmdb.proxy || "";
     } catch (err) {
         console.error("load key status failed", err);
     }
@@ -2382,10 +2385,13 @@ function _setKeyBadge(id, hasKey) {
 
 async function testTMDBKey() {
     const input = document.getElementById("tmdb-key-input").value.trim();
+    const proxyEl = document.getElementById("tmdb-proxy-input");
     const status = document.getElementById("tmdb-test-status");
     status.innerHTML = '<span class="text-secondary">测试中...</span>';
     try {
-        const body = input ? { api_key: input } : {};
+        const body = {};
+        if (input) body.api_key = input;
+        if (proxyEl) body.proxy = proxyEl.value.trim();  // 用当前输入框的代理测
         const res = await apiFetch(`${API_BASE}/api/config/tmdb/test`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -2426,13 +2432,20 @@ async function testDeepseekKey() {
 
 async function saveAIConfig() {
     const tmdb = document.getElementById("tmdb-key-input").value.trim();
+    const proxyEl = document.getElementById("tmdb-proxy-input");
+    const tmdbProxy = proxyEl ? proxyEl.value.trim() : null;
     const ds = document.getElementById("deepseek-key-input").value.trim();
     const ops = [];
-    if (tmdb) {
+    // proxy 字段总是随 TMDB op 发送（pre-fill 当前值；清空即清除代理）；
+    // api_key 仅在用户输入时发送（password 留空=不改）。任一存在就 POST。
+    const tmdbBody = {};
+    if (tmdb) tmdbBody.api_key = tmdb;
+    if (tmdbProxy !== null) tmdbBody.proxy = tmdbProxy;
+    if (Object.keys(tmdbBody).length) {
         ops.push(apiFetch(`${API_BASE}/api/config/tmdb`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ api_key: tmdb }),
+            body: JSON.stringify(tmdbBody),
         }).then(r => r.json()).then(d => ({ kind: "TMDB", ok: d.ok })));
     }
     if (ds) {

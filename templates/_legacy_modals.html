@@ -367,6 +367,13 @@
                         申请：<a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">themoviedb.org/settings/api</a>
                         （免费，1 分钟）。用于：剧名 / 海报 / 评分 / 剧情 / 演员。
                     </div>
+                    <label class="form-label mt-2 mb-1"><strong>TMDB 代理</strong>（可选）</label>
+                    <input type="text" class="form-control" id="tmdb-proxy-input"
+                           placeholder="http://127.0.0.1:7897 — 留空=直连/跟随全局 env">
+                    <div class="form-text">
+                        api.themoviedb.org 在大陆被墙时填代理（如 Clash <code>http://127.0.0.1:7897</code>）。
+                        <strong>仅 TMDB 走此代理</strong>，qBit/Emby/NAS 直连不受影响。
+                    </div>
                     <div id="tmdb-test-status" class="mt-2 small"></div>
                 </div>
 
