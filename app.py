@@ -2689,6 +2689,11 @@ def _organize_executor_one_item(item: dict, expected_metadata: dict | None) -> d
             "current_inode": src_now.get("inode"),
         }
 
+    # 原盘文件夹（BDMV/VIDEO_TS）：src 是目录 → cp -al 递归 hardlink 整盘，
+    # 不走单文件 ln（单 inode Pattern C 不适用目录，改抽样 inner file inode 核验）。
+    if src_now.get("is_dir"):
+        return _organize_disc_folder(src_path, plan, expected_metadata)
+
     dst_path = plan["dst_path"]
     dst_now = _ssh_stat_paths([dst_path]).get(dst_path, {"exists": False})
 
@@ -2791,6 +2796,99 @@ def _organize_executor_one_item_threadsafe(item: dict, expected_metadata: dict |
     """
     with app.app_context():
         return _organize_executor_one_item(item, expected_metadata)
+
+
+def _disc_sample_inode_pair(src_dir: str, dst_dir: str) -> tuple[int, int] | None:
+    """在 src_dir 找一个文件，返回 (src_inode, dst_inode) 用于核验 cp -al hardlink。
+
+    dst 同名文件 = dst_dir/<相对 src_dir 的路径>。找不到文件或 stat 失败返 None。
+    """
+    _, out, _ = ssh_exec(
+        f"find {shlex.quote(src_dir)} -type f 2>/dev/null | head -1", timeout=30
+    )
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    sample_src = lines[0] if lines else ""
+    base = src_dir.rstrip("/")
+    if not sample_src or not sample_src.startswith(base + "/"):
+        return None
+    rel = sample_src[len(base) + 1 :]
+    sample_dst = f"{dst_dir.rstrip('/')}/{rel}"
+    stats = _ssh_stat_paths([sample_src, sample_dst])
+    si = stats.get(sample_src, {}).get("inode")
+    di = stats.get(sample_dst, {}).get("inode")
+    if si is None or di is None:
+        return None
+    return (si, di)
+
+
+def _organize_disc_folder(src_path: str, plan: dict, expected_metadata: dict | None) -> dict:
+    """原盘文件夹（BDMV/VIDEO_TS）organize：cp -al 递归 hardlink 整盘到
+    Movies/Title (Year)/，抽样 inner file inode 核验，写 movie.nfo。
+
+    单文件 ln 的单 inode Pattern C 不适用目录（盘根 dir inode != cp 后 dst dir inode），
+    改为：cp -al 后抽 src 一个文件，比对 dst 同名文件 inode 是否一致（确认真 hardlink）。
+    """
+    dst_dir = plan["dst_dir"]  # = movies_root/Title (Year)，cp -al 目标（应不存在）
+    dst_now = _ssh_stat_paths([dst_dir]).get(dst_dir, {"exists": False})
+    if dst_now.get("exists"):
+        sample = _disc_sample_inode_pair(src_path, dst_dir)
+        if sample and sample[0] == sample[1]:
+            return {
+                "src_path": src_path,
+                "status": "already_linked",
+                "dst_path": dst_dir,
+                "container_type": "disc_folder",
+                "shared_inode": sample[0],
+            }
+        return {
+            "src_path": src_path,
+            "status": "failed",
+            "reason": "dst_dir_exists_not_hardlinked",
+            "dst_path": dst_dir,
+        }
+    # mkdir -p 父目录（movies_root），cp -al 创建 dst_dir（含 hardlink 的整盘结构）
+    parent = dst_dir.rstrip("/").rsplit("/", 1)[0]
+    rc, _, err = _ssh_mkdir_p(parent)
+    if rc != 0:
+        return {
+            "src_path": src_path,
+            "status": "failed",
+            "reason": f"mkdir_parent_failed: {err.strip()[:200]}",
+        }
+    rc, _, err = ssh_exec(
+        f"cp -al {shlex.quote(src_path)} {shlex.quote(dst_dir)}", timeout=300
+    )
+    if rc != 0:
+        return {
+            "src_path": src_path,
+            "status": "failed",
+            "reason": f"cp_al_failed: {err.strip()[:200]}",
+        }
+    sample = _disc_sample_inode_pair(src_path, dst_dir)
+    if not sample or sample[0] != sample[1]:
+        return {
+            "src_path": src_path,
+            "status": "failed",
+            "reason": "disc_hardlink_verify_failed",
+            "sample_inodes": sample,
+            "dst_path": dst_dir,
+        }
+    nfo_path = f"{dst_dir.rstrip('/')}/movie.nfo"
+    nfo_status = _write_organize_nfo(
+        src_path, nfo_path, "movie", expected_metadata=expected_metadata
+    )
+    return {
+        "src_path": src_path,
+        "dst_path": dst_dir,
+        "status": "succeeded",
+        "container_type": "disc_folder",
+        "src_inode": sample[0],
+        "dst_inode": sample[1],
+        "nfo_path": nfo_path,
+        "nfo_status": nfo_status,
+        "tvshow_nfo_path": None,
+        "tvshow_nfo_status": "skipped",
+    }
 
 
 def _build_and_start_auto_organize(paths: list[str], qbit_hash: str) -> dict:
@@ -4124,7 +4222,26 @@ def _list_video_paths(path: str, max_depth: int = 2, limit: int | None = 200) ->
         f"\\( {iname_clauses} \\) 2>/dev/null {cap}"
     )
     _, out, _ = ssh_exec(cmd, timeout=120)
-    return [ln.strip() for ln in out.splitlines() if ln.strip()]
+    file_paths = [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+    # 原盘文件夹（BDMV / VIDEO_TS）= 单个媒体单元（盘根）。内部 m2ts/vob 已被
+    # _PATH_EXCLUDES 排除，这里把含 BDMV/ 或 VIDEO_TS/ 的目录本身作为单元返回，
+    # 让它跟 .iso 一样走 identify + organize（organize 执行器对目录走 cp -al 递归 hardlink）。
+    disc_cmd = (
+        f"find {safe_path} -maxdepth {max_depth + 1} -type d "
+        f"\\( -iname BDMV -o -iname VIDEO_TS \\) 2>/dev/null"
+    )
+    _, disc_out, _ = ssh_exec(disc_cmd, timeout=120)
+    seen = set(file_paths)
+    for ln in disc_out.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        root = ln.rsplit("/", 1)[0]  # BDMV/VIDEO_TS 的父目录 = 盘根
+        if root and root not in seen:
+            seen.add(root)
+            file_paths.append(root)
+    return file_paths
 
 
 @app.route("/api/metadata/list-videos", methods=["GET"])
