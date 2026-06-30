@@ -4092,6 +4092,11 @@ def providers_status():
 
 
 VIDEO_EXTS = ["mkv", "mp4", "avi", "mov", "ts", "m4v", "mpg", "wmv", "flv", "webm", "m2ts", "rmvb"]
+# 原盘镜像 .iso 当单文件媒体单元处理（蓝光/DVD 整盘镜像，Emby/Jellyfin/Plex 原生播放）。
+# 单文件 → organize 走和 mkv 一样的单 inode hardlink 流程，无需特殊处理。
+DISC_IMAGE_EXTS = ["iso"]
+# 扫描视频文件 + .iso 镜像（identify/list-videos/auto-organize 用同一组扩展名）。
+SCAN_EXTS = VIDEO_EXTS + DISC_IMAGE_EXTS
 
 # 排除原盘镜像内部目录：BDMV (Blu-ray) 和 VIDEO_TS (DVD) 子树里的 .m2ts/.vob
 # 不该作为独立媒体识别——一个 Blu-ray 镜像就有几十个 m2ts 文件，全去 TMDB 搜会
@@ -4111,7 +4116,7 @@ def _list_video_paths(path: str, max_depth: int = 2, limit: int | None = 200) ->
     """
     canonical_path = path_resolver.resolve(path, ssh_exec)
     safe_path = shlex.quote(canonical_path)
-    iname_clauses = " -o ".join(f"-iname '*.{ext}'" for ext in VIDEO_EXTS)
+    iname_clauses = " -o ".join(f"-iname '*.{ext}'" for ext in SCAN_EXTS)
     not_path = " ".join(f"-not -path {shlex.quote(p)}" for p in _PATH_EXCLUDES)
     cap = f"| head -n {limit + 1}" if limit else ""
     cmd = (
@@ -4143,7 +4148,7 @@ def metadata_list_videos():
     raw_paths = _list_video_paths(path, max_depth=max_depth, limit=limit)
     truncated = len(raw_paths) > limit
     raw_paths = raw_paths[:limit]
-    video_exts = VIDEO_EXTS  # 兼容下面循环用
+    video_exts = SCAN_EXTS  # 兼容下面循环用（含 .iso 原盘镜像）
     if not raw_paths:
         return jsonify({"videos": [], "total": 0, "truncated": False})
 
