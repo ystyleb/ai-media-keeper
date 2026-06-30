@@ -347,6 +347,7 @@ DEFAULT_QBIT_CONFIG = {
 
 QBIT_PASS_FILE = CONFIG_DIR / ".qbit_pass"
 TMDB_KEY_FILE = CONFIG_DIR / ".tmdb_key"
+TMDB_PROXY_FILE = CONFIG_DIR / ".tmdb_proxy"
 DEEPSEEK_KEY_FILE = CONFIG_DIR / ".deepseek_key"
 EMBY_KEY_FILE = CONFIG_DIR / ".emby_key"
 EMBY_CONFIG_FILE = CONFIG_DIR / "emby.json"
@@ -385,12 +386,38 @@ def save_tmdb_key(key: str) -> None:
         logger.warning(f"could not chmod 600 {TMDB_KEY_FILE}: {e}")
 
 
+def load_tmdb_proxy() -> str:
+    """TMDB 专属代理 URL：env TMDB_PROXY > config/.tmdb_proxy > 空。
+    api.themoviedb.org 在大陆被墙——配这个让 TMDB 走代理，而 qBit/Emby/NAS (LAN)
+    与 DeepSeek 不受影响（不用全局 http_proxy 污染整个 app）。"""
+    env = os.environ.get("TMDB_PROXY", "").strip()
+    if env:
+        return env
+    if TMDB_PROXY_FILE.exists():
+        return TMDB_PROXY_FILE.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def save_tmdb_proxy(proxy: str) -> None:
+    """落盘 + chmod 600（代理 URL 可能含 user:pass）；空值删文件。"""
+    proxy = proxy.strip()
+    if not proxy:
+        if TMDB_PROXY_FILE.exists():
+            TMDB_PROXY_FILE.unlink()
+        return
+    TMDB_PROXY_FILE.write_text(proxy, encoding="utf-8")
+    try:
+        os.chmod(TMDB_PROXY_FILE, 0o600)
+    except OSError as e:
+        logger.warning(f"could not chmod 600 {TMDB_PROXY_FILE}: {e}")
+
+
 def get_tmdb_provider() -> TMDBProvider | None:
     """每请求按需创建（key 可能 UI 上刚改），key 为空返回 None。"""
     key = load_tmdb_key()
     if not key:
         return None
-    return TMDBProvider(api_key=key)
+    return TMDBProvider(api_key=key, proxy=load_tmdb_proxy() or None)
 
 
 def load_deepseek_key() -> str:
@@ -3970,16 +3997,32 @@ def action_abort():
 @app.route("/api/config/tmdb", methods=["GET"])
 @require_token
 def get_tmdb_config():
-    return jsonify({"has_key": bool(load_tmdb_key())})
+    # proxy 非敏感（本地配置，方便编辑回显）；key 仍只返 has_key 不回显明文
+    return jsonify({"has_key": bool(load_tmdb_key()), "proxy": load_tmdb_proxy()})
 
 
 @app.route("/api/config/tmdb", methods=["POST"])
 @require_token
 def set_tmdb_config():
+    """独立保存 key / proxy（用 `in` 判断在场，避免只改 proxy 时清掉 key）。
+    proxy 留空 = 清除（回退直连/全局 env）。"""
     data = request.json or {}
-    key = (data.get("api_key") or "").strip()
-    save_tmdb_key(key)
-    return jsonify({"ok": True, "has_key": bool(key)})
+    result = {"ok": True}
+    if "api_key" in data:
+        key = (data.get("api_key") or "").strip()
+        save_tmdb_key(key)
+        result["has_key"] = bool(key)
+    if "proxy" in data:
+        proxy = (data.get("proxy") or "").strip()
+        if proxy:
+            scheme = urlparse(proxy).scheme
+            if scheme not in ("http", "https", "socks5", "socks5h"):
+                return jsonify(
+                    {"ok": False, "error": "proxy 必须是 http(s):// 或 socks5(h):// URL"}
+                ), 400
+        save_tmdb_proxy(proxy)
+        result["has_proxy"] = bool(proxy)
+    return jsonify(result)
 
 
 @app.route("/api/config/deepseek", methods=["GET"])
@@ -4026,13 +4069,14 @@ def test_deepseek_config():
 @app.route("/api/config/tmdb/test", methods=["POST"])
 @require_token
 def test_tmdb_config():
-    """临时 key 验证：body 里传 api_key 直接测，不落盘；不传则用现有 key。"""
+    """临时验证：body 里传 api_key / proxy 直接测，不落盘；不传则用现有配置。"""
     data = request.json or {}
     key = (data.get("api_key") or "").strip() or load_tmdb_key()
+    proxy = (data.get("proxy") if "proxy" in data else load_tmdb_proxy()) or None
     if not key:
         return jsonify({"ok": False, "message": "no key configured"}), 400
     try:
-        result = TMDBProvider(api_key=key).test_connection()
+        result = TMDBProvider(api_key=key, proxy=proxy).test_connection()
     except Exception as e:
         return jsonify({"ok": False, "message": str(e)}), 200
     return jsonify(result)
@@ -4060,7 +4104,7 @@ def _probe_tmdb() -> dict:
     if not key:
         return {"state": "not_configured", "message": "TMDB key 未配置"}
     try:
-        r = TMDBProvider(api_key=key).test_connection()
+        r = TMDBProvider(api_key=key, proxy=load_tmdb_proxy() or None).test_connection()
     except Exception as e:
         return {"state": _classify_provider_error(str(e)), "message": str(e)}
     if r.get("ok"):

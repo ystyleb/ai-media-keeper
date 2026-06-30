@@ -24,12 +24,19 @@ IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
 class TMDBProvider(MetadataProvider):
     name = "tmdb"
 
-    def __init__(self, api_key: str, language: str = "zh-CN"):
+    def __init__(self, api_key: str, language: str = "zh-CN", proxy: str | None = None):
         if not api_key:
             raise ValueError("TMDB api_key required")
         self.api_key = api_key
         self.language = language
         self._session = requests.Session()
+        # TMDB 专属代理：api.themoviedb.org 在大陆被墙，需走代理。只对本 session 设代理，
+        # qBit/Emby/NAS (LAN) 与 DeepSeek 不受影响。trust_env=False 让它只用这个 proxy，
+        # 不受全局 http_proxy / NO_PROXY env 干扰（隔离）。proxy 为空则保持默认
+        # trust_env=True（向后兼容：仍跟随全局 http_proxy，没配则直连）。
+        if proxy:
+            self._session.trust_env = False
+            self._session.proxies = {"http": proxy, "https": proxy}
 
     def _get(self, path: str, **params) -> dict[str, Any]:
         params.setdefault("api_key", self.api_key)

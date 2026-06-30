@@ -108,7 +108,7 @@ def test_all_three_ok(client, token, monkeypatch):
         app_module, "_emby_client", lambda: _FakeEmbyClient({"ok": True, "message": "Emby OK"})
     )
     monkeypatch.setattr(
-        app_module, "TMDBProvider", lambda api_key: _FakeTMDB({"ok": True, "message": "TMDB OK"})
+        app_module, "TMDBProvider", lambda api_key, proxy=None: _FakeTMDB({"ok": True, "message": "TMDB OK"})
     )
     _patch_openai_ok(monkeypatch)
 
@@ -129,7 +129,7 @@ def test_tmdb_auth_failed_message_pattern(client, token, monkeypatch):
     monkeypatch.setattr(
         app_module,
         "TMDBProvider",
-        lambda api_key: _FakeTMDB({"ok": False, "message": "401 Unauthorized: Invalid API key"}),
+        lambda api_key, proxy=None: _FakeTMDB({"ok": False, "message": "401 Unauthorized: Invalid API key"}),
     )
 
     resp = client.get("/api/providers/status", headers={"Authorization": f"Bearer {token}"})
@@ -146,7 +146,7 @@ def test_tmdb_network_classified_as_unreachable(client, token, monkeypatch):
     monkeypatch.setattr(
         app_module,
         "TMDBProvider",
-        lambda api_key: _FakeTMDB({"ok": False, "message": "network: Connection refused"}),
+        lambda api_key, proxy=None: _FakeTMDB({"ok": False, "message": "network: Connection refused"}),
     )
 
     resp = client.get("/api/providers/status", headers={"Authorization": f"Bearer {token}"})
@@ -205,7 +205,7 @@ def test_emby_network_code_classified_unreachable(client, token, monkeypatch):
 def test_cache_hit_second_call_does_not_re_probe(client, token, monkeypatch):
     calls = {"tmdb": 0}
 
-    def _fake_tmdb_factory(api_key):
+    def _fake_tmdb_factory(api_key, proxy=None):
         calls["tmdb"] += 1
         return _FakeTMDB({"ok": True, "message": "TMDB OK"})
 
@@ -224,7 +224,7 @@ def test_cache_hit_second_call_does_not_re_probe(client, token, monkeypatch):
 def test_refresh_param_bypasses_cache(client, token, monkeypatch):
     calls = {"tmdb": 0}
 
-    def _fake_tmdb_factory(api_key):
+    def _fake_tmdb_factory(api_key, proxy=None):
         calls["tmdb"] += 1
         return _FakeTMDB({"ok": True, "message": "TMDB OK"})
 

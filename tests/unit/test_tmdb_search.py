@@ -32,6 +32,25 @@ def test_search_genuine_no_results_returns_empty():
     assert p.search("Nonexistent Title Xyz", media_type="movie") == []
 
 
+def test_tmdb_proxy_isolates_session_from_global_env():
+    """TMDB 专属代理：proxy 给定 → 只对本 session 设代理 + trust_env=False（隔离全局
+    http_proxy / NO_PROXY），qBit/Emby/NAS LAN 与 DeepSeek 不受影响。"""
+    p = TMDBProvider("fake-key", proxy="http://127.0.0.1:7897")
+    assert p._session.trust_env is False
+    assert p._session.proxies == {
+        "http": "http://127.0.0.1:7897",
+        "https": "http://127.0.0.1:7897",
+    }
+
+
+def test_tmdb_no_proxy_keeps_env_default():
+    """未配专属代理 → 保持默认 trust_env=True（向后兼容：仍跟随全局 http_proxy，
+    没配则直连），不强行设 proxies。"""
+    p = TMDBProvider("fake-key")
+    assert p._session.trust_env is True
+    assert not p._session.proxies
+
+
 def test_search_partial_success_returns_candidates_despite_one_side_error():
     """tv 侧失败但 movie 侧有结果 → 仍返候选（部分成功不算不可用）。"""
     p = TMDBProvider("fake-key")
