@@ -664,3 +664,80 @@ def reconcile_organizing_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 }
             )
     return results
+
+
+def requeue_resolved_skips(
+    conn: sqlite3.Connection,
+    *,
+    resolve_fn,
+    threshold: float,
+    max_attempts: int = 5,
+) -> list[str]:
+    """Phase 3 防复发：把「文件现已识别」的 skipped_needs_identify row 重置为 pending。
+
+    场景：种子下载完成那一刻文件还没被 scanner 扫到 / 识别 → confidence gate 判
+    needs_identify → 标 skipped_needs_identify（单向终态）→ 之后 scanner / 手动 / auto_identify
+    把文件识别好了，但 auto-organize 永不回头（filter_unprocessed_hashes 跳过 terminal）。
+    本函数让 cron 每周期回收这类「已可整理」的卡死 row：重置为 pending，本周期
+    filter_unprocessed 会带上它重新 dispatch。
+
+    判定（复刻 evaluate_confidence_gate 的 pass 条件，用 media_files 缓存当文件清单）：
+      content_path（resolve 成 canonical）下 media_files 有 ≥1 行，且**全部**满足
+      metadata_status='ok' + media_type ∈ SUPPORTED_MEDIA_TYPES + confidence ≥ threshold
+      → requeue。media_files 无任何行（.iso / BDMV 等 scanner 不索引的格式）→ 不动。
+
+    防 thrash：只回收 attempts < max_attempts 的 row。若 requeue 后 dispatch 仍 re-skip
+    （dir 里有 scanner 没扫到的视频文件，live gate 比缓存严），re-skip 会 attempts+1，
+    达到上限后不再回收，避免无限 requeue↔reskip 循环。
+
+    Args:
+        resolve_fn: callable(content_path: str) -> canonical_path。app 层注入
+                    path_resolver.resolve（alias→canonical）。
+        threshold: confidence gate 门槛（同 dispatch 用的 confidence_threshold）。
+
+    返回被 requeue 的 qbit_hash 列表。
+    """
+    requeued: list[str] = []
+    rows = conn.execute(
+        "SELECT qbit_hash, content_path FROM auto_organize_runs "
+        "WHERE status='skipped_needs_identify' AND attempts < ?",
+        (max_attempts,),
+    ).fetchall()
+    for row in rows:
+        qbit_hash = row["qbit_hash"]
+        content_path = (row["content_path"] or "").rstrip("/")
+        if not content_path:
+            continue
+        try:
+            canonical = resolve_fn(content_path)
+        except Exception:
+            continue  # resolve 失败（SSH 挂等）→ 本周期跳过，下周期再试
+        if not canonical:
+            continue
+        canonical = canonical.rstrip("/")
+        mrows = conn.execute(
+            "SELECT metadata_status, media_type, metadata_confidence FROM media_files "
+            "WHERE path = ? OR path LIKE ? || '/%'",
+            (canonical, canonical),
+        ).fetchall()
+        if not mrows:
+            continue  # 没扫到任何视频文件（disc 格式等）→ 不回收
+        all_resolved = all(
+            r["metadata_status"] == "ok"
+            and r["media_type"] in SUPPORTED_MEDIA_TYPES
+            and (r["metadata_confidence"] if r["metadata_confidence"] is not None else 0.0)
+            >= threshold
+            for r in mrows
+        )
+        if not all_resolved:
+            continue
+        cur = conn.execute(
+            "UPDATE auto_organize_runs SET status='pending', action_id=NULL "
+            "WHERE qbit_hash=? AND status='skipped_needs_identify'",
+            (qbit_hash,),
+        )
+        if cur.rowcount:
+            requeued.append(qbit_hash)
+    if requeued:
+        conn.commit()
+    return requeued

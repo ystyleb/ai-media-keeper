@@ -12,10 +12,24 @@ from unittest.mock import MagicMock
 import pytest
 
 import app as app_module
+from db import migrations
+from services import destructive_action
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
+    # 隔离 DB：每个 test 用独立 tmp actions.db，避免读/写真实 config/actions.db
+    # （否则真库的真实 run 行会干扰断言，如 limit=N 把 seed 行挤出去）。
+    db_path = tmp_path / "actions.db"
+    c = destructive_action.open_connection(db_path)
+    destructive_action.init_schema(
+        c, __import__("pathlib").Path(__file__).resolve().parents[2] / "db" / "schema.sql"
+    )
+    migrations.phase3_migrate(c)
+    migrations.phase4_migrate(c)
+    migrations.phase5_migrate(c)
+    c.close()
+    monkeypatch.setattr(app_module, "DB_PATH", db_path)
     app_module.app.config["TESTING"] = True
     return app_module.app.test_client()
 

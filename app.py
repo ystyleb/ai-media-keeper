@@ -5899,6 +5899,23 @@ def _cron_qbit_auto_organize():
                 )
                 return
 
+            # 1.5 防复发：把「文件现已识别」的 skipped_needs_identify 回收为 pending，
+            # 本周期 filter_unprocessed 会带上它重新 dispatch（修复「下载早于扫描/识别」
+            # 导致 needs_identify → 单向终态 → 文件识别好了也永不回头的卡死）。
+            try:
+                requeued = qbit_auto.requeue_resolved_skips(
+                    conn,
+                    resolve_fn=lambda cp: path_resolver.resolve(cp, ssh_exec),
+                    threshold=cfg.get("confidence_threshold", 0.85),
+                )
+                if requeued:
+                    logger.info(
+                        f"[auto-organize] requeued {len(requeued)} resolved skips → pending: "
+                        f"{[h[:8] for h in requeued]}"
+                    )
+            except Exception as e:
+                logger.error(f"[auto-organize] requeue_resolved_skips failed: {e}")
+
             # 2. 拉 qBit completed torrents
             try:
                 torrents = qbit.get_torrents()
