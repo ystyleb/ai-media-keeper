@@ -142,9 +142,18 @@ make tailwind-build              # 编译 CSS（首次会自动下 Tailwind bina
 
 ### 3. 启动（零环境变量）
 
+推荐用一键脚本（自动使用项目 `.venv`、缺依赖自动补装，避免误用全局 Python）：
+
 ```bash
-python3 app.py
+./start.sh            # 前台启动，Ctrl+C 停止
+./start.sh -d         # 后台启动（日志写 logs/app.log）
+./start.sh stop       # 停止后台服务
+./start.sh restart    # 重启
 ```
+
+> ⚠️ 若直接 `python3 app.py`，**务必先 `source .venv/bin/activate`** ——
+> 否则会用全局 Python，常因缺 `openai` 等依赖导致 DeepSeek 测试等功能报
+> "openai SDK not installed"。
 
 首次启动会**自动生成 API token**并打印到 stderr，类似：
 
