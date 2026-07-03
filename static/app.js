@@ -1055,6 +1055,178 @@ function renderMetadataCard(container, data) {
 }
 
 
+// ==================== 首页「最近活动」人工处理抽屉 ====================
+// 复用 renderMetadataCard（识别+选候选+绑定）+ openOrganizeBatch/openOrganize（整理）
+
+const _AH_VIDEO_EXTS = ["mkv", "mp4", "avi", "mov", "wmv", "flv", "m4v", "ts", "m2ts", "iso"];
+
+function _ahIsVideoFile(p) {
+    const lower = (p || "").toLowerCase();
+    return _AH_VIDEO_EXTS.some(ext => lower.endsWith("." + ext));
+}
+
+function _ahBasename(p) {
+    return (p || "").replace(/\/+$/, "").split("/").pop() || (p || "");
+}
+
+const _AH_STATUS_LABEL = {
+    skipped_needs_identify: "待识别",
+    skipped_low_confidence: "识别置信度低",
+    failed: "整理失败",
+};
+
+// 点击「需人工处理」的活动 → 右侧抽屉逐文件识别/绑定 + 一键整理
+async function openActivityHandler(el) {
+    const contentPath = el.dataset.contentPath;
+    if (!contentPath) return;
+    const status = el.dataset.status || "";
+    const label = el.dataset.label || _ahBasename(contentPath);
+
+    // 打开抽屉 + 设标题（走 base.html 的 open-drawer window 事件 → Alpine）
+    const titleEl = document.getElementById("drawer-title");
+    if (titleEl) titleEl.textContent = "处理：" + label;
+    window.dispatchEvent(new CustomEvent("open-drawer"));
+
+    const root = document.getElementById("drawer-content");
+    if (!root) return;
+    const statusLabel = _AH_STATUS_LABEL[status] || status;
+    root.innerHTML = `
+        <div id="ah-root">
+            <div class="mb-3">
+                <div class="text-xs text-slate-400">任务</div>
+                <div class="text-slate-100 font-medium break-all">${_esc(label)}</div>
+                <div class="text-xs text-slate-400 mt-1">状态：${_esc(statusLabel)} · <span id="ah-progress">扫描文件中…</span></div>
+            </div>
+            <div id="ah-files"></div>
+            <div class="mt-4 pt-3 border-top border-secondary">
+                <button id="ah-organize-btn" class="btn btn-primary w-100" disabled>
+                    <i class="bi bi-box-arrow-in-down me-1"></i>整理到媒体库
+                </button>
+                <div class="text-xs text-slate-500 mt-2">识别完成后点此预览并整理（硬链接，安全可回退）</div>
+            </div>
+        </div>`;
+
+    const filesWrap = document.getElementById("ah-files");
+    const progressEl = document.getElementById("ah-progress");
+    const organizeBtn = document.getElementById("ah-organize-btn");
+
+    // 整理按钮：先关抽屉（否则 Bootstrap modal z-index 会被抽屉盖住）再开现有整理流程
+    const isDir = !_ahIsVideoFile(contentPath);
+    organizeBtn.addEventListener("click", () => {
+        window.dispatchEvent(new CustomEvent("close-drawer"));
+        // 等抽屉滑出动画结束再开 modal（约 150ms leave transition）
+        setTimeout(() => {
+            if (isDir) {
+                openOrganizeBatch(contentPath);
+            } else {
+                openOrganize(contentPath);
+            }
+        }, 180);
+    });
+
+    // 取文件列表：单文件种子直接构造，目录种子走 list-videos
+    let files = [];
+    try {
+        if (isDir) {
+            const res = await apiFetch(`${API_BASE}/api/metadata/list-videos?path=${encodeURIComponent(contentPath)}&max_depth=2&limit=200`);
+            const data = await res.json();
+            files = (data.videos || []).map(v => ({ path: v.path, name: v.name }));
+        }
+        if (files.length === 0) {
+            // 单文件，或目录里没扫到视频 → 用 content_path 本身兜底
+            files = [{ path: contentPath, name: _ahBasename(contentPath) }];
+        }
+    } catch (err) {
+        filesWrap.innerHTML = `<div class="alert alert-danger py-2 small mb-0">扫描文件失败：${_esc(err.message)}</div>`;
+        progressEl.textContent = "扫描失败";
+        return;
+    }
+
+    const identified = new Set();
+    const updateProgress = () => {
+        progressEl.textContent = `已识别 ${identified.size}/${files.length}`;
+        organizeBtn.disabled = identified.size === 0;
+    };
+    const markIdentified = (has, path) => {
+        if (has) identified.add(path);
+        else identified.delete(path);
+        updateProgress();
+    };
+    updateProgress();
+
+    for (const file of files) {
+        const card = createElement("div", { className: "border border-secondary rounded p-2 mb-2" });
+        const head = createElement("div", { className: "d-flex justify-content-between align-items-center gap-2 mb-2" });
+        head.innerHTML = `<div class="small text-slate-200 text-truncate" title="${_esc(file.path)}">${_esc(file.name)}</div>`;
+        const identifyBtn = createElement("button", {
+            className: "btn btn-sm btn-outline-info flex-shrink-0",
+            innerHTML: '<i class="bi bi-search me-1"></i>识别',
+        });
+        head.appendChild(identifyBtn);
+        card.appendChild(head);
+
+        const meta = createElement("div", { className: "ah-meta small" });
+        meta.__videoPath = file.path;  // renderMetadataCard 绑定候选时依赖
+        card.appendChild(meta);
+        filesWrap.appendChild(card);
+
+        // renderMetadataCard 内部点候选绑定成功后冒泡 metadata-bound → 标记本文件已识别
+        meta.addEventListener("metadata-bound", () => markIdentified(true, file.path));
+
+        // 点「识别」→ POST identify（调 TMDB+AI）→ 渲染候选让用户手动选
+        const runIdentify = async () => {
+            // 抢占标志：用户点识别后，迟到的首屏 cached 预载回调不得再覆盖 meta
+            meta.__identifyStarted = true;
+            identifyBtn.disabled = true;
+            identifyBtn.innerHTML = '<span class="spinner-border spinner-border-sm" style="width:12px;height:12px;"></span>';
+            meta.innerHTML = '<div class="text-secondary small">识别中…（TMDB + AI）</div>';
+            try {
+                const res = await apiFetch(`${API_BASE}/api/metadata/identify`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ path: file.path }),
+                });
+                const data = await res.json();
+                renderMetadataCard(meta, data);
+                markIdentified(Boolean(data.top_pick), file.path);
+                identifyBtn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>重新识别';
+            } catch (err) {
+                meta.innerHTML = `<div class="alert alert-danger py-1 px-2 small mb-0">识别失败：${_esc(err.message)}</div>`;
+                identifyBtn.innerHTML = '<i class="bi bi-search me-1"></i>识别';
+            } finally {
+                identifyBtn.disabled = false;
+            }
+        };
+        identifyBtn.addEventListener("click", runIdentify);
+
+        // 首次只读缓存（不主动调 TMDB）：已识别 → 直接展示；未识别 → 保留「识别」按钮
+        (async () => {
+            try {
+                const cres = await apiFetch(`${API_BASE}/api/metadata/cached?path=${encodeURIComponent(file.path)}`);
+                const cj = await cres.json();
+                if (meta.__identifyStarted) return;  // 用户已点识别，迟到的预载别覆盖
+                if (cj.cached && cj.top_pick) {
+                    renderMetadataCard(meta, cj);
+                    markIdentified(true, file.path);
+                    identifyBtn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>重新识别';
+                } else {
+                    meta.innerHTML = '<div class="text-secondary small"><i class="bi bi-info-circle me-1"></i>未识别，点右侧「识别」搜索匹配</div>';
+                }
+            } catch (err) {
+                if (meta.__identifyStarted) return;  // 同上
+                meta.innerHTML = '<div class="text-secondary small"><i class="bi bi-info-circle me-1"></i>未识别，点右侧「识别」搜索匹配</div>';
+            }
+        })();
+    }
+}
+
+// 不可整理的活动（不支持的类型 / 扫描失败）→ 仅弹提示
+function showActivityInfo(el) {
+    const note = el.dataset.note || "该任务无法自动处理";
+    window.dispatchEvent(new CustomEvent("toast", { detail: { severity: "warning", message: note } }));
+}
+
+
 async function showDetail(path) {
     const file = currentFiles.find(f => f.path === path);
     if (!file) return;

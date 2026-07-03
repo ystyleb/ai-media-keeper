@@ -17,7 +17,8 @@
     <script defer src="https://unpkg.com/alpinejs@3.13.10/dist/cdn.min.js"></script>
     {% block head_extra %}{% endblock %}
 </head>
-<body class="h-screen flex flex-col overflow-hidden" x-data="{ drawerOpen: false }">
+<body class="h-screen flex flex-col overflow-hidden" x-data="{ drawerOpen: false }"
+      x-on:open-drawer.window="drawerOpen = true" x-on:close-drawer.window="drawerOpen = false">
 
     <!-- Top region: sidebar + main -->
     <div class="flex-1 flex overflow-hidden">

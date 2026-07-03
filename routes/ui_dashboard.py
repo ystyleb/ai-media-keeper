@@ -143,11 +143,16 @@ def _fmt_ts(ts: int | None) -> str:
     return time.strftime("%m-%d %H:%M", time.localtime(int(ts)))
 
 
+# organize 任务里需要人工处理的状态 → 首页活动卡可点开「处理抽屉」
+_ACTIONABLE_ORGANIZE = {"skipped_needs_identify", "skipped_low_confidence", "failed"}
+
+
 @ui_dashboard_bp.route("/dashboard/activity", methods=["GET"])
 @_require_token
 def activity_card():
     """最近活动卡片: organize / scan recent runs 时间线."""
-    from app import get_db
+    from app import get_db, ssh_exec
+    from services import path_resolver
 
     conn = get_db()
     items: list[dict] = []
@@ -163,18 +168,36 @@ def activity_card():
         """
     ):
         ts = row["completed_at"] or row["created_at"]
+        status = row["status"]
+        # qBit 报的 content_path 是 QNAP /share/<alias> symlink；扫库/元数据端点都用
+        # canonical (/share/CACHEDEV*_DATA/...)。在此边界统一解析成 canonical，poster 查询
+        # 与下游 list-videos/cached/identify/organize 才对得上 namespace（resolve 有 5min
+        # 缓存 + SSH 失败安全回退原路径）。见 alias-vs-canonical 陷阱。
+        content_path = (
+            path_resolver.resolve(row["content_path"], ssh_exec)
+            if row["content_path"]
+            else row["content_path"]
+        )
         items.append(
             {
                 "ts": ts,
                 "ts_label": _fmt_ts(ts),
                 "kind": "organize",
                 "label": row["torrent_name"] or "(unknown)",
-                "status": row["status"],
+                "status": status,
                 "ok": row["files_succeeded"] or 0,
                 "fail": row["files_failed"] or 0,
                 "error": row["last_error"],
                 # 最多 10 条 × 2 查询，SQLite 本地 <20ms，30s 轮询可接受；量大时改批量 IN
-                "poster_url": _poster_for_content_path(conn, row["content_path"]),
+                "poster_url": _poster_for_content_path(conn, content_path),
+                # 人工处理入口：needs_identify / low_confidence / failed → 抽屉可操作
+                "content_path": content_path,
+                "actionable": status in _ACTIONABLE_ORGANIZE,
+                "action_note": (
+                    "该类型不支持自动整理到电影/剧集库"
+                    if status == "skipped_unsupported"
+                    else None
+                ),
             }
         )
 
@@ -200,6 +223,13 @@ def activity_card():
                 "fail": row["files_failed"] or 0,
                 "error": None,
                 "poster_url": None,
+                "content_path": None,
+                "actionable": False,
+                "action_note": (
+                    "全库扫描失败，可到扫描历史查看详情"
+                    if row["status"] == "failed"
+                    else None
+                ),
             }
         )
 

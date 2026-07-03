@@ -5,7 +5,11 @@
     {% for it in items %}
     {% set ok_states = ['succeeded', 'done'] %}
     {% set warn_states = ['skipped_low_confidence', 'skipped_needs_identify', 'skipped_unsupported'] %}
-    <div class="flex items-center gap-[11px] py-2 border-b last:border-b-0" style="border-color: rgba(42,33,80,.5)">
+    {% set clickable = it.actionable or it.action_note %}
+    <div class="flex items-center gap-[11px] py-2 border-b last:border-b-0{% if clickable %} cursor-pointer hover:bg-white/5 rounded-md px-1 -mx-1 transition-colors{% endif %}"
+         style="border-color: rgba(42,33,80,.5)"
+         {%- if it.actionable %} data-content-path="{{ it.content_path|e }}" data-status="{{ it.status }}" data-label="{{ it.label|e }}" onclick="openActivityHandler(this)"
+         {%- elif it.action_note %} data-note="{{ it.action_note|e }}" onclick="showActivityInfo(this)"{% endif %}>
         {% if it.poster_url %}
         <img src="{{ it.poster_url }}" alt="" loading="lazy"
              class="w-[34px] h-12 rounded-md object-cover shrink-0"
@@ -29,6 +33,7 @@
         {% elif it.status in ['running', 'organizing', 'pending'] %}<span class="nv-pill-gray">进行中…</span>
         {% else %}<span class="nv-pill-gray">{{ it.status }}</span>
         {% endif %}
+        {% if clickable %}<i class="bi bi-chevron-right text-ink-mute text-xs shrink-0" title="点击处理"></i>{% endif %}
     </div>
     {% endfor %}
     {% endif %}
