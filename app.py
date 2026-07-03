@@ -4050,9 +4050,7 @@ def test_deepseek_config():
     if not key:
         return jsonify({"ok": False, "message": "no key configured"}), 400
     try:
-        import openai
-
-        client = openai.OpenAI(api_key=key, base_url=llm.DEFAULT_BASE_URL, timeout=10)
+        client = llm.make_client(key, llm.DEFAULT_BASE_URL, timeout=10)
         resp = client.chat.completions.create(
             model=llm.DEFAULT_MODEL,
             max_tokens=10,
@@ -4120,9 +4118,7 @@ def _probe_deepseek() -> dict:
     if not key:
         return {"state": "not_configured", "message": "DeepSeek key 未配置"}
     try:
-        import openai
-
-        client = openai.OpenAI(api_key=key, base_url=llm.DEFAULT_BASE_URL, timeout=10)
+        client = llm.make_client(key, llm.DEFAULT_BASE_URL, timeout=10)
         client.chat.completions.create(
             model=llm.DEFAULT_MODEL,
             max_tokens=5,

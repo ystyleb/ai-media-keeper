@@ -118,6 +118,31 @@ def is_available(config_path: Path | str | None = None) -> bool:
     return bool(load_api_key(config_path))
 
 
+def make_client(api_key: str, base_url: str = DEFAULT_BASE_URL, timeout: float = 30):
+    """构造 OpenAI-compatible client（DeepSeek 默认）。
+
+    Single call site rule：openai SDK 只在本文件 lazy import（见模块 docstring）。
+
+    http_client 强制 trust_env=False —— 不继承 shell 的 http_proxy / all_proxy。
+    DeepSeek 国内直连即可，不该走翻墙代理（呼应 app.py 的 TMDB 专属代理隔离设计：
+    "LAN / DeepSeek 不受全局 http_proxy 污染"）。家用机常装 Clash / V2Ray，其
+    all_proxy=socks5://... 会让底层 httpx 尝试 SOCKS transport，缺 socksio 时抛
+    ImportError，被上层误报成 "openai SDK not installed"。需要墙外网关（真 OpenAI /
+    第三方）走代理时，应另配专属 proxy（参考 load_tmdb_proxy），不要靠全局 env proxy。
+
+    可能抛 ImportError（openai 真没装）——由调用方按 sdk_missing 优雅处理。
+    """
+    import httpx
+    import openai
+
+    return openai.OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=timeout,
+        http_client=httpx.Client(trust_env=False),
+    )
+
+
 def extract_title_from_filename(
     filename: str,
     *,
@@ -146,20 +171,17 @@ def extract_title_from_filename(
         return None, "no_filename"
     if not api_key:
         return None, "no_api_key"
-    try:
-        import openai
-    except ImportError:
-        return None, "sdk_missing"
-
     prompt = EXTRACT_TITLE_PROMPT_V1.format(filename=filename)
     try:
-        client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        client = make_client(api_key, base_url, timeout)
         resp = client.chat.completions.create(
             model=model,
             max_tokens=1500,  # reasoning 模式需要内部思考 token 预算，给宽裕
             temperature=0.1,
             messages=[{"role": "user", "content": prompt}],
         )
+    except ImportError:
+        return None, "sdk_missing"
     except Exception as e:
         msg = str(e)[:200]
         logger.error(f"[llm] extract_title call failed: {type(e).__name__}: {msg}")
@@ -250,12 +272,6 @@ def select_candidate(
     if not api_key:
         return LLMSelection(None, 0.0, "no_api_key", "")
 
-    # 懒 import：openai SDK 没装时优雅 fallback；其他模块不该直接 import
-    try:
-        import openai
-    except ImportError:
-        return LLMSelection(None, 0.0, "openai_sdk_missing", "")
-
     valid_ids = {c["id"] for c in candidates}
 
     # 精简 candidate 字段给 LLM 看（避免 prompt token 爆炸）
@@ -277,7 +293,7 @@ def select_candidate(
     )
 
     try:
-        client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        client = make_client(api_key, base_url, timeout)
         resp = client.chat.completions.create(
             model=model,
             max_tokens=2000,  # reasoning 模式 + 多候选时给宽裕预算
@@ -286,6 +302,8 @@ def select_candidate(
             # DeepSeek 支持 response_format={'type':'json_object'} 但有的网关不支持；
             # 我们靠 prompt 要求 JSON + markdown-fence 容忍的解析做兜底，更可移植
         )
+    except ImportError:
+        return LLMSelection(None, 0.0, "openai_sdk_missing", "")
     except Exception as e:
         logger.error(f"[llm] call failed: {e}")
         return LLMSelection(None, 0.0, f"llm_error: {type(e).__name__}", "")
