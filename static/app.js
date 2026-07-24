@@ -458,6 +458,18 @@ function renderFiles(files) {
                 openOrganizeBatch(file.path);
             });
             btnGroup.appendChild(batchBtn);
+
+            // 识别并整理：一键串联 identify → dir-preview → organize
+            const idOrgBtn = createElement("button", {
+                className: "nv-ghost-btn",
+                title: "识别并整理到媒体库（一键串联）"
+            });
+            idOrgBtn.innerHTML = '<i class="bi bi-stars"></i>';
+            idOrgBtn.addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                openIdentifyAndOrganize(file.path);
+            });
+            btnGroup.appendChild(idOrgBtn);
         } else {
             const infoBtn = createElement("button", {
                 className: "nv-ghost-btn",
@@ -2095,6 +2107,252 @@ function stopBatchIdentify() {
     batchAborted = true;
     document.getElementById("batch-stop-btn").disabled = true;
     document.getElementById("batch-stop-btn").innerHTML = '<i class="bi bi-stop-fill"></i> 停止中...';
+}
+
+
+// ==================== 识别并整理（一键串联）共享 helper ====================
+// 把 list-videos 的结果渲染进指定 tbody，逐个调 /api/metadata/identify，
+// 进度写进指定 progress-bar/text，完成后回调。复用于 batchIdentifyModal 和 organizeBatchModal 的 identify step。
+// idPrefix: DOM id 前缀（"batch" 或 "io"），避免两个 modal 的 id 撞车。
+let _ioAborted = false;
+
+async function runIdentifyPhase(idPrefix, videos, skipIdentified, onDone) {
+    const tbody = document.getElementById(`${idPrefix}-result-tbody`);
+    const rows = Array.from(tbody.querySelectorAll("tr"));
+    if (idPrefix === "io") { _ioAborted = false; } else { batchAborted = false; }
+    rows.forEach(r => { delete r.__identifyData; });
+
+    const total = rows.length;
+    let done = 0;
+    const updateProgress = () => {
+        const pct = total > 0 ? (done / total * 100) : 0;
+        document.getElementById(`${idPrefix}-progress-bar`).style.width = pct + "%";
+        document.getElementById(`${idPrefix}-progress-text`).textContent = `${done} / ${total}`;
+    };
+
+    for (let i = 0; i < rows.length; i++) {
+        if (idPrefix === "io" ? _ioAborted : batchAborted) break;
+        const row = rows[i];
+        const path = row.dataset.path;
+        const hasNfo = row.dataset.hasNfo === "1";
+        const idx = i;
+
+        if (skipIdentified && hasNfo) {
+            document.getElementById(`${idPrefix}-result-${idx}`).innerHTML =
+                '<span class="text-secondary">已跳过（有 .nfo）</span>';
+            done++;
+            updateProgress();
+            continue;
+        }
+
+        document.getElementById(`${idPrefix}-result-${idx}`).innerHTML =
+            '<span class="text-info"><span class="spinner-border spinner-border-sm me-1" style="width:10px;height:10px;border-width:1px;"></span>识别中…</span>';
+
+        try {
+            const res = await apiFetch(`${API_BASE}/api/metadata/identify`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path })
+            });
+            const data = await res.json();
+            row.__identifyData = data;
+            renderIdentifyRow(idPrefix, idx, row, data);
+        } catch (err) {
+            document.getElementById(`${idPrefix}-result-${idx}`).innerHTML =
+                `<span class="text-danger">错误: ${_esc(err.message)}</span>`;
+        }
+        done++;
+        updateProgress();
+    }
+
+    if (onDone) onDone(videos, rows);
+}
+
+
+// 识别行渲染（共享，idPrefix 决定 DOM id 命名空间）
+function renderIdentifyRow(idPrefix, idx, row, data) {
+    const top = data.top_pick;
+    const resultEl = document.getElementById(`${idPrefix}-result-${idx}`);
+    const confEl = document.getElementById(`${idPrefix}-conf-${idx}`);
+    const sourceEl = document.getElementById(`${idPrefix}-source-${idx}`);
+
+    const pickLabel = {
+        single_exact: "单候选",
+        heuristic: "启发式",
+        llm: "AI",
+        manual: "手动",
+        needs_review: "待复核"
+    }[data.pick_source] || data.pick_source || "?";
+
+    if (top) {
+        const tdPoster = row.cells[0];
+        if (top.poster_url) {
+            tdPoster.innerHTML = `<img src="${top.poster_url}" style="width:50px;height:auto;border-radius:3px;"/>`;
+        }
+        const epLine = data.parse?.season && data.parse?.episode
+            ? ` <small class="text-secondary">S${String(data.parse.season).padStart(2,"0")}E${String(data.parse.episode).padStart(2,"0")}</small>` : "";
+        resultEl.innerHTML = `<span class="text-success">✓ ${_esc(top.title)}</span>${top.original_title && top.original_title !== top.title ? ` <small class="text-secondary">(${_esc(top.original_title)})</small>` : ""}${epLine} <small class="text-secondary">${top.year || "?"} · ⭐${top.vote_average?.toFixed(1) || "—"}</small>`;
+        confEl.innerHTML = `<span class="text-success">${(data.confidence * 100).toFixed(0)}%</span>`;
+        sourceEl.innerHTML = `<span class="${data.pick_source === 'llm' ? 'text-info' : 'text-secondary'}">${pickLabel}</span>`;
+    } else {
+        const candCount = (data.candidates || []).length;
+        resultEl.innerHTML = `<span class="text-warning">⚠ 待复核（${candCount} 候选）</span> <small class="text-secondary">${_esc(data.reasoning?.slice(0, 80) || "")}</small>`;
+        confEl.innerHTML = `<span class="text-secondary">${(data.confidence * 100).toFixed(0)}%</span>`;
+        sourceEl.innerHTML = `<span class="text-warning">复核</span>`;
+    }
+}
+
+
+function stopIdentifyPhase() {
+    _ioAborted = true;
+    const btn = document.getElementById("io-stop-btn");
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="bi bi-stop-fill"></i> 停止中...'; }
+}
+
+
+// 打开 organizeBatchModal 的 identify step：列视频 → 渲染表格 → 等用户点「开始识别」
+async function openIdentifyAndOrganize(dirPath) {
+    _initBatchModal();
+    const requestId = ++_batchRequestSeq;
+    _batchState = { request_id: requestId, dir_path: dirPath, mode: "identify_and_organize" };
+    _ioAborted = false;  // 重置中止标志（防上次会话残留）
+
+    // reset footer buttons — identify 阶段只显示 cancel
+    ["batch-next-btn", "batch-confirm-btn", "batch-abort-btn"].forEach((id) => {
+        document.getElementById(id).style.display = "none";
+    });
+    document.getElementById("batch-cancel-btn").style.display = "inline-block";
+    document.getElementById("io-skip-btn").style.display = "none";
+    document.getElementById("batch-modal-subtitle").textContent = dirPath;
+    document.getElementById("io-summary").innerHTML =
+        '<span class="text-secondary"><i class="bi bi-hourglass-split me-1"></i>扫描视频文件中...</span>';
+    document.getElementById("io-progress-bar").style.width = "0%";
+    document.getElementById("io-progress-text").textContent = "0 / 0";
+    document.getElementById("io-result-tbody").innerHTML = "";
+    document.getElementById("io-start-btn").disabled = true;
+    document.getElementById("io-start-btn").style.display = "inline-block";
+    document.getElementById("io-start-btn").innerHTML = '<i class="bi bi-play-fill"></i> 开始识别';
+    document.getElementById("io-stop-btn").style.display = "none";
+    _showBatchStep("identify");
+    batchModal.show();
+
+    try {
+        const url = `${API_BASE}/api/metadata/list-videos?path=${encodeURIComponent(dirPath)}&max_depth=2&limit=200`;
+        const res = await apiFetch(url);
+        if (requestId !== _batchRequestSeq) return;
+        if (!res.ok) {
+            const body = await res.json();
+            document.getElementById("io-summary").innerHTML =
+                `<span class="text-danger">扫描失败: ${_esc(body.error || "unknown")}</span>`;
+            return;
+        }
+        const data = await res.json();
+        if (requestId !== _batchRequestSeq) return;
+        const videos = data.videos || [];
+        _batchState.videos = videos;
+
+        if (videos.length === 0) {
+            document.getElementById("io-summary").innerHTML =
+                '<span class="text-warning">该目录没有视频文件（mkv/mp4/...）。请进入有视频的目录后再试。</span>';
+            return;
+        }
+
+        const skipNfoCount = videos.filter(v => v.has_nfo).length;
+        const totalSize = videos.reduce((s, v) => s + v.size_bytes, 0);
+        let summary = `找到 ${videos.length} 个视频文件 · 总计 ${humanSize(totalSize)}`;
+        if (skipNfoCount > 0) summary += ` · ${skipNfoCount} 个已有 .nfo`;
+        if (data.truncated) summary += ` · ⚠ 超过 200 上限被截断`;
+        document.getElementById("io-summary").innerHTML = summary;
+
+        // 渲染初始表（每行 pending）
+        const tbody = document.getElementById("io-result-tbody");
+        tbody.innerHTML = "";
+        videos.forEach((v, idx) => {
+            const tr = createElement("tr");
+            const tdPoster = createElement("td");
+            tdPoster.innerHTML = `<div style="width:50px;height:75px;background:#222;border-radius:3px;"></div>`;
+            tr.appendChild(tdPoster);
+
+            const tdName = createElement("td");
+            const nfoBadge = v.has_nfo ? '<span class="badge bg-secondary ms-1" style="font-size:9px;">NFO</span>' : '';
+            tdName.innerHTML = `<div class="text-truncate" style="max-width:520px;">${_esc(v.name)}${nfoBadge}</div><small class="text-secondary" id="io-result-${idx}">等待中…</small>`;
+            tr.appendChild(tdName);
+
+            tr.appendChild(createElement("td", { innerHTML: `<span id="io-conf-${idx}" class="text-secondary">—</span>` }));
+            tr.appendChild(createElement("td", { innerHTML: `<span id="io-source-${idx}" class="text-secondary">—</span>` }));
+
+            tr.dataset.path = v.path;
+            tr.dataset.hasNfo = v.has_nfo ? "1" : "0";
+            tbody.appendChild(tr);
+        });
+
+        document.getElementById("io-start-btn").disabled = false;
+        document.getElementById("io-progress-text").textContent = `0 / ${videos.length}`;
+        document.getElementById("io-skip-btn").style.display = "inline-block";
+    } catch (err) {
+        if (requestId !== _batchRequestSeq) return;
+        document.getElementById("io-summary").innerHTML =
+            `<span class="text-danger">扫描失败: ${_esc(err.message)}</span>`;
+    }
+}
+
+
+// 用户点「开始识别」→ 跑共享识别 phase → 完成后自动进 dashboard
+async function startIdentifyPhase() {
+    if (!_batchState || !_batchState.videos) return;
+    const videos = _batchState.videos;
+    const skipIdentified = document.getElementById("io-skip-identified").checked;
+
+    document.getElementById("io-start-btn").style.display = "none";
+    document.getElementById("io-stop-btn").style.display = "inline-block";
+    document.getElementById("io-skip-btn").style.display = "none";
+
+    await runIdentifyPhase("io", videos, skipIdentified, () => {
+        // modal 中途关了 → _batchState 被清空，不碰已拆毁的 DOM
+        if (!_batchState) return;
+        const stopBtn = document.getElementById("io-stop-btn");
+        if (stopBtn) { stopBtn.style.display = "none"; stopBtn.disabled = false; stopBtn.innerHTML = '<i class="bi bi-stop-fill"></i> 停止'; }
+        const startBtn = document.getElementById("io-start-btn");
+        if (startBtn) { startBtn.style.display = "inline-block"; startBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> 重新识别'; startBtn.disabled = false; }
+        // 识别完 → 自动进 dashboard；中止或 modal 已关则不自动跳
+        if (!_ioAborted) _proceedToDashboard();
+    });
+}
+
+
+// 跳过识别，直接整理（用户点 io-skip-btn 或识别完自动调）
+function _proceedToDashboard() {
+    if (!_batchState || !_batchState.dir_path) return;
+    const dirPath = _batchState.dir_path;
+    const requestId = ++_batchRequestSeq;
+    _batchState.request_id = requestId;
+
+    document.getElementById("io-skip-btn").style.display = "none";
+    document.getElementById("batch-dashboard-body").innerHTML =
+        '<div class="text-secondary py-4 text-center"><i class="bi bi-hourglass-split"></i> 扫描目录中...</div>';
+    _showBatchStep("dashboard");
+
+    (async () => {
+        try {
+            const url = `${API_BASE}/api/organize/dir-preview?path=${encodeURIComponent(dirPath)}&max_depth=2&limit=500`;
+            const res = await apiFetch(url);
+            if (requestId !== _batchRequestSeq) return;
+            if (!res.ok) {
+                const body = await res.json();
+                document.getElementById("batch-dashboard-body").innerHTML =
+                    `<div class="alert alert-warning mb-0"><strong>无法扫描:</strong> ${_esc(body.error || "unknown")}<br>${_esc(body.message || "")}</div>`;
+                return;
+            }
+            const body = await res.json();
+            if (requestId !== _batchRequestSeq) return;
+            _batchState.dashboard = body;
+            renderBatchDashboard(body);
+        } catch (err) {
+            if (requestId !== _batchRequestSeq) return;
+            document.getElementById("batch-dashboard-body").innerHTML =
+                `<div class="text-danger py-3 text-center">网络错误: ${_esc(err.message)}</div>`;
+        }
+    })();
 }
 
 
@@ -4627,26 +4885,33 @@ function _initBatchModal() {
     if (batchModal) return;
     batchModal = new bootstrap.Modal(document.getElementById("organizeBatchModal"));
     document.getElementById("organizeBatchModal").addEventListener("hidden.bs.modal", () => {
-        // stale response 拦截 + 清 polling timer
+        // stale response 拦截 + 清 polling timer + 中止 identify phase
         ++_batchRequestSeq;
+        _ioAborted = true;
         if (_batchState && _batchState.polling_timer) {
             clearTimeout(_batchState.polling_timer);
         }
         _batchState = null;
-        ["batch-next-btn", "batch-confirm-btn", "batch-abort-btn"].forEach((id) => {
+        ["batch-next-btn", "batch-confirm-btn", "batch-abort-btn", "io-skip-btn"].forEach((id) => {
             const b = document.getElementById(id);
             if (b) b.style.display = "none";
         });
+        // 恢复 identify step 的初始按钮态（下次打开时干净）
+        const ioStart = document.getElementById("io-start-btn");
+        if (ioStart) { ioStart.style.display = "inline-block"; ioStart.disabled = true; ioStart.innerHTML = '<i class="bi bi-play-fill"></i> 开始识别'; }
+        const ioStop = document.getElementById("io-stop-btn");
+        if (ioStop) { ioStop.style.display = "none"; ioStop.disabled = false; ioStop.innerHTML = '<i class="bi bi-stop-fill"></i> 停止'; }
     });
     // bind footer button click handlers
     document.getElementById("batch-next-btn").addEventListener("click", proceedToBatchPreview);
     document.getElementById("batch-confirm-btn").addEventListener("click", confirmBatchOrganize);
     document.getElementById("batch-abort-btn").addEventListener("click", abortBatchOrganize);
+    document.getElementById("io-skip-btn").addEventListener("click", _proceedToDashboard);
 }
 
 
 function _showBatchStep(step) {
-    ["dashboard", "preview", "progress"].forEach((s) => {
+    ["identify", "dashboard", "preview", "progress"].forEach((s) => {
         const pane = document.getElementById(`batch-step-${s}`);
         if (pane) pane.style.display = s === step ? "block" : "none";
     });

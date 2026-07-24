@@ -682,6 +682,41 @@
                         data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
+                <!-- Step 0: identify phase (识别并整理 — 独立命名空间 id 前缀 io- 避免与 batchIdentifyModal 撞) -->
+                <div id="batch-step-identify" style="display:none;">
+                    <div id="io-summary" class="mb-3 small text-secondary"></div>
+                    <div class="d-flex align-items-center gap-3 mb-3">
+                        <div class="progress flex-grow-1" style="height:10px;background:var(--surface-2);">
+                            <div id="io-progress-bar" class="progress-bar bg-info" role="progressbar" style="width:0%;"></div>
+                        </div>
+                        <span id="io-progress-text" class="small text-secondary text-nowrap">0 / 0</span>
+                        <button id="io-start-btn" class="btn btn-sm btn-primary" onclick="startIdentifyPhase()" disabled>
+                            <i class="bi bi-play-fill"></i> 开始识别
+                        </button>
+                        <button id="io-stop-btn" class="btn btn-sm btn-outline-warning" onclick="stopIdentifyPhase()" style="display:none;">
+                            <i class="bi bi-stop-fill"></i> 停止
+                        </button>
+                    </div>
+                    <div class="form-check small mb-2">
+                        <input class="form-check-input" type="checkbox" id="io-skip-identified" checked>
+                        <label class="form-check-label text-secondary" for="io-skip-identified">
+                            跳过已识别 / 已有 .nfo 的文件（减少重复 API 调用）
+                        </label>
+                    </div>
+                    <div style="max-height:45vh;overflow-y:auto;">
+                        <table class="table table-sm" id="io-result-table">
+                            <thead style="position:sticky;top:0;background:var(--surface);">
+                                <tr>
+                                    <th style="width:60px;">海报</th>
+                                    <th>文件 / 识别结果</th>
+                                    <th style="width:90px;">置信</th>
+                                    <th style="width:60px;">方式</th>
+                                </tr>
+                            </thead>
+                            <tbody id="io-result-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
                 <!-- Step 1: dir-preview dashboard -->
                 <div id="batch-step-dashboard" style="display:none;">
                     <div id="batch-dashboard-body">
@@ -704,6 +739,8 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" id="batch-cancel-btn"
                         data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-outline-info" id="io-skip-btn"
+                        style="display:none;">跳过识别，直接整理</button>
                 <button type="button" class="btn btn-primary" id="batch-next-btn"
                         style="display:none;">下一步：审 plan</button>
                 <button type="button" class="btn btn-success" id="batch-confirm-btn"

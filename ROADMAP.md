@@ -73,6 +73,13 @@ Phase 4A 是单文件 manual organize。**Phase 4B** 把单步骤扩到一次性
   * step 2 preview：紧凑 table + checkbox + 状态徽章 + 默认全勾 will_link；already_linked/conflict readonly disabled；全选/全不选 toggle
   * step 3 progress：进度条 + status_counts + current_item + failed items 折叠列表 + abort 按钮
   * request seq 防 stale response（codex r1 B2 模式）+ modal hidden 清 polling timer
+- **4B.6 识别并整理（一键串联，前端 only）**：
+  * 文件浏览器目录行新增「识别并整理」按钮（stars icon，紧挨「整理目录」）
+  * `organizeBatchModal` 新增 Step 0 identify pane（`io-` 前缀 DOM id 避免与 `batchIdentifyModal` 撞）：list-videos → 逐个 identify（共享 `runIdentifyPhase` helper）→ 自动进 dashboard
+  * 零后端改动：复用 `/api/metadata/list-videos` + `/api/metadata/identify` + `/api/organize/dir-preview` + `/api/action/preview` + `/api/action/confirm` 五个现有 API
+  * 抽 `runIdentifyPhase(idPrefix, videos, skipIdentified, onDone)` 共享 helper — 新 identify step 用此 helper；旧 `batchIdentifyModal` 的 `startBatchIdentify` 待 Phase 2 迁移复用（当前仍有独立循环）
+  * 「跳过识别，直接整理」按钮 → 跳过 Step 0 直进 dashboard（等同原「整理目录」入口）
+  * 暂住 legacy modal，待视觉重设计 modal→drawer 迁移时一并搬走（spec 3.4 目标是右侧 drawer）
 - **4B.5 端到端冒烟 + 6 轮 backend codex review + 文档**：
   * 6 轮 backend codex review 累计 7 BLOCKER + 10 IMPORTANT + 5 NIT 全修
   * 真机端到端冒烟见 README「整理到媒体库」section

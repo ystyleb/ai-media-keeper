@@ -41,6 +41,11 @@ AI 原生的影视资源管理器（Phase 5 ship — MCP server + 开源就绪�
   * **Step 3 progress**：后台 worker 跑 + 前端 polling 2s/次 + 进度条 + status_counts + current_item + 失败项折叠 + 中止按钮
   * 单批上限 500 文件；items ≤ 5 走 inline 同步，> 5 走 background + polling
   * 「全局唯一 active organize」契约：background + inline 共用同一 active lock，防硬链接 / NFO / qBit 副作用并发
+- ⭐ **识别并整理（一键串联）**：文件浏览器目录行「识别并整理」按钮（stars icon）→ 在批量整理 modal 前插入 **Step 0 identify**：
+  * 自动列出目录下所有视频文件 → 逐个调 `/api/metadata/identify`（复用批量识别逻辑，进度条 + 跳过已有 .nfo）→ 识别完自动进 dashboard → 走现有三 step organize 流程
+  * 零后端改动（复用 list-videos / identify / dir-preview / action preview+confirm 五个现有 API）
+  * 「跳过识别，直接整理」按钮 → 跳过 Step 0 直进 dashboard（等同原「整理目录」）
+  * 暂住 legacy modal，待视觉重设计 modal→drawer 迁移时一并搬走
 - 🎬 **自动目录约定**：电影 → `MOVIES_ROOT/<Title (Year)>/<basename>.mkv`，剧集 → `TV_ROOT/<Series (Year)>/Season NN/<basename>.mkv`，`tvshow.nfo` 落 series 根（Plex/Emby 标准结构）
 - 📝 **NFO 自动生成**：从 TMDB cache 构造 NFOPayload → 写 `<movie>` / `<episodedetails>` / `<tvshow>`（含 uniqueid + plot + cast + genres + rating）。已有 NFO 不覆盖（atomic create-only ln 保证）
 - 🎞️ **Episode-specific NFO**（ROADMAP #9）：`episodedetails.nfo` 的 `<plot>` / `<aired>` / `<thumb>` 用**单集**数据（TMDB `/tv/{id}/season/{N}/episode/{N}` 拉 per-episode overview / air_date / still），不是 series 整体简介。Lazy enrich — 只在真 organize 时补全；guarded UPDATE 防 scanner 并发 drift；Pattern D 保 hardlink 成功不被 NFO 失败污染
