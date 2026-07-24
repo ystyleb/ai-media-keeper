@@ -2075,10 +2075,20 @@ async function startBatchIdentify() {
                 body: JSON.stringify({ path })
             });
             const data = await res.json();
-            row.__identifyData = data;
-            renderBatchRow(idx, row, data);
+            if (!res.ok) {
+                const errMsg = data.error || `HTTP ${res.status}`;
+                const detail = data.detail ? `：${data.detail}` : "";
+                const retryable = data.retryable ? ' <span class="badge bg-warning text-dark ms-1" style="font-size:9px;">可重试</span>' : "";
+                document.getElementById(`batch-result-${idx}`).innerHTML =
+                    `<span class="text-danger">✗ ${errMsg}${detail}${retryable}</span>`;
+                row.__identifyError = true;
+            } else {
+                row.__identifyData = data;
+                renderBatchRow(idx, row, data);
+            }
         } catch (err) {
-            document.getElementById(`batch-result-${idx}`).innerHTML = `<span class="text-danger">错误: ${err.message}</span>`;
+            document.getElementById(`batch-result-${idx}`).innerHTML = `<span class="text-danger">✗ 网络错误: ${err.message}</span>`;
+            row.__identifyError = true;
         }
         done++;
         updateProgress();
@@ -2155,14 +2165,43 @@ async function runIdentifyPhase(idPrefix, videos, skipIdentified, onDone) {
                 body: JSON.stringify({ path })
             });
             const data = await res.json();
-            row.__identifyData = data;
-            renderIdentifyRow(idPrefix, idx, row, data);
+            if (!res.ok) {
+                // 服务端错误（400 invalid path / 503 provider unavailable 等）
+                // 不能当正常结果传给 renderer，否则 error body 无 top_pick → 误显示「待复核（0候选）」
+                const errMsg = data.error || `HTTP ${res.status}`;
+                const detail = data.detail ? `：${_esc(data.detail)}` : "";
+                const retryable = data.retryable ? ' <span class="badge bg-warning text-dark ms-1" style="font-size:9px;">可重试</span>' : "";
+                document.getElementById(`${idPrefix}-result-${idx}`).innerHTML =
+                    `<span class="text-danger">✗ ${_esc(errMsg)}${detail}${retryable}</span>`;
+                row.__identifyError = true;
+            } else {
+                row.__identifyData = data;
+                renderIdentifyRow(idPrefix, idx, row, data);
+            }
         } catch (err) {
             document.getElementById(`${idPrefix}-result-${idx}`).innerHTML =
-                `<span class="text-danger">错误: ${_esc(err.message)}</span>`;
+                `<span class="text-danger">✗ 网络错误: ${_esc(err.message)}</span>`;
+            row.__identifyError = true;
         }
         done++;
         updateProgress();
+    }
+
+    // 汇总统计（成功 / 待复核 / 失败 / 跳过）
+    const succeeded = rows.filter(r => r.__identifyData && r.__identifyData.top_pick).length;
+    const needsReview = rows.filter(r => r.__identifyData && !r.__identifyData.top_pick).length;
+    const failed = rows.filter(r => r.__identifyError).length;
+    const skipped = rows.length - succeeded - needsReview - failed;
+    const aborted = idPrefix === "io" ? _ioAborted : batchAborted;
+    const summaryEl = document.getElementById(`${idPrefix}-summary`);
+    if (summaryEl) {
+        const parts = [];
+        if (succeeded > 0) parts.push(`<span class="text-success">✓ ${succeeded} 识别成功</span>`);
+        if (needsReview > 0) parts.push(`<span class="text-warning">⚠ ${needsReview} 待复核</span>`);
+        if (failed > 0) parts.push(`<span class="text-danger">✗ ${failed} 失败</span>`);
+        if (skipped > 0) parts.push(`<span class="text-secondary">⊘ ${skipped} 跳过</span>`);
+        if (aborted) parts.push(`<span class="text-warning">已中止</span>`);
+        summaryEl.innerHTML = parts.join(" · ") || `<span class="text-secondary">共 ${rows.length} 个文件</span>`;
     }
 
     if (onDone) onDone(videos, rows);
