@@ -352,6 +352,18 @@ def evaluate_confidence_gate(
                 }
             )
             continue
+        # media_type 已知但未绑 TMDB (needs_review/failed) → 也是 needs_identify，
+        # 不是 low_confidence（是"没识别"而非"识别置信度低"）。
+        if cached.metadata_status in ("needs_review", "failed"):
+            needs_identify.append(
+                {
+                    "path": p,
+                    "reason": f"cache exists but metadata_status={cached.metadata_status!r} (not identified)",
+                    "confidence": cached.metadata_confidence,
+                    "media_type": cached.media_type,
+                }
+            )
+            continue
         if cached.media_type not in SUPPORTED_MEDIA_TYPES:
             unsupported.append(
                 {

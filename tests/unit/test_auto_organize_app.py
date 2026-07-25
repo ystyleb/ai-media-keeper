@@ -44,6 +44,7 @@ class _CachedStub:
     episode_number: int | None = None
     inode: int | None = None
     mtime: int | None = None
+    metadata_status: str = "ok"
 
 
 def _src_stat_ok(p, inode=100, size=1024, mtime=1000):

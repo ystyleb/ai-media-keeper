@@ -373,6 +373,7 @@ class _CachedStub:
     media_type: str | None
     metadata_confidence: float | None
     path: str = ""
+    metadata_status: str = "ok"
 
 
 def _patch_cache(monkeypatch, cache_map):
@@ -421,6 +422,28 @@ def test_gate_cache_exists_but_media_type_none_returns_needs_identify(conn, monk
     out = qbit_auto.evaluate_confidence_gate(conn, ["/x.mkv"], threshold=0.85)
     assert out["status"] == "skipped_needs_identify"
     assert "media_type is None" in out["blockers"][0]["reason"]
+
+
+def test_gate_needs_review_with_tv_type_returns_needs_identify(conn, monkeypatch):
+    """media_type='tv' 但 metadata_status='needs_review' (未绑 TMDB) → needs_identify，
+    不是 low_confidence（是"没识别"而非"识别置信度低"）。"""
+    _patch_cache(
+        monkeypatch,
+        {
+            "/x.mkv": (
+                _CachedStub(
+                    media_type="tv",
+                    metadata_confidence=0.0,
+                    metadata_status="needs_review",
+                ),
+                "hit",
+            ),
+        },
+    )
+    out = qbit_auto.evaluate_confidence_gate(conn, ["/x.mkv"], threshold=0.85)
+    assert out["status"] == "skipped_needs_identify"
+    assert "needs_review" in out["blockers"][0]["reason"]
+    assert out["blockers"][0]["media_type"] == "tv"
 
 
 def test_gate_unsupported_media_type_returns_unsupported(conn, monkeypatch):
@@ -1010,8 +1033,15 @@ def test_list_history_accepts_all_valid_statuses(conn):
 # ── dispatch_one 自动识别 (Task 3) ───
 
 
-def _dispatch_with_gates(conn, monkeypatch, gate_sequence, *, identify_fn=None,
-                         auto_threshold=0.95, build_status="started"):
+def _dispatch_with_gates(
+    conn,
+    monkeypatch,
+    gate_sequence,
+    *,
+    identify_fn=None,
+    auto_threshold=0.95,
+    build_status="started",
+):
     """跑 dispatch_one，monkeypatch evaluate_confidence_gate 返回受控 gate 序列。
     返回 (out, build_calls)。"""
     gates = iter(gate_sequence)
@@ -1046,8 +1076,12 @@ def test_dispatch_auto_identify_high_conf_organizes(conn, monkeypatch):
         conn,
         monkeypatch,
         [
-            {"status": "skipped_needs_identify", "reason": "no cache",
-             "blockers": [{"path": "/share/CACHEDEV2_DATA/downloads/m.mkv"}], "checked_count": 1},
+            {
+                "status": "skipped_needs_identify",
+                "reason": "no cache",
+                "blockers": [{"path": "/share/CACHEDEV2_DATA/downloads/m.mkv"}],
+                "checked_count": 1,
+            },
             {"status": "pass", "reason": "ok", "blockers": [], "checked_count": 1},
         ],
         identify_fn=identify_fn,
@@ -1063,10 +1097,18 @@ def test_dispatch_auto_identify_low_conf_skips(conn, monkeypatch):
         conn,
         monkeypatch,
         [
-            {"status": "skipped_needs_identify", "reason": "no cache",
-             "blockers": [{"path": "/share/CACHEDEV2_DATA/downloads/m.mkv"}], "checked_count": 1},
-            {"status": "skipped_low_confidence", "reason": "0.9 < 0.95",
-             "blockers": [], "checked_count": 1},
+            {
+                "status": "skipped_needs_identify",
+                "reason": "no cache",
+                "blockers": [{"path": "/share/CACHEDEV2_DATA/downloads/m.mkv"}],
+                "checked_count": 1,
+            },
+            {
+                "status": "skipped_low_confidence",
+                "reason": "0.9 < 0.95",
+                "blockers": [],
+                "checked_count": 1,
+            },
         ],
         identify_fn=lambda paths: {"provider_unavailable": False},
     )
@@ -1081,8 +1123,12 @@ def test_dispatch_auto_identify_provider_unavailable_locks(conn, monkeypatch):
         conn,
         monkeypatch,
         [
-            {"status": "skipped_needs_identify", "reason": "no cache",
-             "blockers": [{"path": "/share/CACHEDEV2_DATA/downloads/m.mkv"}], "checked_count": 1},
+            {
+                "status": "skipped_needs_identify",
+                "reason": "no cache",
+                "blockers": [{"path": "/share/CACHEDEV2_DATA/downloads/m.mkv"}],
+                "checked_count": 1,
+            },
         ],
         identify_fn=lambda paths: {"provider_unavailable": True},
     )
@@ -1098,8 +1144,12 @@ def test_dispatch_no_identify_fn_unchanged(conn, monkeypatch):
         conn,
         monkeypatch,
         [
-            {"status": "skipped_needs_identify", "reason": "no cache",
-             "blockers": [{"path": "/x"}], "checked_count": 1},
+            {
+                "status": "skipped_needs_identify",
+                "reason": "no cache",
+                "blockers": [{"path": "/x"}],
+                "checked_count": 1,
+            },
         ],
         identify_fn=None,
     )

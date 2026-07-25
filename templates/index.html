@@ -297,6 +297,18 @@
         .dedup-candidate.keep-recommended {
             background: rgba(34, 197, 94, 0.08);
         }
+        /* Dedup checkbox: visible on dark background (Tailwind preflight resets appearance) */
+        .dedup-candidate input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+            accent-color: #7c3aed;
+            flex-shrink: 0;
+        }
+        .dedup-candidate input[type="checkbox"]:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
         .dedup-candidate .keep-badge {
             background: #22c55e;
             color: #fff;
@@ -1002,9 +1014,9 @@
             </select>
 
             <select class="v-select" id="sort-by" onchange="sortFiles()">
+                <option value="modified">按时间</option>
                 <option value="name">按名称</option>
                 <option value="size">按大小</option>
-                <option value="modified">按时间</option>
                 <option value="hardlinks">按链接数</option>
             </select>
 
@@ -1117,6 +1129,9 @@
                 </button>
                 <button class="tb-btn" onclick="loadWatchedStale()">
                     <i class="bi bi-clock-history"></i> 已看完候选
+                </button>
+                <button class="tb-btn" id="dedup-select-all-btn" onclick="toggleDedupSelectAll()">
+                    <i class="bi bi-check2-square"></i> 全选
                 </button>
                 <button class="sb-btn sb-btn-danger" id="dedup-delete-btn" disabled onclick="deleteDedupSelection()">
                     <i class="bi bi-trash3"></i> 删除选中

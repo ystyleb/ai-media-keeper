@@ -220,6 +220,16 @@ function createElement(tag, attrs = {}, children = []) {
             });
         } else if (key.startsWith("on")) {
             el.addEventListener(key.slice(2).toLowerCase(), value);
+        } else if (["disabled", "checked", "readonly", "selected", "hidden",
+                     "autofocus", "multiple", "required", "controls",
+                     "autoplay", "loop", "muted", "defaultChecked"].includes(key)) {
+            // Boolean HTML attributes: setAttribute("disabled", false) still disables
+            // (attribute presence = true per HTML spec). Only set when truthy.
+            if (value) {
+                el.setAttribute(key, "");
+            } else {
+                el.removeAttribute(key);
+            }
         } else {
             el.setAttribute(key, value);
         }
@@ -313,7 +323,13 @@ async function loadFiles(path) {
 
         currentFiles = data.files;
         updateBreadcrumb(path);
-        renderFiles(data.files);
+        // 应用当前 sort-by 选择（进目录/返回上级时保持排序，不重置成原始顺序）
+        const sortByEl = document.getElementById("sort-by");
+        if (sortByEl && sortByEl.value) {
+            sortFiles();
+        } else {
+            renderFiles(data.files);
+        }
     } catch (err) {
         showError("加载失败: " + err.message);
     } finally {
@@ -574,6 +590,8 @@ function sortFiles() {
     const sortBy = document.getElementById("sort-by").value;
 
     const sorted = [...currentFiles].sort((a, b) => {
+        // 目录永远排在文件前面（跟后端一致），不受 sort field 影响
+        if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
         if (sortBy === "name") return a.name.localeCompare(b.name);
         if (sortBy === "size") return b.size - a.size;
         if (sortBy === "modified") return b.modified.localeCompare(a.modified);
@@ -898,6 +916,16 @@ function renderMetadataCard(container, data) {
                 className: "text-info d-block mb-1",
                 innerHTML: '<i class="bi bi-cursor me-1"></i>点击其中一个候选手动绑定（覆盖待复核状态）',
             }));
+            // TV 集：显示"同时绑定同目录其他集"复选框（默认勾选）
+            const isEpisode = data.parse?.season != null && data.parse?.episode != null;
+            if (isEpisode) {
+                container.appendChild(createElement("div", {
+                    className: "form-check small mb-2",
+                    style: "padding-left: 1.5rem;",
+                    innerHTML: '<input type="checkbox" id="bind-apply-to-dir" checked class="form-check-input">' +
+                        '<label for="bind-apply-to-dir" class="form-check-label text-info ms-2">🔗 同时绑定同目录其他未识别的集</label>',
+                }));
+            }
         }
         const list = createElement("div", { className: "list-group small" });
         data.candidates.forEach(c => {
@@ -936,6 +964,9 @@ function renderMetadataCard(container, data) {
                         if (c.media_type === "tv") {
                             if (season != null) body.season = season;
                             if (episode != null) body.episode = episode;
+                            // apply_to_dir: 同目录其他集一起绑到同一 TMDB 剧
+                            const applyEl = container.querySelector("#bind-apply-to-dir");
+                            if (applyEl && applyEl.checked) body.apply_to_dir = true;
                         }
                         const res = await apiFetch(`${API_BASE}/api/metadata/bind`, {
                             method: "POST",
@@ -955,8 +986,21 @@ function renderMetadataCard(container, data) {
                         // codex r1 IMPORTANT: 通知外层 organizeBtn 等 sibling 元素重新评估可见性
                         container.dispatchEvent(new CustomEvent("metadata-bound", {
                             bubbles: true,
-                            detail: { cached: cacheData, mediaType: c.media_type },
+                            detail: {
+                                cached: cacheData,
+                                mediaType: c.media_type,
+                                siblingsBound: r.siblings_bound || 0,
+                            },
                         }));
+                        // 同目录兄弟集绑定结果 toast
+                        if (r.siblings_bound > 0) {
+                            window.dispatchEvent(new CustomEvent("toast", {
+                                detail: {
+                                    severity: "success",
+                                    message: `✓ 已绑定本集 + 同目录 ${r.siblings_bound} 集一起绑定`,
+                                },
+                            }));
+                        }
                     } catch (err) {
                         item.classList.remove("disabled");
                         item.style.opacity = "";
@@ -1297,6 +1341,17 @@ async function showDetail(path) {
             style: "display:none;",
         });
         organizeBtn.addEventListener("click", () => openOrganize(file.path));
+        // 整理整个目录按钮：apply_to_dir 绑了兄弟集后出现，一键批量整理同目录所有识别好的集
+        const dirPath = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
+        const organizeDirBtn = createElement("button", {
+            className: "btn btn-sm btn-outline-primary ms-1",
+            innerHTML: '<i class="bi bi-collection-play me-1"></i>整理整个目录',
+            style: "display:none;",
+            title: dirPath ? `批量整理 ${dirPath} 下所有识别好的文件` : "",
+        });
+        organizeDirBtn.addEventListener("click", () => {
+            if (dirPath) openOrganizeBatch(dirPath);
+        });
         const aiResult = createElement("div", { className: "mt-2" });
         aiResult.__videoPath = file.path;
 
@@ -1305,6 +1360,10 @@ async function showDetail(path) {
             const mt = e.detail?.mediaType || e.detail?.cached?.top_pick?.media_type;
             if (mt === "movie" || mt === "tv") {
                 organizeBtn.style.display = "inline-block";
+            }
+            // apply_to_dir 绑了兄弟集 → 显示「整理整个目录」按钮（一键批量整理同目录所有集）
+            if ((e.detail?.siblingsBound || 0) > 0 && dirPath) {
+                organizeDirBtn.style.display = "inline-block";
             }
         };
         cachedCard.addEventListener("metadata-bound", onMetadataBound);
@@ -1385,6 +1444,7 @@ async function showDetail(path) {
         aiSection.appendChild(nfoCard);
         aiSection.appendChild(aiBtn);
         aiSection.appendChild(organizeBtn);
+        aiSection.appendChild(organizeDirBtn);
         aiSection.appendChild(aiResult);
         content.appendChild(aiSection);
     }
@@ -1970,6 +2030,7 @@ async function openBatchIdentify() {
     document.getElementById("batch-start-btn").disabled = true;
     document.getElementById("batch-stop-btn").style.display = "none";
     document.getElementById("batch-nfo-write-btn").style.display = "none";
+    document.getElementById("batch-organize-btn").style.display = "none";
     batchIdentifyModal.show();
 
     // 列视频文件
@@ -2107,9 +2168,19 @@ async function startBatchIdentify() {
     if (eligible.length > 0 && !batchAborted) {
         document.getElementById("batch-nfo-eligible-count").textContent = eligible.length;
         document.getElementById("batch-nfo-write-btn").style.display = "inline-block";
+        // 有识别成功的 → 显示「批量整理到媒体库」按钮（直接跳批量整理流程）
+        document.getElementById("batch-organize-btn").style.display = "inline-block";
     }
 
     addLog(`批量识别完成: ${done} 个文件`, batchAborted ? "warning" : "success");
+}
+
+
+// 批量识别完成后 → 关掉识别 modal → 打开批量整理流程（dir-preview → 勾选 → confirm → hardlink）
+function proceedBatchOrganize() {
+    batchIdentifyModal.hide();
+    // 等 modal 滑出动画结束再开批量整理 modal（避免两个 modal z-index 打架）
+    setTimeout(() => openOrganizeBatch(currentPath), 200);
 }
 
 
@@ -3976,16 +4047,20 @@ function _renderDedupGroup(group, opts = {}) {
         const chk = createElement("input", {
             type: "checkbox",
             checked: shouldAutoCheck,
+            disabled: c.keep_recommended,
         });
+        if (c.keep_recommended) {
+            chk.title = "推荐保留的最佳版本，不可删除";
+        }
         if (shouldAutoCheck) {
-            dedupState.selectedFileIds.add(c.media_file_id);
+            dedupState.selectedFileIds.add(String(c.media_file_id));
         }
         chk.dataset.fileId = String(c.media_file_id);
         chk.addEventListener("change", () => {
             if (chk.checked) {
-                dedupState.selectedFileIds.add(c.media_file_id);
+                dedupState.selectedFileIds.add(String(c.media_file_id));
             } else {
-                dedupState.selectedFileIds.delete(c.media_file_id);
+                dedupState.selectedFileIds.delete(String(c.media_file_id));
             }
             _updateDedupDeleteBtn();
         });
@@ -4048,6 +4123,48 @@ function _updateDedupDeleteBtn() {
     btn.innerHTML = n === 0
         ? '<i class="bi bi-trash3"></i> 删除选中'
         : `<i class="bi bi-trash3"></i> 删除选中 (${n})`;
+    // 同步更新「全选」按钮文案
+    const selAllBtn = document.getElementById("dedup-select-all-btn");
+    if (selAllBtn) {
+        // 所有可删候选（非 keep_recommended）都选中了 → 显示「取消全选」，否则「全选」
+        const allSelectable = [];
+        for (const g of dedupState.groups) {
+            for (const c of g.candidates) {
+                if (!c.keep_recommended) allSelectable.push(String(c.media_file_id));
+            }
+        }
+        const allSelected = allSelectable.length > 0 && allSelectable.every(id => dedupState.selectedFileIds.has(id));
+        selAllBtn.innerHTML = allSelected
+            ? '<i class="bi bi-square"></i> 取消全选'
+            : '<i class="bi bi-check2-square"></i> 全选';
+    }
+}
+
+// 全选/取消全选所有可删候选（跳过 keep_recommended 的最佳版本）
+function toggleDedupSelectAll() {
+    const allSelectable = [];
+    for (const g of dedupState.groups) {
+        for (const c of g.candidates) {
+            if (!c.keep_recommended) allSelectable.push(String(c.media_file_id));
+        }
+    }
+    if (allSelectable.length === 0) return;
+    // 判断当前是否已全选 → 全选则取消，否则全选
+    const allSelected = allSelectable.every(id => dedupState.selectedFileIds.has(id));
+    if (allSelected) {
+        // 取消全选
+        allSelectable.forEach(id => dedupState.selectedFileIds.delete(id));
+    } else {
+        // 全选（保留已有的其他选中）
+        allSelectable.forEach(id => dedupState.selectedFileIds.add(id));
+    }
+    // 同步 DOM checkbox 状态
+    document.querySelectorAll(".dedup-candidate input[type=checkbox]").forEach(chk => {
+        if (!chk.disabled) {
+            chk.checked = dedupState.selectedFileIds.has(chk.dataset.fileId);
+        }
+    });
+    _updateDedupDeleteBtn();
 }
 
 async function deleteDedupSelection() {
@@ -4056,7 +4173,7 @@ async function deleteDedupSelection() {
     const candidates = [];
     for (const g of dedupState.groups) {
         for (const c of g.candidates) {
-            if (dedupState.selectedFileIds.has(c.media_file_id)) {
+            if (dedupState.selectedFileIds.has(String(c.media_file_id))) {
                 candidates.push({
                     path: c.path,
                     expected_inode: c.inode,
@@ -4914,7 +5031,7 @@ const _BATCH_GROUP_LABELS = {
     will_link: "✓ 可整理",
     already_linked: "↻ 已 hardlinked（跳过）",
     conflict: "⚠ 目标冲突（confirm 会失败）",
-    needs_identify: "? 待识别（请先去文件视图批量识别）",
+    needs_identify: "? 待识别（点「绑候选」直接绑）",
     unsupported: "✗ 媒体类型不支持",
     not_applicable: "✗ 不适用",
 };
@@ -5028,7 +5145,9 @@ function renderBatchDashboard(data) {
         if (!byStatus[it.status]) byStatus[it.status] = [];
         byStatus[it.status].push(it);
     });
-    const groupHtml = groups.filter(g => (byStatus[g] || []).length > 0).map(g => `
+    const groupHtml = groups.filter(g => (byStatus[g] || []).length > 0).map(g => {
+        if (g === "needs_identify") return _renderNeedsIdentifyGroup(byStatus[g]);
+        return `
         <details class="mb-2" ${g === "will_link" ? "open" : ""}>
             <summary class="text-${g === "will_link" ? "success" : (g === "conflict" ? "warning" : "secondary")}">
                 ${_BATCH_GROUP_LABELS[g]}（${byStatus[g].length}）
@@ -5044,7 +5163,8 @@ function renderBatchDashboard(data) {
                 ${byStatus[g].length > 100 ? `<li class="text-secondary">…还有 ${byStatus[g].length - 100} 项未显示</li>` : ""}
             </ul>
         </details>
-    `).join("");
+    `;
+    }).join("");
 
     const banner = data.limit_reached
         ? `<div class="alert alert-warning small mb-3"><i class="bi bi-exclamation-triangle"></i>
@@ -5053,10 +5173,10 @@ function renderBatchDashboard(data) {
 
     const guidance = canProceed
         ? `<div class="small text-secondary mt-3">
-              点「下一步：审 plan」进入勾选确认。<i>仅 will_link / already_linked / conflict 进入下一步；needs_identify 请先去文件视图批量识别。</i>
+              点「下一步：审 plan」进入勾选确认。<i>仅 will_link / already_linked / conflict 进入下一步；needs_identify 点「绑候选」直接绑，绑完自动刷新。</i>
            </div>`
         : `<div class="alert alert-info mb-0 small">
-              没有可整理的文件。${(c.needs_identify || 0) > 0 ? "请先去文件视图对未识别文件批量识别。" : ""}
+              ${(c.needs_identify || 0) > 0 ? "有待识别文件——点下方「绑候选」直接绑，绑完自动刷新 dashboard。" : "没有可整理的文件。"}
            </div>`;
 
     document.getElementById("batch-dashboard-body").innerHTML = `
@@ -5069,6 +5189,198 @@ function renderBatchDashboard(data) {
         ${guidance}
     `;
     document.getElementById("batch-next-btn").style.display = canProceed ? "inline-block" : "none";
+    // 绑定 needs_identify 文件的「绑候选」按钮点击事件（innerHTML 后需手动 attach）
+    document.querySelectorAll(".ni-bind-btn").forEach(btn => {
+        btn.addEventListener("click", () => _dashboardBindCandidate(btn));
+    });
+}
+
+
+// ── dashboard 内 inline 绑候选（消除批量整理阻塞）──────────────────
+// needs_identify 文件不再要求用户退出 modal 去文件视图绑，直接在 dashboard 内绑。
+
+// 渲染 needs_identify 分组：每个文件一行 + 「绑候选」按钮 + 可展开候选区
+function _renderNeedsIdentifyGroup(items) {
+    const rows = items.slice(0, 100).map((it, i) => {
+        // 从文件名推断有没有 S/E（决定是否显示"含同目录其他集"）
+        const hasSE = /S\d+E\d+/i.test(it.name || "");
+        const btnLabel = hasSE ? "🔗 绑候选（含同目录其他集）" : "绑候选";
+        return `
+            <li class="mb-1" data-ni-path="${_esc(it.path)}" data-ni-has-se="${hasSE ? "1" : "0"}">
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <code class="text-truncate" style="max-width:380px;" title="${_esc(it.path)}">${_esc(it.name)}</code>
+                    ${it.reason ? `<span class="text-warning small">· ${_esc(it.reason)}</span>` : ""}
+                    <button class="btn btn-sm btn-outline-info py-0 px-2 ni-bind-btn" data-ni-idx="${i}">
+                        <i class="bi bi-link-45deg"></i> ${btnLabel}
+                    </button>
+                </div>
+                <div class="ni-candidates mt-1" style="display:none;"></div>
+            </li>
+        `;
+    }).join("");
+    const overflow = items.length > 100 ? `<li class="text-secondary">…还有 ${items.length - 100} 项未显示</li>` : "";
+    return `
+        <details class="mb-2" open>
+            <summary class="text-secondary">
+                ${_BATCH_GROUP_LABELS.needs_identify}（${items.length}）
+            </summary>
+            <ul class="list-unstyled small mt-2 ms-3" style="max-height:400px;overflow-y:auto;">
+                ${rows}
+                ${overflow}
+            </ul>
+        </details>
+    `;
+}
+
+// 点「绑候选」→ 展开候选列表（用 io 缓存或现场调 identify）
+async function _dashboardBindCandidate(btnEl) {
+    const li = btnEl.closest("li");
+    if (!li) return;
+    const path = li.dataset.niPath;
+    const candWrap = li.querySelector(".ni-candidates");
+    if (!candWrap) return;
+
+    // 已展开 → 收起
+    if (candWrap.style.display !== "none") {
+        candWrap.style.display = "none";
+        return;
+    }
+    candWrap.style.display = "block";
+    candWrap.innerHTML = '<span class="text-secondary"><span class="spinner-border spinner-border-sm me-1" style="width:10px;height:10px;"></span>搜索候选中…</span>';
+    btnEl.disabled = true;
+
+    let data = null;
+    // 优先用 Step 0 识别缓存（io-result-tbody 的 __identifyData）
+    const ioRows = document.querySelectorAll("#io-result-tbody tr");
+    for (const r of ioRows) {
+        if (r.dataset.path === path && r.__identifyData) {
+            data = r.__identifyData;
+            break;
+        }
+    }
+    // 没缓存 → 现场调 identify
+    if (!data) {
+        try {
+            const res = await apiFetch(`${API_BASE}/api/metadata/identify`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path }),
+            });
+            if (!res.ok) {
+                const b = await res.json();
+                candWrap.innerHTML = `<span class="text-danger">识别失败：${_esc(b.error || "unknown")}</span>`;
+                btnEl.disabled = false;
+                return;
+            }
+            data = await res.json();
+        } catch (err) {
+            candWrap.innerHTML = `<span class="text-danger">网络错误：${_esc(err.message)}</span>`;
+            btnEl.disabled = false;
+            return;
+        }
+    }
+
+    const cands = data.candidates || [];
+    if (cands.length === 0) {
+        candWrap.innerHTML = `<span class="text-warning">TMDB 没找到候选。</span> <a href="https://www.themoviedb.org/search?query=${encodeURIComponent(data.parse?.title || "")}" target="_blank" class="small">去 themoviedb 搜</a>`;
+        btnEl.disabled = false;
+        return;
+    }
+
+    // 渲染候选列表（复用 renderMetadataCard 的候选样式）
+    candWrap.innerHTML = '<div class="list-group small"></div>';
+    const list = candWrap.querySelector(".list-group");
+    const hasSE = li.dataset.niHasSe === "1";
+    cands.forEach(c => {
+        const tmdbId = c.external_ids?.tmdb_id || c.id;
+        const canBind = tmdbId && (c.media_type === "movie" || c.media_type === "tv");
+        const item = createElement("div", {
+            className: "list-group-item list-group-item-action bg-transparent text-light border-secondary py-1" + (canBind ? "" : " disabled"),
+            style: canBind ? "cursor:pointer;" : "",
+        });
+        const poster = c.poster_url
+            ? `<img src="${c.poster_url}" style="width:40px;height:auto;flex-shrink:0;border-radius:3px;margin-right:6px"/>`
+            : `<div style="width:40px;height:60px;flex-shrink:0;margin-right:6px;background:#222;border-radius:3px"></div>`;
+        item.innerHTML = `
+            <div class="d-flex">
+                ${poster}
+                <div class="flex-grow-1">
+                    <div class="d-flex justify-content-between">
+                        <strong class="small">${_esc(c.title)}</strong>
+                        <small class="text-secondary">${c.year || "?"} · ${c.media_type} · ⭐${c.vote_average?.toFixed(1) || "—"}</small>
+                    </div>
+                </div>
+            </div>
+        `;
+        if (canBind) {
+            item.addEventListener("click", async () => {
+                if (item.classList.contains("disabled")) return;
+                item.classList.add("disabled");
+                item.style.opacity = "0.6";
+                await _dashboardDoBind(path, tmdbId, c.media_type, data.parse, hasSE, candWrap);
+            });
+        }
+        list.appendChild(item);
+    });
+    btnEl.disabled = false;
+}
+
+// 调 /api/metadata/bind → 成功后全量重拉 dir-preview 刷新 dashboard
+async function _dashboardDoBind(path, tmdbId, mediaType, parseData, applyToDir, candWrap) {
+    const body = { path, tmdb_id: String(tmdbId), media_type: mediaType };
+    if (mediaType === "tv") {
+        if (parseData?.season != null) body.season = parseData.season;
+        if (parseData?.episode != null) body.episode = parseData.episode;
+        if (applyToDir) body.apply_to_dir = true;
+    }
+    candWrap.innerHTML = '<span class="text-info"><span class="spinner-border spinner-border-sm me-1" style="width:10px;height:10px;"></span>绑定中…</span>';
+    try {
+        const res = await apiFetch(`${API_BASE}/api/metadata/bind`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        const r = await res.json();
+        if (!res.ok || !r.bound) {
+            candWrap.innerHTML = `<span class="text-danger">绑定失败：${_esc(r.error || "HTTP " + res.status)}</span>`;
+            return;
+        }
+        // toast 提示
+        const sibCount = r.siblings_bound || 0;
+        if (sibCount > 0) {
+            window.dispatchEvent(new CustomEvent("toast", {
+                detail: { severity: "success", message: `✓ 已绑定本集 + 同目录 ${sibCount} 集一起绑定` },
+            }));
+        } else {
+            window.dispatchEvent(new CustomEvent("toast", {
+                detail: { severity: "success", message: "✓ 绑定成功" },
+            }));
+        }
+        // 全量重拉 dir-preview 刷新 dashboard（counts 实时更新）
+        _refreshBatchDashboard();
+    } catch (err) {
+        candWrap.innerHTML = `<span class="text-danger">网络错误：${_esc(err.message)}</span>`;
+    }
+}
+
+// 重拉 dir-preview → 重新 renderBatchDashboard
+function _refreshBatchDashboard() {
+    if (!_batchState || !_batchState.dir_path) return;
+    const dirPath = _batchState.dir_path;
+    const requestId = ++_batchRequestSeq;
+    _batchState.request_id = requestId;
+    (async () => {
+        try {
+            const url = `${API_BASE}/api/organize/dir-preview?path=${encodeURIComponent(dirPath)}&max_depth=2&limit=500`;
+            const res = await apiFetch(url);
+            if (requestId !== _batchRequestSeq) return;  // stale
+            if (!res.ok) return;  // 静默失败（dashboard 仍显示旧数据）
+            const body = await res.json();
+            if (requestId !== _batchRequestSeq) return;
+            _batchState.dashboard = body;
+            renderBatchDashboard(body);
+        } catch (err) { /* 静默 */ }
+    })();
 }
 
 

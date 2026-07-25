@@ -54,6 +54,7 @@ class _CachedStub:
     episode_number: int | None = None
     inode: int | None = None
     mtime: int | None = None
+    metadata_status: str = "ok"
 
 
 def _src_stat(path: str, inode: int = 100, size: int = 1024, mtime: int = 1000) -> dict:
@@ -153,6 +154,34 @@ def test_preview_src_not_identified_marks_needs_identify(client, token, monkeypa
         lambda paths: _src_stat("/dl/x.mkv"),
     )
     _patch_cache(monkeypatch, None)
+    resp = client.post(
+        "/api/action/preview",
+        json={"kind": "organize", "items": [{"src_path": "/dl/x.mkv"}]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["items_count"] == 0
+    assert body["preview_items"][0]["status"] == "needs_identify"
+    assert body["counts"]["needs_identify"] == 1
+
+
+def test_preview_needs_review_tv_marks_needs_identify(client, token, monkeypatch):
+    """media_type='tv' + metadata_status='needs_review' (无 tmdb 绑定) → needs_identify，
+    不能进 will_link（compute_plan 会拿到 tmdb_id=None）。"""
+    _patch_organize_config(monkeypatch)
+    monkeypatch.setattr(app_module, "_ssh_stat_paths", lambda paths: _src_stat("/dl/x.mkv"))
+    _patch_cache(
+        monkeypatch,
+        _CachedStub(
+            title="Show",
+            media_type="tv",
+            year=2020,
+            season_number=1,
+            episode_number=1,
+            metadata_status="needs_review",
+        ),
+    )
     resp = client.post(
         "/api/action/preview",
         json={"kind": "organize", "items": [{"src_path": "/dl/x.mkv"}]},

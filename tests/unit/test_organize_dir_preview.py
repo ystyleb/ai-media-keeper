@@ -38,6 +38,7 @@ class _CachedStub:
     mtime: int | None = None
     original_title: str | None = None
     metadata_confidence: float | None = 0.9
+    metadata_status: str = "ok"
 
 
 def _ok_cfg(monkeypatch, movies_root="/media/movies", tv_root="/media/tv"):
@@ -219,6 +220,50 @@ def test_dir_preview_classifies_mixed_directory(client, token, monkeypatch):
     assert status_by_path["/dl/movie.conflict.mkv"] == "conflict"
     assert status_by_path["/dl/needs_identify.mkv"] == "needs_identify"
     assert status_by_path["/dl/extra.mkv"] == "unsupported"
+
+
+def test_dir_preview_needs_review_tv_classified_as_needs_identify(client, token, monkeypatch):
+    """media_type='tv' + metadata_status='needs_review' (无 tmdb 绑定) → needs_identify，
+    不能滑到 will_link（否则 compute_plan 会拿到 tmdb_id=None 生成坏 plan）。"""
+    _ok_cfg(monkeypatch)
+    _patch_validate_path(monkeypatch)
+    paths = ["/dl/show.mkv"]
+    monkeypatch.setattr(app_module, "_list_video_paths", lambda *a, **kw: paths)
+    monkeypatch.setattr(
+        app_module.metadata_cache,
+        "get_many_by_path",
+        lambda conn, paths, **kw: {
+            "/dl/show.mkv": (
+                _CachedStub(
+                    path="/dl/show.mkv",
+                    title="Show",
+                    media_type="tv",
+                    year=2020,
+                    season_number=1,
+                    episode_number=1,
+                    metadata_status="needs_review",
+                ),
+                "hit",
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_ssh_stat_paths",
+        lambda qpaths: {
+            p: {"exists": True, "inode": 10, "size_bytes": 1024, "mtime": 1} for p in qpaths
+        },
+    )
+    resp = client.get(
+        "/api/organize/dir-preview?path=/dl",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["counts"]["needs_identify"] == 1
+    assert body["counts"]["will_link"] == 0
+    assert body["counts"]["unsupported"] == 0
+    assert body["items"][0]["status"] == "needs_identify"
 
 
 def test_dir_preview_uses_only_two_ssh_stat_calls(client, token, monkeypatch):

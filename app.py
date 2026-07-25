@@ -1232,8 +1232,9 @@ def list_files():
         date = f"{parts[5]} {parts[6]}"
         name = parts[7]
 
-        # 跳过 . 和 ..
-        if name in (".", ".."):
+        # 跳过隐藏文件/目录（. 开头：含 . 和 .. / .Trash-1000 / .DS_Store / .@__thumb 等
+        # NAS 常见隐藏文件，文件浏览器不显示，减少干扰）
+        if name.startswith("."):
             continue
 
         is_dir = permissions.startswith("d")
@@ -2830,9 +2831,7 @@ def _disc_sample_inode_pair(src_dir: str, dst_dir: str) -> tuple[int, int] | Non
 
     dst 同名文件 = dst_dir/<相对 src_dir 的路径>。找不到文件或 stat 失败返 None。
     """
-    _, out, _ = ssh_exec(
-        f"find {shlex.quote(src_dir)} -type f 2>/dev/null | head -1", timeout=30
-    )
+    _, out, _ = ssh_exec(f"find {shlex.quote(src_dir)} -type f 2>/dev/null | head -1", timeout=30)
     lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
     sample_src = lines[0] if lines else ""
     base = src_dir.rstrip("/")
@@ -2882,9 +2881,7 @@ def _organize_disc_folder(src_path: str, plan: dict, expected_metadata: dict | N
             "status": "failed",
             "reason": f"mkdir_parent_failed: {err.strip()[:200]}",
         }
-    rc, _, err = ssh_exec(
-        f"cp -al {shlex.quote(src_path)} {shlex.quote(dst_dir)}", timeout=300
-    )
+    rc, _, err = ssh_exec(f"cp -al {shlex.quote(src_path)} {shlex.quote(dst_dir)}", timeout=300)
     if rc != 0:
         return {
             "src_path": src_path,
@@ -2981,6 +2978,7 @@ def _build_and_start_auto_organize_impl(paths: list[str], qbit_hash: str) -> dic
                 cached is None
                 or cache_status == "stale"
                 or cached.media_type not in ("movie", "tv")
+                or cached.metadata_status in ("needs_review", "failed")
             ):
                 # confidence_gate 之后到这里之间 cache 被改了 = 罕见 race；skip
                 skipped_during_build.append(
@@ -3529,7 +3527,11 @@ def _do_action_preview(kind: str, raw_data: dict):
             if not src_stat.get("exists"):
                 continue
             cached, cache_status = cache_map.get(sp, (None, "miss"))
-            if cached is None or cache_status == "stale":
+            if (
+                cached is None
+                or cache_status == "stale"
+                or cached.metadata_status in ("needs_review", "failed")
+            ):
                 continue
             if cached.media_type not in ("movie", "tv"):
                 continue
@@ -3586,15 +3588,23 @@ def _do_action_preview(kind: str, raw_data: dict):
                 counts["not_applicable"] += 1
                 continue
 
-            # cache miss / stale
-            if cached is None or cache_status == "stale":
-                preview_items.append(
-                    {
-                        **base_item,
-                        "status": "needs_identify",
-                        "reason": "stale_cache" if cache_status == "stale" else "no_cache",
-                    }
-                )
+            # cache miss / stale / 未识别(needs_review/failed) → 需先识别
+            if (
+                cached is None
+                or cache_status == "stale"
+                or cached.metadata_status in ("needs_review", "failed")
+            ):
+                if cache_status == "stale":
+                    _ni_reason = "stale_cache"
+                elif cached is not None and cached.metadata_status in ("needs_review", "failed"):
+                    _ni_reason = f"not_identified: metadata_status={cached.metadata_status!r}"
+                else:
+                    _ni_reason = "no_cache"
+                _ni_item = {**base_item, "status": "needs_identify", "reason": _ni_reason}
+                if cached is not None and cached.metadata_status in ("needs_review", "failed"):
+                    _ni_item["media_type"] = cached.media_type
+                    _ni_item["title"] = cached.title
+                preview_items.append(_ni_item)
                 counts["needs_identify"] += 1
                 continue
 
@@ -4428,7 +4438,11 @@ def organize_dir_preview():
     dst_stat_paths: list[str] = []
     for p in raw_paths:
         cached, cache_status = cache_map.get(p, (None, "miss"))
-        if cached is None or cache_status == "stale":
+        if (
+            cached is None
+            or cache_status == "stale"
+            or cached.metadata_status in ("needs_review", "failed")
+        ):
             continue
         if cached.media_type not in ("movie", "tv"):
             continue
@@ -4463,10 +4477,21 @@ def organize_dir_preview():
             items.append(item)
             continue
 
-        # cache miss / stale → 需要先识别
-        if cached is None or cache_status == "stale":
+        # cache miss / stale / 未识别(needs_review/failed) → 需要先识别
+        if (
+            cached is None
+            or cache_status == "stale"
+            or cached.metadata_status in ("needs_review", "failed")
+        ):
             item["status"] = "needs_identify"
-            item["reason"] = "stale_cache" if cache_status == "stale" else "no_cache"
+            if cache_status == "stale":
+                item["reason"] = "stale_cache"
+            elif cached is not None and cached.metadata_status in ("needs_review", "failed"):
+                item["reason"] = f"not_identified: metadata_status={cached.metadata_status!r}"
+                item["media_type"] = cached.media_type
+                item["title"] = cached.title
+            else:
+                item["reason"] = "no_cache"
             counts["needs_identify"] += 1
             items.append(item)
             continue
@@ -4670,6 +4695,108 @@ def metadata_identify():
     return jsonify(response)
 
 
+def _bind_tv_sibling_episodes(
+    db,
+    provider,
+    primary_path: str,
+    tmdb_id: str,
+) -> tuple[int, int, list[dict]]:
+    """apply_to_dir helper: 同目录其他未识别的 TV 集绑到同一 TMDB 剧。
+
+    场景：一个种子目录 = 一部剧的 E01~E09，TMDB 搜索没自动匹到 → 全 needs_review。
+    用户手动绑一集后，同目录其他 needs_review 的集也绑到同一 series（各自的 S/E
+    来自文件名 guessit）。跳过已 ok 的（不覆盖已识别）+ 文件名无 S/E 的（无法定位集）。
+
+    返回 (siblings_bound, siblings_skipped, sibling_errors)。
+    """
+    siblings_bound = 0
+    siblings_skipped = 0
+    sibling_errors: list[dict] = []
+    dir_path = primary_path.rsplit("/", 1)[0] if "/" in primary_path else ""
+    if not dir_path:
+        return siblings_bound, siblings_skipped, sibling_errors
+    sib_all = _list_video_paths(dir_path, max_depth=1, limit=500)
+    sib_paths = [p for p in sib_all if p != primary_path]
+    if not sib_paths:
+        return siblings_bound, siblings_skipped, sibling_errors
+    sib_stats = _ssh_stat_paths(sib_paths)
+    existing = [p for p in sib_paths if sib_stats.get(p, {}).get("exists")]
+    if not existing:
+        return siblings_bound, siblings_skipped, sibling_errors
+    sib_cache = metadata_cache.get_many_by_path(db, existing)
+    for sp in existing:
+        sc, _ss = sib_cache.get(sp, (None, "miss"))
+        if sc is not None and sc.metadata_status == "ok":
+            siblings_skipped += 1
+            continue
+        sp_parse = identify_svc.parse_filename(sp)
+        if sp_parse.season is None or sp_parse.episode is None:
+            siblings_skipped += 1
+            continue
+        try:
+            sp_details = provider.lookup_by_id(
+                tmdb_id,
+                media_type="tv",
+                season=sp_parse.season,
+                episode=sp_parse.episode,
+            )
+        except Exception as se:
+            sibling_errors.append({"path": sp, "error": str(se)})
+            continue
+        if sp_details is None:
+            sibling_errors.append({"path": sp, "error": "episode not found on TMDB"})
+            continue
+        sp_cand = sp_details.candidate
+        sp_bound_parse = identify_svc.FilenameParse(
+            raw_name=sp_parse.raw_name,
+            title=sp_cand.title,
+            year=sp_cand.year or sp_parse.year,
+            season=sp_parse.season,
+            episode=sp_parse.episode,
+            episode_title=sp_parse.episode_title,
+            media_type="tv",
+            resolution=sp_parse.resolution,
+            source=sp_parse.source,
+            release_group=sp_parse.release_group,
+            codec=sp_parse.codec,
+            color_depth=sp_parse.color_depth,
+            hdr_profiles=sp_parse.hdr_profiles,
+            container=sp_parse.container,
+            audio_codec=sp_parse.audio_codec,
+            raw=sp_parse.raw,
+        )
+        sp_result = identify_svc.IdentifyResult(
+            parse=sp_bound_parse,
+            candidates=[sp_cand],
+            top_pick=sp_cand,
+            confidence=1.0,
+            reasoning="manual binding by user (sibling auto-bind)",
+            pick_source="manual",
+        )
+        try:
+            metadata_cache.upsert_identification(
+                db,
+                path=sp,
+                stat=sib_stats[sp],
+                identify_result=sp_result,
+            )
+            sp_ep = sp_details.episode or {}
+            metadata_cache.upsert_details(
+                db,
+                path=sp,
+                genres=sp_details.genres or None,
+                cast=sp_details.cast or None,
+                runtime_minutes=sp_details.runtime_minutes,
+                episode_air_date=sp_ep.get("air_date"),
+                episode_overview=sp_ep.get("overview"),
+                episode_still_url=sp_ep.get("still_url"),
+            )
+            siblings_bound += 1
+        except Exception as se:
+            sibling_errors.append({"path": sp, "error": str(se)})
+    return siblings_bound, siblings_skipped, sibling_errors
+
+
 @app.route("/api/metadata/bind", methods=["POST"])
 @require_token
 def metadata_bind():
@@ -4698,6 +4825,10 @@ def metadata_bind():
     if not re.fullmatch(r"[0-9]+", tmdb_id):
         # SDK 路径拼接 SSRF 防护（external-tools.md SDK URL composition rule）
         return jsonify({"error": "tmdb_id must be numeric"}), 400
+
+    # apply_to_dir: TV 绑一集时，同目录其他未识别的集也一起绑到同一 TMDB 剧
+    # （一个种子目录 = 一部剧的多集是常见场景；逐个绑 9 次太繁琐）
+    apply_to_dir = bool(data.get("apply_to_dir", False))
 
     try:
         path = validate_path(path_in)
@@ -4805,18 +4936,31 @@ def metadata_bind():
             episode_overview=ep.get("overview"),
             episode_still_url=ep.get("still_url"),
         )
+
+        # apply_to_dir: 同目录其他未识别的集一起绑到同一 TMDB 剧
+        siblings_bound = 0
+        siblings_skipped = 0
+        sibling_errors: list[dict] = []
+        if apply_to_dir and media_type == "tv":
+            siblings_bound, siblings_skipped, sibling_errors = _bind_tv_sibling_episodes(
+                db, provider, path, tmdb_id
+            )
     except Exception as e:
         logger.exception(f"[metadata_bind] cache write failed for {path}")
         return jsonify({"error": f"cache_write_failed: {type(e).__name__}: {e}"}), 500
 
     # 重读返回最新 snapshot 给前端
     cached, _ = metadata_cache.get_by_path(db, path)
-    return jsonify(
-        {
-            "bound": True,
-            "cached": _cached_to_library_dict(cached) if cached else None,
-        }
-    )
+    resp: dict = {
+        "bound": True,
+        "cached": _cached_to_library_dict(cached) if cached else None,
+    }
+    if apply_to_dir:
+        resp["siblings_bound"] = siblings_bound
+        resp["siblings_skipped"] = siblings_skipped
+        if sibling_errors:
+            resp["sibling_errors"] = sibling_errors
+    return jsonify(resp)
 
 
 @app.route("/api/metadata/cached", methods=["GET"])
@@ -5836,9 +5980,7 @@ def reset_auto_organize_run():
                 auto_identify = cfg.get("auto_identify", False)
                 auto_id_threshold = cfg.get("auto_identify_confidence_threshold", 0.95)
                 identify_fn = (
-                    (lambda ni_paths: _auto_identify_paths(db, ni_paths))
-                    if auto_identify
-                    else None
+                    (lambda ni_paths: _auto_identify_paths(db, ni_paths)) if auto_identify else None
                 )
                 trigger_result = qbit_auto.dispatch_one(
                     db,

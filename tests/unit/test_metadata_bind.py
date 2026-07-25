@@ -309,6 +309,193 @@ def test_bind_tv_happy_writes_episode_details(client, token):
     assert row["tmdb_series_id"] == "60625"  # tv 行的 split id
 
 
+# ── apply_to_dir: 同目录兄弟集一起绑 ──────────────────────
+
+
+def _fake_parse_with_se(path):
+    """从文件名提取 S/E 的 FilenameParse stub（sibling 绑定测试用）。"""
+    import re as _re
+
+    from services.identify import FilenameParse
+
+    m = _re.search(r"S(\d+)E(\d+)", path)
+    s, e = (int(m.group(1)), int(m.group(2))) if m else (None, None)
+    return FilenameParse(
+        raw_name=path.rsplit("/", 1)[-1],
+        title="Show",
+        year=None,
+        season=s,
+        episode=e,
+        episode_title=None,
+        media_type="episode",
+        resolution="2160p",
+        source="WEB-DL",
+        release_group="RG",
+        codec=None,
+        color_depth=None,
+        hdr_profiles=[],
+        container=None,
+        audio_codec=None,
+        raw={},
+    )
+
+
+def _fake_stat_all(paths):
+    return {
+        p: {"exists": True, "inode": abs(hash(p)) % 10000, "size_bytes": 1000, "mtime": 2000}
+        for p in paths
+    }
+
+
+def test_bind_tv_apply_to_dir_binds_all_sibling_episodes(client, token):
+    """apply_to_dir=true → 同目录其他未识别的 TV 集也绑到同一 TMDB 剧。
+
+    场景：Teach You a Lesson E01~E03 在同一目录，TMDB 搜索没自动匹到 → 全 needs_review。
+    用户绑 E01 到 tmdb_id=999 → E02/E03 自动绑到同一 series（各自 S/E 来自文件名）。
+    """
+    primary = _p("Show.S01E01.mkv")
+    sib2 = _p("Show.S01E02.mkv")
+    sib3 = _p("Show.S01E03.mkv")
+
+    def fake_lookup(self, tmdb_id, *, media_type, season, episode):
+        return _make_tv_details(tmdb_id=tmdb_id, season=season, episode=episode)
+
+    fake_provider = type("P", (), {"lookup_by_id": fake_lookup})()
+
+    with (
+        patch.object(app_module, "_ssh_stat_paths", side_effect=_fake_stat_all),
+        patch.object(app_module, "get_tmdb_provider", return_value=fake_provider),
+        patch.object(app_module, "_list_video_paths", return_value=[primary, sib2, sib3]),
+        patch.object(app_module.identify_svc, "parse_filename", side_effect=_fake_parse_with_se),
+    ):
+        resp = client.post(
+            "/api/metadata/bind",
+            json={
+                "path": primary,
+                "tmdb_id": "999",
+                "media_type": "tv",
+                "season": 1,
+                "episode": 1,
+                "apply_to_dir": True,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    body = resp.get_json()
+    assert body["bound"] is True
+    assert body["siblings_bound"] == 2  # E02 + E03 bound
+    # 所有 3 集都在 DB 里，S/E 正确
+    with app_module.app.app_context():
+        for p, expected_ep in [(primary, 1), (sib2, 2), (sib3, 3)]:
+            row = (
+                app_module.get_db()
+                .execute(
+                    "SELECT media_type, season_number, episode_number, "
+                    "metadata_status, tmdb_id, tmdb_series_id "
+                    "FROM media_files WHERE path = ?",
+                    (p,),
+                )
+                .fetchone()
+            )
+            assert row is not None, f"{p} not in DB"
+            assert row["media_type"] == "tv"
+            assert row["season_number"] == 1
+            assert row["episode_number"] == expected_ep
+            assert row["metadata_status"] == "ok"
+            assert row["tmdb_id"] == "999"
+
+
+def test_bind_tv_apply_to_dir_skips_already_ok_siblings(client, token):
+    """apply_to_dir=true → 已 ok 的兄弟集跳过（不覆盖已识别）。"""
+    primary = _p("Show2.S01E01.mkv")
+    sib_ok = _p("Show2.S01E02.mkv")  # already identified
+    sib_needs = _p("Show2.S01E03.mkv")  # needs_review
+
+    with app_module.app.app_context():
+        db = app_module.get_db()
+        db.execute(
+            "INSERT INTO media_files (path, media_type, metadata_status, tmdb_id, "
+            "season_number, episode_number, first_seen_at, last_updated_at) "
+            "VALUES (?, 'tv', 'ok', '888', 1, 2, 0, 0)",
+            (sib_ok,),
+        )
+        db.commit()
+
+    def fake_lookup(self, tmdb_id, *, media_type, season, episode):
+        return _make_tv_details(tmdb_id=tmdb_id, season=season, episode=episode)
+
+    fake_provider = type("P", (), {"lookup_by_id": fake_lookup})()
+
+    with (
+        patch.object(app_module, "_ssh_stat_paths", side_effect=_fake_stat_all),
+        patch.object(app_module, "get_tmdb_provider", return_value=fake_provider),
+        patch.object(app_module, "_list_video_paths", return_value=[primary, sib_ok, sib_needs]),
+        patch.object(app_module.identify_svc, "parse_filename", side_effect=_fake_parse_with_se),
+    ):
+        resp = client.post(
+            "/api/metadata/bind",
+            json={
+                "path": primary,
+                "tmdb_id": "999",
+                "media_type": "tv",
+                "season": 1,
+                "episode": 1,
+                "apply_to_dir": True,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    body = resp.get_json()
+    assert body["bound"] is True
+    assert body["siblings_bound"] == 1  # only sib_needs (E03)
+    assert body["siblings_skipped"] == 1  # sib_ok (E02) skipped
+    with app_module.app.app_context():
+        row = (
+            app_module.get_db()
+            .execute("SELECT tmdb_id FROM media_files WHERE path = ?", (sib_ok,))
+            .fetchone()
+        )
+        assert row["tmdb_id"] == "888"  # not overwritten
+
+
+def test_bind_tv_without_apply_to_dir_does_not_bind_siblings(client, token):
+    """apply_to_dir=false（默认）→ 不绑兄弟集（backward compat）。"""
+    primary = _p("Show3.S01E01.mkv")
+    sib2 = _p("Show3.S01E02.mkv")
+
+    def fake_lookup(self, tmdb_id, *, media_type, season, episode):
+        return _make_tv_details(tmdb_id=tmdb_id, season=season, episode=episode)
+
+    fake_provider = type("P", (), {"lookup_by_id": fake_lookup})()
+
+    with (
+        patch.object(app_module, "_ssh_stat_paths", side_effect=_fake_stat_all),
+        patch.object(app_module, "get_tmdb_provider", return_value=fake_provider),
+        patch.object(app_module, "_list_video_paths", return_value=[primary, sib2]),
+        patch.object(app_module.identify_svc, "parse_filename", side_effect=_fake_parse_with_se),
+    ):
+        resp = client.post(
+            "/api/metadata/bind",
+            json={
+                "path": primary,
+                "tmdb_id": "999",
+                "media_type": "tv",
+                "season": 1,
+                "episode": 1,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    body = resp.get_json()
+    assert body["bound"] is True
+    assert "siblings_bound" not in body
+    with app_module.app.app_context():
+        row = (
+            app_module.get_db()
+            .execute("SELECT path FROM media_files WHERE path = ?", (sib2,))
+            .fetchone()
+        )
+        assert row is None  # sibling not bound
+
+
 # ── error paths ──────────────────────────────────────────
 
 

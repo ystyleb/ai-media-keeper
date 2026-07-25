@@ -209,6 +209,64 @@ def test_needs_review_persists(conn):
     assert cached.season_number == 6
 
 
+def test_needs_review_episode_preserves_tv_media_type(conn):
+    """needs_review (top=None) 但文件名明确是 episode → DB media_type 应回退到 'tv'
+    而非 None（保留文件名已知类型，供 UI 分组 / 分类层判定）。"""
+    res = _make_result(top=None)  # default parse: media_type="episode", season=6, episode=2
+    metadata_cache.upsert_identification(
+        conn,
+        path="/share/ep.mkv",
+        stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
+        identify_result=res,
+    )
+    cached, _ = metadata_cache.get_by_path(
+        conn, "/share/ep.mkv", current_mtime=1000, current_inode=1
+    )
+    assert cached is not None
+    assert cached.metadata_status == "needs_review"
+    assert cached.media_type == "tv"  # 回退保留，不再是 None
+    assert cached.tmdb_id is None
+    assert cached.season_number == 6
+    assert cached.episode_number == 2
+
+
+def test_needs_review_movie_preserves_movie_media_type(conn):
+    """needs_review 但文件名是 movie → media_type 回退 'movie'."""
+    parse = _make_parse(media_type="movie", season=None, episode=None, year=1999)
+    res = _make_result(parse=parse, top=None)
+    metadata_cache.upsert_identification(
+        conn,
+        path="/share/m.mkv",
+        stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
+        identify_result=res,
+    )
+    cached, _ = metadata_cache.get_by_path(
+        conn, "/share/m.mkv", current_mtime=1000, current_inode=1
+    )
+    assert cached is not None
+    assert cached.metadata_status == "needs_review"
+    assert cached.media_type == "movie"
+    assert cached.tmdb_id is None
+
+
+def test_needs_review_unknown_media_type_stays_none(conn):
+    """needs_review 且文件名类型真未知 (unknown) → media_type 仍 None."""
+    parse = _make_parse(media_type="unknown", season=None, episode=None, title="???")
+    res = _make_result(parse=parse, top=None)
+    metadata_cache.upsert_identification(
+        conn,
+        path="/share/u.mkv",
+        stat={"inode": 1, "size_bytes": 100, "mtime": 1000},
+        identify_result=res,
+    )
+    cached, _ = metadata_cache.get_by_path(
+        conn, "/share/u.mkv", current_mtime=1000, current_inode=1
+    )
+    assert cached is not None
+    assert cached.metadata_status == "needs_review"
+    assert cached.media_type is None
+
+
 # ---------------- upsert_details patches non-None fields only ---------------- #
 
 

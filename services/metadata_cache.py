@@ -95,6 +95,22 @@ def _split_tmdb_ids(
     return None, None, None
 
 
+def _parse_media_type_to_db(parse_media_type: str | None) -> str | None:
+    """把文件名解析出的 media_type 映射到 DB 规范类型（needs_review 回退用）。
+
+    parse 产出 'movie' | 'episode' | 'unknown' | 'extra' | 'part'；DB 存
+    'movie' | 'tv' | 'extra' | 'part'。当 TMDB 没匹到候选（top=None →
+    needs_review）时，文件名里仍可能明确知道类型（S01E08 → episode），不应丢成
+    None — 否则 UI / 分类层看不到"这是个待识别的剧集/电影"。映射：
+      episode → 'tv'；movie → 'movie'；unknown / None → None（确实未知）。
+    """
+    if parse_media_type == "episode":
+        return "tv"
+    if parse_media_type == "movie":
+        return "movie"
+    return None
+
+
 def upsert_identification(
     conn: sqlite3.Connection,
     *,
@@ -135,7 +151,10 @@ def upsert_identification(
     if is_companion:
         media_type = parse.media_type  # 'extra' / 'part'（top 一定 None）
     else:
-        media_type = top.media_type if top else None
+        # top is None (needs_review) 时回退到文件名解析出的类型（episode→tv、
+        # movie→movie），保留已知类型而非丢成 None — 否则 UI/分类层看不到
+        # "这是个待识别的剧集/电影"。unknown / 真未知才留 None。
+        media_type = top.media_type if top else _parse_media_type_to_db(parse.media_type)
     title = top.title if top else parse.title  # 没 top 时退化到 guessit 解析的 title
     original_title = top.original_title if top else None
     year = top.year if top else parse.year

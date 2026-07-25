@@ -81,6 +81,11 @@ def compute_organize_plan(
     safe_title = sanitize_for_path(cached.title or "")
     if not safe_title:
         raise OrganizeNotApplicable("title is empty after sanitize")
+    # defense-in-depth：未识别 (needs_review/failed) 的 row 没绑 TMDB，不应走到
+    # plan 推断（dst NFO 会缺 tmdbid）。分类层应已把它归为 needs_identify；
+    # 此处兜底防任何漏网路径。getattr 兼容 duck-typed 测试 stub（无该字段→'ok'）。
+    if getattr(cached, "metadata_status", "ok") in ("needs_review", "failed"):
+        raise OrganizeNotApplicable("not identified: metadata_status=needs_review/failed")
     stem = os.path.splitext(src_basename)[0]
 
     if cached.media_type == "movie":

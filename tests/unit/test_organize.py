@@ -30,6 +30,7 @@ class _FakeCached:
     tmdb_id: str | None = None
     season_number: int | None = None
     episode_number: int | None = None
+    metadata_status: str = "ok"
 
 
 # ── sanitize_for_path ──────────────────────────────────────────
@@ -219,3 +220,18 @@ def test_plan_empty_title_after_sanitize_raises():
     cached = _FakeCached(title="   ", year=2024, media_type="movie")
     with pytest.raises(OrganizeNotApplicable, match="title is empty"):
         compute_organize_plan("/dl/X.mkv", cached, MOVIES, TV)
+
+
+def test_plan_needs_review_metadata_status_raises_not_identified():
+    """defense-in-depth：metadata_status='needs_review' (未绑 TMDB) 即使 media_type='tv'
+    + season/episode 齐全，compute_organize_plan 也应 raise — 没 tmdb 绑定不能 organize。"""
+    cached = _FakeCached(
+        title="Show",
+        year=2020,
+        media_type="tv",
+        season_number=1,
+        episode_number=1,
+        metadata_status="needs_review",
+    )
+    with pytest.raises(OrganizeNotApplicable, match="not identified"):
+        compute_organize_plan("/dl/x.mkv", cached, MOVIES, TV)
